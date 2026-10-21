@@ -1151,28 +1151,6 @@ fn open_tasks(conn: &Connection, user_id: i64) -> Result<Vec<(i64, String)>, Too
     Ok(rows)
 }
 
-/// `task_bulk_update`, run as `task_save` over each id, or `task_remove` when
-/// it deletes.
-pub fn bulk_update(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> Result<Value, ToolError> {
-    let mut args = loose::args(raw)?;
-    let ids = args.remove("task_ids").or_else(|| args.remove("ids")).map(loose::list).unwrap_or_default();
-    if args.remove("delete").as_ref().and_then(loose::boolean) == Some(true) {
-        if !super::registry(kind).contains(&"task_remove") {
-            return Err(ToolError::forbidden("a wake-up never deletes tasks; set state dropped instead"));
-        }
-        return remove(conn, ctx, kind, &json!({ "ids": ids }).to_string());
-    }
-    let nodes: Vec<Value> = ids
-        .into_iter()
-        .map(|id| {
-            let mut node = args.clone();
-            node.insert("id".into(), id);
-            Value::Object(node)
-        })
-        .collect();
-    save(conn, ctx, kind, &json!({ "tasks": nodes }).to_string())
-}
-
 const MAX_BRIEF_DESCRIPTION: usize = 2 * 1024;
 const MAX_REASON_CHARS: usize = 100;
 const MAX_CHILD_TITLE_CHARS: usize = 100;
@@ -1665,11 +1643,21 @@ mod tests {
     #[test]
     fn a_call_holds_at_most_a_hundred_nodes() {
         let (conn, tmp) = env("UTC");
-        let children: Vec<Value> = (0..120).map(|i| json!(format!("lesson {i}"))).collect();
-        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "big", "children": children}]}));
+        let unit = |u: usize| json!({"title": format!("unit {u}"), "children": (0..40).map(|i| format!("lesson {u}.{i}")).collect::<Vec<_>>()});
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [unit(1), unit(2), unit(3)]}));
         assert_eq!(out["ok"], false);
         assert_eq!(out["saved"].as_array().unwrap().len(), 100);
-        assert_eq!(out["refused"].as_array().unwrap().len(), 21);
+        assert_eq!(out["refused"].as_array().unwrap().len(), 23);
+    }
+
+    #[test]
+    fn a_node_holds_at_most_fifty_live_children() {
+        let (conn, tmp) = env("UTC");
+        let children: Vec<Value> = (0..55).map(|i| json!(format!("lesson {i}"))).collect();
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "big", "children": children}]}));
+        assert_eq!(out["saved"].as_array().unwrap().len(), 1 + crate::tasks::MAX_CHILDREN);
+        assert_eq!(out["refused"].as_array().unwrap().len(), 5);
+        assert!(out["refused"][0]["why"].as_str().unwrap().contains("at most 50 live children"), "{out}");
     }
 
     #[test]
@@ -1760,7 +1748,7 @@ mod tests {
         let a = saved(&talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "a"}]})), "0");
         let e = call(&conn, &tmp, SessionKind::Trigger, "task_remove", &json!({"ids": [a]}).to_string()).unwrap_err();
         assert_eq!(e.kind, "forbidden");
-        call(&conn, &tmp, SessionKind::Trigger, "task_bulk_update", &json!({"task_ids": [a], "state": "dropped"}).to_string()).unwrap();
+        call(&conn, &tmp, SessionKind::Trigger, "task_save", &json!({"tasks": [{"id": a, "state": "dropped"}]}).to_string()).unwrap();
         assert_eq!(task(&conn, a).state, "dropped");
     }
 

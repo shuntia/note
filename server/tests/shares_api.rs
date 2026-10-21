@@ -389,15 +389,15 @@ async fn nothing_outside_the_scope_reaches_the_prompt_the_tools_or_the_view() {
         assert!(blocks > 0, "the hidden task has a block on the plan");
     }
 
-    let read_hidden = format!(r#"{{"task_id":{hidden_id}}}"#);
+    let read_hidden = format!(r#"{{"id":{hidden_id}}}"#);
     let plan_tomorrow = format!(r#"{{"date":"{tomorrow}"}}"#);
     let probes: Vec<(&str, &str)> = vec![
-        ("task_list", "{}"),
-        ("task_read", &read_hidden),
-        ("task_search", r#"{"query":"therapy"}"#),
-        ("plan_list", &plan_tomorrow),
-        ("calendar_list", "{}"),
-        ("goal_list", "{}"),
+        ("task_find", "{}"),
+        ("task_find", &read_hidden),
+        ("task_find", r#"{"query":"therapy"}"#),
+        ("day_find", &plan_tomorrow),
+        ("calendar_find", "{}"),
+        ("goal_find", "{}"),
     ];
     let llm = scripted(vec![calls(&probes), say("done looking"), calls(&probes), say("done again")]);
     let mut state = state.clone();
@@ -519,8 +519,8 @@ async fn a_goal_title_travels_only_when_goals_are_shared() {
     let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
     let (_, goal) = owner(&app, &cookie, Method::POST, "/api/goals", Some(r#"{"title":"GOAL-TITLE-SECRET"}"#)).await;
     let (_, task) = owner(&app, &cookie, Method::POST, "/api/tasks", Some(&format!(r#"{{"title":"lab report","category":"school","goal_id":{}}}"#, goal["id"]))).await;
-    let read_task = format!(r#"{{"task_id":{}}}"#, task["id"]);
-    let probes: Vec<(&str, &str)> = vec![("task_list", "{}"), ("task_read", &read_task), ("task_search", r#"{"query":"lab"}"#)];
+    let read_task = format!(r#"{{"id":{}}}"#, task["id"]);
+    let probes: Vec<(&str, &str)> = vec![("task_find", "{}"), ("task_find", &read_task), ("task_find", r#"{"query":"lab"}"#)];
     for goals in [false, true] {
         let llm = scripted(vec![calls(&probes), say("done looking")]);
         let mut state = state.clone();

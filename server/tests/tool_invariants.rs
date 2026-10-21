@@ -54,32 +54,47 @@ fn apply(conn: &rusqlite::Connection, ctx: &ToolCtx, op: &Op, mem_ids: &mut Vec<
         if ids.is_empty() { "00000000-0000-4000-8000-000000000000".into() }
         else { ids[i % ids.len()].clone() }
     };
+    let shifted = |e: i64, m: i64| -> String {
+        let wall: String = conn
+            .query_row("SELECT wall_time FROM events WHERE id = ?1", [e], |r| r.get(0))
+            .unwrap_or_else(|_| "12:00".into());
+        let (h, mm) = wall.split_once(':').unwrap();
+        let t = (h.parse::<i64>().unwrap() * 60 + mm.parse::<i64>().unwrap() + m).clamp(0, 24 * 60 - 1);
+        format!("{:02}:{:02}", t / 60, t % 60)
+    };
+    let span = |s: &str, t: &str| -> i64 {
+        let m = |w: &str| {
+            let (h, mm) = w.split_once(':').unwrap();
+            h.parse::<i64>().unwrap() * 60 + mm.parse::<i64>().unwrap()
+        };
+        m(t) - m(s)
+    };
     let (name, raw) = match op {
-        Op::TaskCreate(t) => ("task_create", format!(r#"{{"title":"{t}"}}"#)),
-        Op::TaskSetState(id, s) => ("task_update", format!(r#"{{"task_id":{id},"state":"{s}"}}"#)),
-        Op::MemAdd(s, b) => ("memory_write",
-            format!(r#"{{"op":"add","category":"semantic","summary":"{s}","body":"{b}"}}"#)),
-        Op::MemUpdate(i, s) => ("memory_write",
-            format!(r#"{{"op":"update","id":"{}","summary":"{s}","body":"{s}"}}"#, pick(mem_ids, *i))),
-        Op::MemSupersede(i, s) => ("memory_write",
-            format!(r#"{{"op":"supersede","id":"{}","summary":"{s}","body":"{s}"}}"#, pick(mem_ids, *i))),
-        Op::MemQuery(q) => ("memory_query", format!(r#"{{"query":"{q}"}}"#)),
-        Op::Slide(e, m) => ("schedule_move", format!(r#"{{"event_id":{e},"minutes":{m}}}"#)),
-        Op::Snooze(e, m) => ("schedule_move", format!(r#"{{"event_id":{e},"minutes":{m},"snooze":true}}"#)),
-        Op::Drop(e) => ("schedule_drop", format!(r#"{{"event_id":{e}}}"#)),
+        Op::TaskCreate(t) => ("task_save", format!(r#"{{"tasks":[{{"title":"{t}"}}]}}"#)),
+        Op::TaskSetState(id, s) => ("task_save", format!(r#"{{"tasks":[{{"id":{id},"state":"{s}"}}]}}"#)),
+        Op::MemAdd(s, b) => ("memory_save",
+            format!(r#"{{"items":[{{"kind":"semantic","title":"{s}","body":"{b}"}}]}}"#)),
+        Op::MemUpdate(i, s) => ("memory_save",
+            format!(r#"{{"items":[{{"id":"{}","title":"{s}","body":"{s}"}}]}}"#, pick(mem_ids, *i))),
+        Op::MemSupersede(i, s) => ("memory_save",
+            format!(r#"{{"items":[{{"supersedes":"{}","title":"{s}","body":"{s}"}}]}}"#, pick(mem_ids, *i))),
+        Op::MemQuery(q) => ("memory_find", format!(r#"{{"query":"{q}"}}"#)),
+        Op::Slide(e, m) => ("day_save", format!(r#"{{"date":"2026-08-31","items":[{{"id":"e{e}","at":"{}"}}]}}"#, shifted(*e, *m))),
+        Op::Snooze(e, m) => ("day_save", format!(r#"{{"date":"2026-08-31","items":[{{"id":"e{e}","snooze_min":{m}}}]}}"#)),
+        Op::Drop(e) => ("day_remove", format!(r#"{{"date":"2026-08-31","ids":["e{e}"]}}"#)),
         Op::CtxAppend(t) => ("context_edit", format!(r#"{{"append":"{t}"}}"#)),
         Op::CtxReplace(f, r) => ("context_edit", format!(r#"{{"find":"{f}","replace":"{r}"}}"#)),
-        Op::TaskSplit(id) => ("task_split", format!(
-            r#"{{"task_id":{id},"steps":[{{"title":"a","duration_min":5}},{{"title":"b","duration_min":10}}]}}"#)),
-        Op::TaskDuration(id, d) => ("task_update", format!(r#"{{"task_id":{id},"duration_min":{d}}}"#)),
-        Op::TaskSetNow(id, f) => ("task_update", format!(r#"{{"task_id":{id},"is_now":{f}}}"#)),
-        Op::Reshape(e, s, t) => ("schedule_move",
-            format!(r#"{{"event_id":{e},"start":"{s}","end":"{t}"}}"#)),
-        Op::Insert(d, t) => ("schedule_insert",
-            format!(r#"{{"date":"{d}","kind":"extra","time":"{t}","flexibility":"slide","slide_window_min":15,"channel":"push"}}"#)),
+        Op::TaskSplit(id) => ("task_save", format!(
+            r#"{{"tasks":[{{"id":{id},"children":[{{"title":"a","minutes":5}},{{"title":"b","minutes":10}}]}}]}}"#)),
+        Op::TaskDuration(id, d) => ("task_save", format!(r#"{{"tasks":[{{"id":{id},"minutes":{d}}}]}}"#)),
+        Op::TaskSetNow(id, f) => ("task_save", format!(r#"{{"tasks":[{{"id":{id},"now":{f}}}]}}"#)),
+        Op::Reshape(e, s, t) => ("day_save",
+            format!(r#"{{"date":"2026-08-31","items":[{{"id":"e{e}","at":"{s}","minutes":{}}}]}}"#, span(s, t))),
+        Op::Insert(d, t) => ("day_save",
+            format!(r#"{{"date":"{d}","items":[{{"routine":"extra","at":"{t}","flexibility":"slide"}}]}}"#)),
     };
     if let Ok(out) = dispatch(conn, ctx, SessionKind::Nightly, name, &raw) {
-        if name == "memory_write" {
+        if name == "memory_save" {
             if let Some(id) = out["saved"][0]["id"].as_str() {
                 mem_ids.push(id.to_string());
             }
@@ -193,7 +208,7 @@ fn assert_invariants(conn: &rusqlite::Connection, data_dir: &std::path::Path) {
 
     // 5. Memory: index rows and files agree; ids unique; supersede chains resolve.
     let mut stmt = conn
-        .prepare("SELECT id, archived, path FROM memory_index WHERE user='aki'")
+        .prepare("SELECT id, archived, path FROM memory_index WHERE user='aitest'")
         .unwrap();
     let index: Vec<(String, i64, String)> = stmt
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
@@ -209,9 +224,9 @@ fn assert_invariants(conn: &rusqlite::Connection, data_dir: &std::path::Path) {
         assert_eq!(in_archive, *archived == 1, "archived flag disagrees with location: {path}");
     }
     for (id, _, _) in &index {
-        let f = note_server::memory::read(data_dir, "aki", id).unwrap().unwrap();
+        let f = note_server::memory::read(data_dir, "aitest", id).unwrap().unwrap();
         if let Some(target) = f.supersedes {
-            let t = note_server::memory::read(data_dir, "aki", &target).unwrap()
+            let t = note_server::memory::read(data_dir, "aitest", &target).unwrap()
                 .unwrap_or_else(|| panic!("supersede target {target} vanished"));
             assert!(t.archived, "superseded fact {target} was not archived");
         }
@@ -225,7 +240,7 @@ proptest! {
     fn interleaved_tool_calls_preserve_invariants(ops in proptest::collection::vec(arb_op(), 1..25)) {
         let conn = note_server::db::open_memory().unwrap();
         conn.execute(
-            "INSERT INTO users (username, pass_hash, role) VALUES ('aki', 'x', 'member')",
+            "INSERT INTO users (username, pass_hash, role) VALUES ('aitest', 'x', 'member')",
             [],
         )
         .unwrap();
@@ -258,7 +273,7 @@ proptest! {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = ToolCtx {
             config_dir: tmp.path(), data_dir: tmp.path(),
-            user_id: 1, username: "aki", vectors: PreparedVectors::default(),
+            user_id: 1, username: "aitest", vectors: PreparedVectors::default(),
             task_scope: None,
             inbox_source: None,
             memory_source: None,

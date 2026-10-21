@@ -881,12 +881,12 @@ mod tests {
             user_id: 1,
             username: "aki".into(),
         };
-        let first = runner.run("task_create", r#"{"title":"essay"}"#, ("c1", "2:0"));
+        let first = runner.run("task_save", r#"{"tasks":[{"title":"essay"}]}"#, ("c1", "2:0"));
         assert!(!first.1, "{}", first.0);
-        assert_eq!(runner.run("task_create", r#"{"title":"essay"}"#, ("c1", "2:0")), first);
+        assert_eq!(runner.run("task_save", r#"{"tasks":[{"title":"essay"}]}"#, ("c1", "2:0")), first);
         let tasks: i64 = crate::db_guard(&db).query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0)).unwrap();
         assert_eq!(tasks, 1);
-        assert!(!runner.is_network("task_create"));
+        assert!(!runner.is_network("task_save"));
         assert!(runner.is_network("web_search"));
     }
 

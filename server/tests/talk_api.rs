@@ -13,8 +13,8 @@ async fn talk_runs_a_session_and_returns_the_reply() {
             text: String::new(),
             tool_calls: vec![ToolCall {
                 id: "c1".into(),
-                name: "task_create".into(),
-                args: r#"{"title":"call mom"}"#.into(),
+                name: "task_save".into(),
+                args: r#"{"tasks":[{"title":"call mom"}]}"#.into(),
             }],
         },
         ChatResponse { text: "done — added call mom".into(), tool_calls: vec![] },
@@ -310,8 +310,8 @@ async fn talk_persists_the_exchange_and_surfaces_tool_steps() {
             text: String::new(),
             tool_calls: vec![ToolCall {
                 id: "c1".into(),
-                name: "task_create".into(),
-                args: r#"{"title":"call mom"}"#.into(),
+                name: "task_save".into(),
+                args: r#"{"tasks":[{"title":"call mom"}]}"#.into(),
             }],
         },
         ChatResponse { text: "done — added call mom".into(), tool_calls: vec![] },
@@ -335,8 +335,8 @@ async fn talk_persists_the_exchange_and_surfaces_tool_steps() {
     assert_eq!(v["reply"], "done — added call mom");
     let steps = v["steps"].as_array().unwrap();
     assert_eq!(steps.len(), 1);
-    assert_eq!(steps[0]["name"], "task_create");
-    assert_eq!(steps[0]["args"], r#"{"title":"call mom"}"#);
+    assert_eq!(steps[0]["name"], "task_save");
+    assert_eq!(steps[0]["args"], r#"{"tasks":[{"title":"call mom"}]}"#);
     assert!(steps[0]["result"].as_str().unwrap().contains("saved"));
     assert_eq!(steps[0]["is_error"], false);
 
@@ -364,8 +364,8 @@ async fn talk_persists_the_exchange_and_surfaces_tool_steps() {
     assert!(rows[0].2.is_none());
     assert_eq!(rows[1].0, "tool");
     assert!(rows[1].1.contains("saved"));
-    assert_eq!(rows[1].2.as_deref(), Some("task_create"));
-    assert_eq!(rows[1].3.as_deref(), Some(r#"{"title":"call mom"}"#));
+    assert_eq!(rows[1].2.as_deref(), Some("task_save"));
+    assert_eq!(rows[1].3.as_deref(), Some(r#"{"tasks":[{"title":"call mom"}]}"#));
     assert!(!rows[1].4);
     assert_eq!(rows[2].0, "assistant");
     assert_eq!(rows[2].1, "done — added call mom");
@@ -379,8 +379,8 @@ async fn multiple_tool_calls_keep_call_order_in_steps_and_rows() {
             tool_calls: vec![
                 ToolCall {
                     id: "c1".into(),
-                    name: "task_create".into(),
-                    args: r#"{"title":"call mom"}"#.into(),
+                    name: "task_save".into(),
+                    args: r#"{"tasks":[{"title":"call mom"}]}"#.into(),
                 },
                 ToolCall { id: "c2".into(), name: "nightly_notes_write".into(), args: "{}".into() },
             ],
@@ -404,7 +404,7 @@ async fn multiple_tool_calls_keep_call_order_in_steps_and_rows() {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let steps = v["steps"].as_array().unwrap();
     assert_eq!(steps.len(), 2);
-    assert_eq!(steps[0]["name"], "task_create");
+    assert_eq!(steps[0]["name"], "task_save");
     assert_eq!(steps[0]["is_error"], false);
     // nightly_notes_write is forbidden on the talk surface, so the error reaches the wire
     assert_eq!(steps[1]["name"], "nightly_notes_write");
@@ -425,7 +425,7 @@ async fn multiple_tool_calls_keep_call_order_in_steps_and_rows() {
         rows,
         vec![
             ("user", None),
-            ("tool", Some("task_create")),
+            ("tool", Some("task_save")),
             ("tool", Some("nightly_notes_write")),
             ("assistant", None),
         ]
@@ -721,8 +721,8 @@ async fn talk_returns_timing_and_the_transcript_keeps_the_trace() {
                 text: String::new(),
                 tool_calls: vec![ToolCall {
                     id: "c1".into(),
-                    name: "task_create".into(),
-                    args: r#"{"title":"call mom"}"#.into(),
+                    name: "task_save".into(),
+                    args: r#"{"tasks":[{"title":"call mom"}]}"#.into(),
                 }],
             },
             ChatResponse { text: "done".into(), tool_calls: vec![] },
@@ -957,7 +957,7 @@ impl note_server::providers::LLMProvider for LoopingLLM {
             text: String::new(),
             tool_calls: vec![ToolCall {
                 id: "c".into(),
-                name: "memory_query".into(),
+                name: "memory_find".into(),
                 args: r#"{"query":"x"}"#.into(),
             }],
         })

@@ -705,9 +705,6 @@ mod tests {
         let miss = talk(&conn, &tmp, "task_find", json!({"query": "pottery"}));
         assert_eq!(miss["total"], 0);
         assert!(miss["warnings"][0].as_str().unwrap().contains("nothing matched"));
-        let out = talk(&conn, &tmp, "task_search", json!({"query": "pencils"}));
-        assert_eq!(titles(&out), ["Shading pencils"]);
-        assert!(out["warnings"][0].as_str().unwrap().contains("task_find"));
     }
 
     #[test]
@@ -736,8 +733,7 @@ mod tests {
         assert_eq!(miss["total"], 0);
         let by_title = talk(&conn, &tmp, "task_find", json!({"id": "Email Landlord"}));
         assert_eq!(by_title["item"]["id"], id);
-        let old = talk(&conn, &tmp, "task_read", json!({"task_id": id}));
-        assert_eq!(old["item"]["id"], id);
+        assert_eq!(talk(&conn, &tmp, "task_find", json!({"task_id": id}))["item"]["id"], id);
     }
 
     #[test]
@@ -765,7 +761,7 @@ mod tests {
         talk(&conn, &tmp, "task_save", json!({"tasks": [{"id": plain, "state": "done"}]}));
         assert_eq!(talk(&conn, &tmp, "task_find", json!({"state": "complete"}))["items"][0]["id"], plain);
         assert_eq!(talk(&conn, &tmp, "task_find", json!({"state": "any"}))["total"], 5);
-        assert_eq!(talk(&conn, &tmp, "task_list", json!({"is_now": false}))["total"], 4);
+        assert_eq!(talk(&conn, &tmp, "task_find", json!({"is_now": false}))["total"], 4);
     }
 
     #[test]

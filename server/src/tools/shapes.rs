@@ -249,11 +249,6 @@ pub fn task_brief() -> Value {
     })
 }
 
-/// Any object; an old name's arguments are read by the tool that replaced it.
-pub fn any() -> Value {
-    json!({ "type": "object" })
-}
-
 pub fn memory_find() -> Value {
     json!({
         "type": "object",

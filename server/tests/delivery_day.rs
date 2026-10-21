@@ -153,7 +153,7 @@ fn delivery_reaches_the_user_through_the_ladder() {
         assert_eq!((wall.as_str(), flex.as_str(), origin.as_str()), ("18:00", "drop", "agent"));
     }
 
-    // --- the evening the user set aside holds the open task, laid as plan_tasks lays it.
+    // --- the evening the user set aside holds the open task, laid as day_save lays it.
     {
         let conn = db.lock().unwrap();
         conn.execute(

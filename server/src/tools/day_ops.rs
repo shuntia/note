@@ -1741,183 +1741,6 @@ fn remove_event(day: &mut Day, r: &Ref, e: &EventRow) -> Result<(), ToolError> {
     Ok(())
 }
 
-// --- the old names ---
-
-fn old(raw: &str) -> Result<Map<String, Value>, ToolError> {
-    loose::args(raw)
-}
-
-fn moved(a: &mut Map<String, Value>, from: &str, to: &mut Map<String, Value>, key: &str) {
-    if let Some(v) = a.remove(from).filter(|v| !v.is_null()) {
-        to.insert(key.into(), v);
-    }
-}
-
-fn rest_into(a: Map<String, Value>, to: &mut Map<String, Value>) {
-    for (k, v) in a {
-        to.entry(k).or_insert(v);
-    }
-}
-
-fn task_ref(v: &Value) -> Value {
-    match v {
-        Value::Number(n) => format!("t{n}").into(),
-        other => other.clone(),
-    }
-}
-
-/// `plan_tasks`: consecutive blocks from `start`, as one item.
-pub fn plan_tasks(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> Result<Value, ToolError> {
-    let mut a = old(raw)?;
-    let mut top = Map::new();
-    moved(&mut a, "date", &mut top, "date");
-    moved(&mut a, "tz", &mut top, "tz");
-    let mut item = Map::new();
-    moved(&mut a, "task_ids", &mut item, "task");
-    moved(&mut a, "start", &mut item, "at");
-    a.remove("gap_min");
-    a.remove("end");
-    rest_into(a, &mut item);
-    top.insert("items".into(), json!([item]));
-    save(conn, ctx, kind, &Value::Object(top).to_string())
-}
-
-pub fn plan_carry(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> Result<Value, ToolError> {
-    let mut a = old(raw)?;
-    a.insert("carry".into(), true.into());
-    save(conn, ctx, kind, &Value::Object(a).to_string())
-}
-
-pub fn order_set(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> Result<Value, ToolError> {
-    let mut a = old(raw)?;
-    let ids = a.remove("task_ids").map(loose::list).unwrap_or_default();
-    let items: Vec<Value> = ids.into_iter().map(|t| json!({ "task": t })).collect();
-    let mut top = Map::new();
-    top.insert("replace".into(), true.into());
-    top.insert("items".into(), items.into());
-    rest_into(a, &mut top);
-    save(conn, ctx, kind, &Value::Object(top).to_string())
-}
-
-pub fn order_move(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> Result<Value, ToolError> {
-    let mut a = old(raw)?;
-    let mut item = Map::new();
-    moved(&mut a, "task_id", &mut item, "task");
-    match a.remove("before_task_id").filter(|v| !v.is_null()) {
-        Some(b) => item.insert("before".into(), task_ref(&b)),
-        None => item.insert("before".into(), "end".into()),
-    };
-    rest_into(a, &mut item);
-    save(conn, ctx, kind, &json!({ "items": [item] }).to_string())
-}
-
-pub fn order_drop(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> Result<Value, ToolError> {
-    let mut a = old(raw)?;
-    let id = a.remove("task_id").map_or(Value::Null, |v| task_ref(&v));
-    let mut top = Map::new();
-    top.insert("ids".into(), json!([id]));
-    rest_into(a, &mut top);
-    remove(conn, ctx, kind, &Value::Object(top).to_string())
-}
-
-fn event_ref(v: &Value) -> Value {
-    match v {
-        Value::Number(n) => format!("e{n}").into(),
-        other => other.clone(),
-    }
-}
-
-pub fn schedule_move(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> Result<Value, ToolError> {
-    let mut a = old(raw)?;
-    let id = a.remove("event_id").unwrap_or(Value::Null);
-    let mut item = Map::new();
-    item.insert("id".into(), event_ref(&id));
-    let snooze = a.remove("snooze").as_ref().and_then(loose::boolean).unwrap_or(false);
-    let shift = a.remove("minutes").as_ref().and_then(loose::integer);
-    match shift {
-        Some(m) if snooze => {
-            item.insert("snooze_min".into(), m.into());
-        }
-        Some(m) => {
-            let at = loose::id(&id).and_then(|n| event(conn, ctx.user_id, n).ok().flatten()).map(|e| crate::templates::wall_add(&e.wall, m));
-            if let Some(at) = at {
-                item.insert("at".into(), at.into());
-            }
-        }
-        None => {
-            let start = a.remove("start").and_then(|v| loose::text(&v));
-            let end = a.remove("end").and_then(|v| loose::text(&v));
-            let current = loose::id(&id).and_then(|n| event(conn, ctx.user_id, n).ok().flatten());
-            let s = start.or_else(|| current.as_ref().map(|e| e.wall.clone()));
-            if let Some(s) = &s {
-                item.insert("at".into(), s.clone().into());
-            }
-            let e = end.or_else(|| current.as_ref().and_then(|e| e.end.clone()));
-            if let (Some(s), Some(e)) = (s, e) {
-                let len = minutes_of(&e) - minutes_of(&s);
-                if len > 0 {
-                    item.insert("minutes".into(), len.into());
-                }
-            }
-        }
-    }
-    rest_into(a, &mut item);
-    save(conn, ctx, kind, &json!({ "items": [item] }).to_string())
-}
-
-pub fn schedule_drop(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> Result<Value, ToolError> {
-    let mut a = old(raw)?;
-    let id = a.remove("event_id").map_or(Value::Null, |v| event_ref(&v));
-    a.remove("moved_to_event_id");
-    let mut top = Map::new();
-    top.insert("ids".into(), json!([id]));
-    rest_into(a, &mut top);
-    remove(conn, ctx, kind, &Value::Object(top).to_string())
-}
-
-pub fn schedule_insert(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> Result<Value, ToolError> {
-    let mut a = old(raw)?;
-    let mut top = Map::new();
-    moved(&mut a, "date", &mut top, "date");
-    moved(&mut a, "tz", &mut top, "tz");
-    let mut item = Map::new();
-    moved(&mut a, "kind", &mut item, "routine");
-    moved(&mut a, "time", &mut item, "at");
-    a.remove("channel");
-    rest_into(a, &mut item);
-    top.insert("items".into(), json!([item]));
-    save(conn, ctx, kind, &Value::Object(top).to_string())
-}
-
-pub fn trigger_set(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> Result<Value, ToolError> {
-    let mut a = old(raw)?;
-    let mut top = Map::new();
-    moved(&mut a, "date", &mut top, "date");
-    moved(&mut a, "tz", &mut top, "tz");
-    let mut item = Map::new();
-    moved(&mut a, "prompt", &mut item, "wake");
-    moved(&mut a, "task_id", &mut item, "task");
-    moved(&mut a, "event_id", &mut item, "event");
-    if let Some(id) = a.remove("replace").filter(|v| !v.is_null()) {
-        item.insert("id".into(), event_ref(&id));
-    }
-    a.remove("also");
-    rest_into(a, &mut item);
-    top.insert("items".into(), json!([item]));
-    save(conn, ctx, kind, &Value::Object(top).to_string())
-}
-
-pub fn trigger_budget(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> Result<Value, ToolError> {
-    let mut a = old(raw)?;
-    let mut top = Map::new();
-    moved(&mut a, "date", &mut top, "date");
-    let n = a.remove("extra").unwrap_or(Value::Null);
-    let reason = a.remove("reason").unwrap_or(Value::Null);
-    top.insert("extra_wakes".into(), json!({ "n": n, "reason": reason }));
-    rest_into(a, &mut top);
-    save(conn, ctx, kind, &Value::Object(top).to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use crate::tools::{dispatch, PreparedVectors, SessionKind, ToolCtx};
@@ -1997,10 +1820,9 @@ mod tests {
         let timed = talk(&conn, &tmp, "day_save", json!({ "items": [{ "task": "Draft", "at": "15:00" }] }));
         assert_eq!(timed["saved"][0]["op"], "updated", "{timed}");
         assert_eq!(list(&conn), [(draft, Some("15:00".to_string()))]);
-        let old = call(&conn, &tmp, SessionKind::Trigger, "plan_tasks", json!({ "date": today().to_string(), "task_ids": [draft], "start": "16:00" }));
-        assert_eq!(old["ok"], true, "{old}");
-        assert_eq!(list(&conn), [(draft, Some("16:00".to_string()))], "the old name moves the block it already has");
-        assert!(old["warnings"].to_string().contains("plan_tasks is now day_save"), "{old}");
+        let moved = call(&conn, &tmp, SessionKind::Trigger, "day_save", json!({ "date": today().to_string(), "items": [{ "task": draft, "at": "16:00" }] }));
+        assert_eq!(moved["ok"], true, "{moved}");
+        assert_eq!(list(&conn), [(draft, Some("16:00".to_string()))], "a block already laid is moved");
     }
 
     #[test]
@@ -2040,14 +1862,14 @@ mod tests {
         assert_eq!(block, "dropped");
         let kept: i64 = conn.query_row("SELECT COUNT(*) FROM day_items WHERE task_id = ?1", [d], |r| r.get(0)).unwrap();
         assert_eq!(kept, 1, "a finished item stays on its day");
-        let old = talk(&conn, &tmp, "order_set", json!({ "task_ids": { "item": [a, b] } }));
-        assert_eq!(old["ok"], true, "{old}");
+        let wrapped = talk(&conn, &tmp, "day_save", json!({ "replace": true, "items": { "item": [a, b] } }));
+        assert_eq!(wrapped["ok"], true, "{wrapped}");
         assert_eq!(ids(&conn), [a, b], "a list wrapped in item is read as the list");
-        talk(&conn, &tmp, "order_move", json!({ "task_id": c, "before_task_id": a }));
+        talk(&conn, &tmp, "day_save", json!({ "items": [{ "task": c, "before": a }] }));
         assert_eq!(ids(&conn), [c, a, b]);
-        talk(&conn, &tmp, "order_move", json!({ "task_id": c }));
+        talk(&conn, &tmp, "day_save", json!({ "items": [{ "task": c, "before": "end" }] }));
         assert_eq!(ids(&conn), [a, b, c]);
-        talk(&conn, &tmp, "order_drop", json!({ "task_id": a }));
+        talk(&conn, &tmp, "day_remove", json!({ "ids": [a] }));
         assert_eq!(ids(&conn), [b, c]);
     }
 
@@ -2087,8 +1909,8 @@ mod tests {
         let wakes: Vec<&Value> = day["items"].as_array().unwrap().iter().filter(|i| i["kind"] == "wake").collect();
         assert_eq!(wakes.len(), 2);
         assert_eq!(wakes[0]["ring"], true);
-        let old = talk(&conn, &tmp, "trigger_set", json!({ "at": "+200min", "prompt": "did they answer?", "cancel_on": "reply" }));
-        assert_eq!(old["saved"][0]["cancel_if"], "replied", "{old}");
+        let reply = talk(&conn, &tmp, "day_save", json!({ "items": [{ "wake": "did they answer?", "at": "+200min", "cancel_on": "reply" }] }));
+        assert_eq!(reply["saved"][0]["cancel_if"], "replied", "{reply}");
     }
 
     #[test]
@@ -2106,8 +1928,6 @@ mod tests {
         assert_eq!(out["ok"], true, "{out}");
         assert_eq!(out["adjusted"][0]["to"], 4, "a day reaches at most twice its allowance");
         assert_eq!(out["saved"][0]["allowance"], 8);
-        let old = talk(&conn, &tmp, "trigger_budget", json!({ "extra": 1, "reason": "again" }));
-        assert_eq!(old["ok"], false, "{old}");
     }
 
     #[test]
@@ -2131,11 +1951,11 @@ mod tests {
         assert_eq!(moved["adjusted"][0]["to"], "15:30", "{moved}");
         let woken = call(&conn, &tmp, SessionKind::Trigger, "day_save", json!({ "items": [{ "routine": "walk", "at": "16:00" }] }));
         assert_eq!(woken["ignored"][0]["field"], "routine", "{woken}");
-        let snoozed = talk(&conn, &tmp, "schedule_move", json!({ "event_id": id[1..].parse::<i64>().unwrap(), "minutes": 10, "snooze": true }));
+        let snoozed = talk(&conn, &tmp, "day_save", json!({ "items": [{ "id": id, "snooze_min": 10 }] }));
         assert_eq!(snoozed["ok"], true, "{snoozed}");
         let again = talk(&conn, &tmp, "day_save", json!({ "items": [{ "routine": "Stretch", "at": "15:30", "flexibility": "drop" }] }));
         assert_eq!((again["saved"][0]["id"].as_str(), again["saved"][0]["op"].as_str()), (Some(id.as_str()), Some("updated")), "named again, it is changed, not doubled: {again}");
-        let fixed = talk(&conn, &tmp, "schedule_insert", json!({ "date": today().to_string(), "kind": "meds", "time": "17:00", "flexibility": "fixed", "channel": "push" }));
+        let fixed = talk(&conn, &tmp, "day_save", json!({ "date": today().to_string(), "items": [{ "routine": "meds", "at": "17:00", "flexibility": "fixed" }] }));
         let meds = fixed["saved"][0]["id"].clone();
         let removed = talk(&conn, &tmp, "day_remove", json!({ "ids": [meds] }));
         assert_eq!(removed["ok"], true, "a routine Note added comes off whatever its flexibility: {removed}");
@@ -2182,8 +2002,6 @@ mod tests {
         let visitor = ToolCtx { share: Some(share), share_thread: Some(1), ..ctx(&tmp) };
         let seen = dispatch(&conn, &visitor, SessionKind::Share, "day_find", "{}").unwrap();
         assert!(seen["items"].as_array().unwrap().iter().all(|i| i["kind"] != "wake"), "{seen}");
-        let old = talk(&conn, &tmp, "plan_list", json!({}));
-        assert_eq!(old["total"], day["total"]);
     }
 
     #[test]
@@ -2219,11 +2037,11 @@ mod tests {
     }
 
     #[test]
-    fn carry_moves_the_rest_to_tomorrow_and_the_old_name_does_the_same() {
+    fn carry_moves_the_rest_to_tomorrow() {
         let (conn, tmp) = env();
         let (a, b) = (task(&conn, &tmp, json!({ "title": "a" })), task(&conn, &tmp, json!({ "title": "b" })));
         talk(&conn, &tmp, "day_save", json!({ "items": [a, { "task": b, "at": "15:00" }] }));
-        let out = talk(&conn, &tmp, "plan_carry", json!({}));
+        let out = talk(&conn, &tmp, "day_save", json!({ "carry": true }));
         assert_eq!(out["saved"][0]["op"], "carried", "{out}");
         let tomorrow = crate::order::list(&conn, 1, today().tomorrow().unwrap()).unwrap();
         assert_eq!(tomorrow.iter().map(|i| (i.task_id, i.at.clone())).collect::<Vec<_>>(), [(a, None), (b, Some("15:00".into()))]);

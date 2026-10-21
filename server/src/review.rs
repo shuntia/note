@@ -620,8 +620,8 @@ mod tests {
             tool_calls: vec![
                 call(
                     "1",
-                    "memory_write",
-                    r#"{"op":"add","category":"episodic","summary":"Week of 2026-09-14: the essay landed","body":"one long draft and a dropped recital"}"#,
+                    "memory_save",
+                    r#"{"items":[{"kind":"episodic","title":"Week of 2026-09-14: the essay landed","body":"one long draft and a dropped recital"}]}"#,
                 ),
                 call("2", "review_write", r#"{"text":"Colleges: essay sent; mornings hold the deep work."}"#),
             ],

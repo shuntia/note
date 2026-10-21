@@ -603,12 +603,11 @@ mod tests {
         let out = talk(&conn, &tmp, "goal_save", json!({"goals": [{"title": long}]}));
         let g = crate::goals::get(&conn, 1, saved(&out, "0")).unwrap().unwrap();
         assert!(g.title.len() <= 200 && g.description.starts_with("goal goal"));
-        let out = talk(&conn, &tmp, "goal_create", json!({"title": "old shape", "due_at": "2099-01-01"}));
-        assert!(out["warnings"][0].as_str().unwrap().contains("goal_save"));
+        let out = talk(&conn, &tmp, "goal_save", json!({"goals": {"title": "bare object", "due_at": "2099-01-01"}}));
         let id = saved(&out, "0");
-        talk(&conn, &tmp, "goal_update", json!({"goal_id": id, "state": "done"}));
+        talk(&conn, &tmp, "goal_save", json!({"goals": [{"goal_id": id, "state": "complete"}]}));
         assert_eq!(crate::goals::get(&conn, 1, id).unwrap().unwrap().state, "done");
-        assert_eq!(talk(&conn, &tmp, "goal_list", json!({"state": "done"}))["total"], 1);
+        assert_eq!(talk(&conn, &tmp, "goal_find", json!({"state": "done"}))["total"], 1);
     }
 
     #[test]

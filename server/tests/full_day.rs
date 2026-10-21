@@ -41,7 +41,7 @@ fn a_full_simulated_day() {
     write(tmp.path(), "defaults/prompts/persona.md", "you are note");
     write(tmp.path(), "defaults/prompts/planning.md", "plan the day, then debrief");
     let conn = note_server::db::open_memory().unwrap();
-    conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('aki', 'x', 'member')", [])
+    conn.execute("INSERT INTO users (username, pass_hash, role) VALUES ('aitest', 'x', 'member')", [])
         .unwrap();
     let db = Mutex::new(conn);
 
@@ -52,9 +52,9 @@ fn a_full_simulated_day() {
             text: String::new(),
             tool_calls: vec![ToolCall {
                 id: "n1".into(),
-                name: "schedule_insert".into(),
+                name: "day_save".into(),
                 args: format!(
-                    r#"{{"date":"{day}","kind":"nudge","time":"16:00","flexibility":"drop","channel":"push"}}"#
+                    r#"{{"date":"{day}","items":[{{"routine":"nudge","at":"16:00","flexibility":"drop"}}]}}"#
                 ),
             }],
         },
@@ -82,7 +82,7 @@ fn a_full_simulated_day() {
             conversation_id: None,
         };
         assert_eq!(note_server::nightly::due(&db.lock().unwrap(), tmp.path(), now).unwrap().len(), 1);
-        note_server::nightly::run_for_user(&deps, 1, "aki", now).unwrap();
+        note_server::nightly::run_for_user(&deps, 1, "aitest", now).unwrap();
     }
     {
         let conn = db.lock().unwrap();
@@ -131,13 +131,13 @@ fn a_full_simulated_day() {
             tool_calls: vec![
                 ToolCall {
                     id: "t1".into(),
-                    name: "task_create".into(),
-                    args: r#"{"title":"submit report"}"#.into(),
+                    name: "task_save".into(),
+                    args: r#"{"tasks":[{"title":"submit report"}]}"#.into(),
                 },
                 ToolCall {
                     id: "t2".into(),
-                    name: "memory_write".into(),
-                    args: r#"{"op":"add","category":"episodic","summary":"report due friday","body":"mentioned during monday talk"}"#.into(),
+                    name: "memory_save".into(),
+                    args: r#"{"items":[{"kind":"episodic","title":"report due friday","body":"mentioned during monday talk"}]}"#.into(),
                 },
             ],
         },
@@ -163,7 +163,7 @@ fn a_full_simulated_day() {
         let out = note_server::agent::run_session(
             &deps,
             1,
-            "aki",
+            "aitest",
             SessionKind::Talk,
             at("10:00"),
             &[],
@@ -178,7 +178,7 @@ fn a_full_simulated_day() {
             .query_row("SELECT title FROM tasks WHERE user_id=1", [], |r| r.get(0))
             .unwrap();
         assert_eq!(title, "submit report");
-        let hits = note_server::memory::query(&conn, "aki", "report", 5, None).unwrap();
+        let hits = note_server::memory::query(&conn, "aitest", "report", 5, None).unwrap();
         assert_eq!(hits.len(), 1);
     }
 

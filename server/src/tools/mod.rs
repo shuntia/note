@@ -503,12 +503,12 @@ const TRIGGER: &[&str] = registry_of![
 
 /// Whether a successful call of this tool changed the user's day or Note's memory.
 pub fn writes(name: &str) -> bool {
-    known(name).and_then(|(n, _)| spec_of(n)).is_some_and(|t| t.writes)
+    known(name).and_then(|(n, _)| find(n)).is_some_and(|(_, t)| t.writes)
 }
 
 /// Whether this tool only looks things up.
 pub fn reads(name: &str) -> bool {
-    known(name).and_then(|(n, _)| spec_of(n)).is_some_and(|t| t.reads)
+    known(name).and_then(|(n, _)| find(n)).is_some_and(|(_, t)| t.reads)
 }
 const IMPORT: &[&str] = registry_of![BRIEF];
 const INBOX: &[&str] = registry_of![MEMORY_READ, DECIDE];
@@ -561,7 +561,7 @@ pub fn registry(kind: SessionKind) -> &'static [&'static str] {
 
 /// Which of the share registry a link's switches leave on.
 pub fn share_allows(scope: &crate::shares::ShareScope, name: &str) -> bool {
-    spec_of(name).and_then(|t| t.share).is_some_and(|allows| allows(scope))
+    find(name).and_then(|(_, t)| t.share).is_some_and(|allows| allows(scope))
 }
 
 pub fn share_schemas(scope: &crate::shares::ShareScope) -> Vec<serde_json::Value> {
@@ -614,8 +614,6 @@ struct ToolSpec {
     terminal_in: &'static [SessionKind],
     /// The link switch that leaves it on in a share session.
     share: Option<fn(&crate::shares::ShareScope) -> bool>,
-    /// An old name kept working, unoffered: the tool it now runs.
-    adapter_for: Option<&'static str>,
 }
 
 impl ToolSpec {
@@ -635,7 +633,6 @@ impl ToolSpec {
             reads: false,
             terminal_in: &[],
             share: None,
-            adapter_for: None,
         }
     }
 }
@@ -858,50 +855,10 @@ const TOOLS: &[ToolSpec] = tools![
         "Pass on a message from the visitor to the owner, only when they ask you to tell, \
          remind or pass something along. It ends the turn, and the visitor is told it was \
          passed on.",
-    "task_create": shapes::any => run!(kind raw task_ops::save), adapter_for = Some("task_save"); "",
-    "task_update": shapes::any => run!(kind raw task_ops::save), adapter_for = Some("task_save"); "",
-    "task_split": shapes::any => run!(kind raw task_ops::save), adapter_for = Some("task_save"); "",
-    "task_bulk_update": shapes::any => run!(kind raw task_ops::bulk_update), adapter_for = Some("task_save"); "",
-    "task_delete": shapes::any => run!(kind raw task_ops::remove), adapter_for = Some("task_remove"); "",
-    "task_list": shapes::any => run!(raw task_query::find), adapter_for = Some("task_find"); "",
-    "task_search": shapes::any => run!(raw task_query::find), adapter_for = Some("task_find"); "",
-    "task_read": shapes::any => run!(raw task_query::find), adapter_for = Some("task_find"); "",
-    "goal_create": shapes::any => run!(kind raw goal_ops::save), adapter_for = Some("goal_save"); "",
-    "goal_update": shapes::any => run!(kind raw goal_ops::save), adapter_for = Some("goal_save"); "",
-    "goal_list": shapes::any => run!(raw goal_ops::find), adapter_for = Some("goal_find"); "",
-    "calendar_list": shapes::any => run!(raw calendar_ops::find), adapter_for = Some("calendar_find"); "",
-    "calendar_add": shapes::any => run!(raw calendar_ops::save), adapter_for = Some("calendar_save"); "",
-    "calendar_update": shapes::any => run!(raw calendar_ops::save), adapter_for = Some("calendar_save"); "",
-    "calendar_skip": shapes::any => run!(raw calendar_ops::skip_adapter), adapter_for = Some("calendar_save"); "",
-    "plan_list": shapes::any => run!(kind raw day_ops::find), adapter_for = Some("day_find"); "",
-    "plan_tasks": shapes::any => run!(kind raw day_ops::plan_tasks), adapter_for = Some("day_save"); "",
-    "plan_carry": shapes::any => run!(kind raw day_ops::plan_carry), adapter_for = Some("day_save"); "",
-    "order_set": shapes::any => run!(kind raw day_ops::order_set), adapter_for = Some("day_save"); "",
-    "order_move": shapes::any => run!(kind raw day_ops::order_move), adapter_for = Some("day_save"); "",
-    "order_drop": shapes::any => run!(kind raw day_ops::order_drop), adapter_for = Some("day_remove"); "",
-    "schedule_move": shapes::any => run!(kind raw day_ops::schedule_move), adapter_for = Some("day_save"); "",
-    "schedule_drop": shapes::any => run!(kind raw day_ops::schedule_drop), adapter_for = Some("day_remove"); "",
-    "schedule_insert": shapes::any => run!(kind raw day_ops::schedule_insert), adapter_for = Some("day_save"); "",
-    "trigger_set": shapes::any => run!(kind raw day_ops::trigger_set), adapter_for = Some("day_save"); "",
-    "trigger_budget": shapes::any => run!(kind raw day_ops::trigger_budget), adapter_for = Some("day_save"); "",
-    "memory_query": shapes::any => run!(raw memory_ops::find), adapter_for = Some("memory_find"), embed = Embed::Query; "",
-    "memory_read": shapes::any => run!(raw memory_ops::find), adapter_for = Some("memory_find"); "",
-    "memory_write": shapes::any => run!(raw memory_ops::write_adapter), adapter_for = Some("memory_save"), embed = Embed::Items; "",
-    "note_write": shapes::any => run!(raw memory_ops::note_adapter), adapter_for = Some("memory_save"); "",
-    "note_settle": shapes::any => run!(raw memory_ops::settle_adapter), adapter_for = Some("memory_save"); "",
 ];
 
 fn find(name: &str) -> Option<(usize, &'static ToolSpec)> {
     TOOLS.iter().enumerate().find(|(_, t)| t.name == name)
-}
-
-/// The spec whose flags a name carries: an old name carries its replacement's.
-fn spec_of(name: &str) -> Option<&'static ToolSpec> {
-    let (_, t) = find(name)?;
-    match t.adapter_for {
-        Some(new) => find(new).map(|(_, n)| n),
-        None => Some(t),
-    }
 }
 
 /// The tool a name means: itself, or the one it differs from only by trailing
@@ -931,6 +888,41 @@ pub(crate) fn distance(a: &str, b: &str) -> usize {
     row[b.len()]
 }
 
+/// Names retired with the tools they belonged to, and what does their work now.
+const RETIRED: &[(&str, &str)] = &[
+    ("task_list", "task_find"),
+    ("task_search", "task_find"),
+    ("task_read", "task_find"),
+    ("task_create", "task_save"),
+    ("task_update", "task_save"),
+    ("task_split", "task_save"),
+    ("task_bulk_update", "task_save"),
+    ("task_delete", "task_remove"),
+    ("goal_create", "goal_save"),
+    ("goal_update", "goal_save"),
+    ("goal_list", "goal_find"),
+    ("calendar_list", "calendar_find"),
+    ("calendar_add", "calendar_save"),
+    ("calendar_update", "calendar_save"),
+    ("calendar_skip", "calendar_save"),
+    ("plan_list", "day_find"),
+    ("plan_tasks", "day_save"),
+    ("plan_carry", "day_save"),
+    ("order_set", "day_save"),
+    ("order_move", "day_save"),
+    ("order_drop", "day_remove"),
+    ("schedule_move", "day_save"),
+    ("schedule_drop", "day_remove"),
+    ("schedule_insert", "day_save"),
+    ("trigger_set", "day_save"),
+    ("trigger_budget", "day_save"),
+    ("memory_query", "memory_find"),
+    ("memory_read", "memory_find"),
+    ("memory_write", "memory_save"),
+    ("note_write", "memory_save"),
+    ("note_settle", "memory_save"),
+];
+
 /// Verbs a model puts in a tool name, and the suffix of the tool that does it.
 const VERBS: &[(&[&str], &str)] = &[
     (&["complete", "completed", "done", "finish", "finished", "close", "check", "tick", "mark"], "done"),
@@ -948,16 +940,19 @@ fn unknown(kind: SessionKind, name: &str) -> ToolError {
     let tool = |suffix: &str| {
         words.iter().find_map(|w| offered.iter().find(|t| **t == format!("{w}{suffix}")).copied())
     };
-    let (hint, first) = match verb {
-        Some("done") => match tool("_save") {
+    let base = name.trim().trim_end_matches(|c: char| c.is_ascii_digit() || c.is_ascii_punctuation() || c.is_whitespace());
+    let retired = RETIRED.iter().find(|(old, _)| *old == base).map(|(_, new)| *new);
+    let (hint, first) = match (retired, verb) {
+        (Some(new), _) if offered.contains(&new) => (Some(format!("{base} is retired; {new} does its work")), Some(new)),
+        (_, Some("done")) => match tool("_save") {
             Some(t) if t != "calendar_save" => (Some(format!("to finish one, set state done with {t}")), Some(t)),
             other => (None, other),
         },
-        Some(suffix) => match tool(suffix) {
+        (_, Some(suffix)) => match tool(suffix) {
             Some(t) => (Some(format!("that is {t}")), Some(t)),
             None => (None, None),
         },
-        None => (None, None),
+        (_, None) => (None, None),
     };
     let deleting = verb == Some("_remove");
     let mut ranked: Vec<&str> = offered.iter().copied().filter(|t| Some(*t) != first).collect();
@@ -1086,9 +1081,8 @@ fn admit(ctx: &ToolCtx, kind: SessionKind, name: &str, raw_args: &str) -> Result
             "arguments exceed {MAX_ARGS_BYTES} bytes"
         )));
     }
-    let target = spec_of(name).map_or(name, |t| t.name);
-    if !registry(kind).contains(&target) {
-        return Err(if NIGHTLY.contains(&target) || SHARE.contains(&target) {
+    if !registry(kind).contains(&name) {
+        return Err(if NIGHTLY.contains(&name) || SHARE.contains(&name) {
             ToolError::forbidden(format!("tool {name} is not available in this session type"))
         } else {
             unknown(kind, name)
@@ -1116,30 +1110,7 @@ fn run(
     let Exec::Dispatch(handler) = spec.exec else {
         return Err(ToolError::rejected(format!("{name} is run by the session, not dispatched")));
     };
-    let out = handler(conn, ctx, kind, raw).map_err(|e| hinted(name, e))?;
-    Ok(match spec.adapter_for {
-        Some(new) => loose::with_warning(out, format!("{name} is now {new}; call {new} from here on")),
-        None => out,
-    })
-}
-
-/// `(tool prefix, unknown field, the tool that takes it)` for the fields a
-/// model most often hands the wrong tool.
-const ELSEWHERE: &[(&str, &str, &str)] = &[];
-
-/// An unknown-field error, with the tool that takes that field where one
-/// obviously does.
-fn hinted(tool: &str, mut e: ToolError) -> ToolError {
-    if e.kind != "invalid_args" {
-        return e;
-    }
-    let Some(field) = e.message.strip_prefix("unknown field `").and_then(|m| m.split('`').next()) else {
-        return e;
-    };
-    if let Some((_, _, other)) = ELSEWHERE.iter().find(|(t, f, _)| tool.starts_with(t) && *f == field) {
-        e.message = format!("{}; {field} belongs to {other}", e.message);
-    }
-    e
+    handler(conn, ctx, kind, raw)
 }
 
 #[cfg(test)]
@@ -1205,6 +1176,13 @@ mod tests {
             let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, name, "{}").unwrap_err();
             assert!(!e.message.split("nearest are ").nth(1).unwrap().starts_with("task_remove"), "{name}: {}", e.message);
         }
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update", r#"{"task_id":1}"#).unwrap_err();
+        assert_eq!(e.kind, "unknown_tool");
+        assert!(e.message.contains("task_update is retired; task_save does its work; the nearest are task_save,"), "{}", e.message);
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "note_write2", "{}").unwrap_err();
+        assert!(e.message.contains("note_write is retired; memory_save does its work"), "{}", e.message);
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "task_delete", "{}").unwrap_err();
+        assert!(!e.message.contains("retired") && !e.message.contains("task_remove"), "{}", e.message);
         let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "calendar_delete_entry", "{}").unwrap_err();
         assert!(e.message.contains("that is calendar_remove; the nearest are calendar_remove"), "{}", e.message);
         let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_save", r#"{"tasks":[{"title":"x","surprise":1}]}"#).unwrap();
@@ -1216,7 +1194,7 @@ mod tests {
     fn oversized_payload_is_rejected_before_parsing() {
         let (conn, tmp) = env();
         let big = format!(r#"{{"title":"{}"}}"#, "x".repeat(MAX_ARGS_BYTES));
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_create", &big).unwrap_err();
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_save", &big).unwrap_err();
         assert_eq!(e.kind, "rejected");
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 0);
@@ -1240,8 +1218,6 @@ mod tests {
         let v = prepare(Some(&emb), "memory_save", r#"{"items":[{"title":"s","body":"b"},{"kind":"note","title":"n"}]}"#);
         assert_eq!(v.facts.iter().map(Option::is_some).collect::<Vec<_>>(), [true, false]);
         assert!(v.query.is_none());
-        let v = prepare(Some(&emb), "memory_write", r#"{"op":"add","category":"semantic","summary":"s","body":"b"}"#);
-        assert_eq!(v.facts.len(), 1, "an old name embeds as its replacement does");
 
         // non-memory tools and malformed args cost nothing
         let v = prepare(Some(&emb), "task_save", r#"{"tasks":[{"title":"x"}]}"#);
@@ -1404,8 +1380,8 @@ mod tests {
             &conn,
             &ctx(&tmp),
             SessionKind::Summarize,
-            "memory_write",
-            r#"{"op":"add","category":"semantic","summary":"s","body":"b"}"#,
+            "memory_save",
+            r#"{"items":[{"title":"s","body":"b"}]}"#,
         )
         .unwrap_err();
         assert_eq!(e.kind, "forbidden");
@@ -1439,7 +1415,7 @@ mod tests {
     fn the_import_surface_is_one_tool() {
         assert_eq!(registry(SessionKind::Import), &["task_brief"]);
         let (conn, tmp) = env();
-        for name in ["task_update", "task_split"] {
+        for name in ["task_save", "task_find"] {
             let e = dispatch(&conn, &ctx(&tmp), SessionKind::Import, name, r#"{"task_id":1}"#)
                 .unwrap_err();
             assert_eq!(e.kind, "forbidden", "{name} is still reachable from an import session");
@@ -1593,13 +1569,11 @@ mod tests {
             assert_eq!(TOOLS.iter().filter(|t| t.name == *name).count(), 1, "{name}");
         }
         for tool in TOOLS {
-            match tool.adapter_for {
-                Some(new) => {
-                    assert!(DOMAINS.iter().any(|d| d.contains(&new)), "{} runs {new}, which is in no domain", tool.name);
-                    assert!(!DOMAINS.iter().any(|d| d.contains(&tool.name)), "{} is offered", tool.name);
-                }
-                None => assert!(DOMAINS.iter().any(|d| d.contains(&tool.name)), "{} is in no domain", tool.name),
-            }
+            assert!(DOMAINS.iter().any(|d| d.contains(&tool.name)), "{} is in no domain", tool.name);
+        }
+        for (old, new) in RETIRED {
+            assert!(find(old).is_none(), "{old} is retired");
+            assert!(find(new).is_some(), "{old} is retired for {new}, which is no tool");
         }
     }
 
@@ -1664,8 +1638,8 @@ mod tests {
         assert!(!names(&crate::shares::ShareScope::default()).contains(&"share_note".to_string()));
         let (conn, tmp) = env();
         let sctx = ToolCtx { share: Some(no_tasks), ..ctx(&tmp) };
-        let e = dispatch(&conn, &sctx, SessionKind::Share, "task_list", "{}").unwrap_err();
-        assert_eq!(e.kind, "forbidden", "an old name follows its replacement's switch");
+        let e = dispatch(&conn, &sctx, SessionKind::Share, "task_find", "{}").unwrap_err();
+        assert_eq!(e.kind, "forbidden");
     }
 
     #[test]
@@ -1673,18 +1647,18 @@ mod tests {
         let (conn, tmp) = env();
         let scope = crate::shares::ShareScope { tasks: false, ..Default::default() };
         let sctx = ToolCtx { share: Some(scope), share_thread: Some(1), ..ctx(&tmp) };
-        let e = dispatch(&conn, &sctx, SessionKind::Share, "task_list", "{}").unwrap_err();
+        let e = dispatch(&conn, &sctx, SessionKind::Share, "task_find", "{}").unwrap_err();
         assert_eq!(e.kind, "forbidden");
         let e = dispatch(&conn, &sctx, SessionKind::Share, "share_note", r#"{"text":"hi"}"#).unwrap_err();
         assert_eq!(e.kind, "forbidden", "notes are off by default");
-        let e = dispatch(&conn, &sctx, SessionKind::Share, "memory_write", "{}").unwrap_err();
+        let e = dispatch(&conn, &sctx, SessionKind::Share, "memory_save", "{}").unwrap_err();
         assert_eq!(e.kind, "forbidden");
     }
 
     #[test]
     fn a_share_session_without_its_link_runs_nothing() {
         let (conn, tmp) = env();
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Share, "task_list", "{}").unwrap_err();
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Share, "task_find", "{}").unwrap_err();
         assert_eq!(e.kind, "forbidden");
     }
 
@@ -1730,10 +1704,8 @@ mod tests {
             }
         }
         let (conn, tmp) = env();
-        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Inbox, "note_write", r#"{"op":"add","title":"x"}"#).unwrap_err();
-        assert_eq!(e.kind, "forbidden", "an old name goes only where its replacement does");
-        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Inbox, "memory_query", r#"{"query":"x"}"#).unwrap();
-        assert!(out["warnings"].to_string().contains("memory_query is now memory_find"), "{out}");
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Inbox, "memory_save", r#"{"items":[{"kind":"note","title":"x"}]}"#).unwrap_err();
+        assert_eq!(e.kind, "forbidden");
     }
 
     #[test]
@@ -1748,17 +1720,14 @@ mod tests {
         for name in ["calendar_save", "calendar_remove", "goal_save", "task_remove"] {
             assert!(!t.contains(&name), "{name}");
         }
-        assert!(writes("order_move") && writes("task_save") && writes("trigger_set") && writes("task_update"));
-        assert!(writes("day_save") && writes("day_remove") && reads("day_find") && reads("plan_list"));
-        assert!(!writes("task_find") && !writes("say") && !writes("plan_list") && !writes("task_list"));
-        assert!(reads("task_find") && reads("task_read") && reads("task_find2"));
+        assert!(writes("task_save") && writes("day_save") && writes("day_remove") && reads("day_find"));
+        assert!(!writes("task_find") && !writes("say") && !writes("task_update") && !reads("plan_list"));
+        assert!(reads("task_find") && reads("task_find2"));
         let (conn, tmp) = env();
         for (name, args) in [
-            ("task_delete", r#"{"task_id":1}"#),
             ("task_remove", r#"{"ids":[1]}"#),
-            ("calendar_add", r#"{"title":"x"}"#),
-            ("goal_create", r#"{"title":"x"}"#),
-            ("task_bulk_update", r#"{"task_ids":[1],"delete":true}"#),
+            ("calendar_save", r#"{"entries":[{"title":"x"}]}"#),
+            ("goal_save", r#"{"goals":[{"title":"x"}]}"#),
         ] {
             let e = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, name, args).unwrap_err();
             assert_eq!(e.kind, "forbidden", "{name}");
@@ -1773,37 +1742,19 @@ mod tests {
             assert_eq!(out["ok"], true, "{name}");
             assert!(out["warnings"][0].as_str().unwrap().contains("this ran task_save"), "{out}");
         }
-        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update9", r#"{"task_id":1,"state":"done"}"#).unwrap();
-        let warnings = out["warnings"].to_string();
-        assert!(warnings.contains("this ran task_update") && warnings.contains("task_update is now task_save"), "{warnings}");
-        assert_eq!(crate::tasks::get(&conn, 1, 1).unwrap().unwrap().state, "done");
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_update9", r#"{"task_id":1,"state":"done"}"#).unwrap_err();
+        assert!(e.message.contains("task_update is retired; task_save does its work"), "{}", e.message);
+        assert_eq!(crate::tasks::get(&conn, 1, 1).unwrap().unwrap().state, "open");
         assert_eq!(known("task_find3").map(|k| k.0), Some("task_find"));
         assert_eq!(known("tsk_find"), None);
     }
 
     #[test]
-    fn an_old_name_runs_its_replacement_unoffered_and_says_so() {
-        let (conn, tmp) = env();
-        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_create",
-            r#"{"title":"essay","duration_min":30,"steps":[{"title":"draft","duration_min":20}]}"#).unwrap();
-        assert_eq!(out["saved"][0]["op"], "created");
-        assert_eq!(out["saved"][1]["title"], "draft");
-        assert_eq!(out["warnings"][0], "task_create is now task_save; call task_save from here on");
-        let id = out["saved"][0]["id"].as_i64().unwrap();
-        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_read", &format!(r#"{{"task_id":{id}}}"#)).unwrap();
-        assert_eq!(out["item"]["title"], "essay");
-        assert!(out["warnings"][0].as_str().unwrap().contains("task_find"));
-        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_bulk_update",
-            &format!(r#"{{"task_ids":[{id}],"urgency":"urgent"}}"#)).unwrap();
-        assert_eq!(out["saved"][0]["op"], "updated");
-        assert_eq!(crate::tasks::get(&conn, 1, id).unwrap().unwrap().urgency, "high");
-        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_delete", &format!(r#"{{"task_id":{id}}}"#)).unwrap();
-        assert_eq!(out["removed"][0]["id"], id);
-        assert!(crate::tasks::get(&conn, 1, id).unwrap().is_none());
+    fn no_session_offers_a_retired_name() {
         for kind in KINDS {
-            for old in ["task_create", "task_update", "task_list", "goal_create", "calendar_add", "calendar_skip"] {
-                assert!(!registry(kind).contains(&old), "{kind:?} offers {old}");
-                assert!(!schemas(kind).iter().any(|s| s["name"] == old));
+            for (old, _) in RETIRED {
+                assert!(!registry(kind).contains(old), "{kind:?} offers {old}");
+                assert!(!schemas(kind).iter().any(|x| x["name"] == *old));
             }
         }
     }

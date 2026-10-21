@@ -28,7 +28,7 @@ pub const NOW_CAP: usize = 3;
 /// A root is depth 0; no node sits more levels below it than this.
 pub const MAX_DEPTH: i64 = 4;
 /// Live children one node holds.
-pub const MAX_CHILDREN: usize = 200;
+pub const MAX_CHILDREN: usize = 50;
 /// Live nodes one tree holds, its root included.
 pub const MAX_TREE_NODES: usize = 300;
 
@@ -1032,7 +1032,7 @@ fn checked_parent(
     }
     if live_children(conn, parent_id)? as usize >= MAX_CHILDREN {
         return Err(UpdateError::InvalidHierarchy(format!(
-            "a task holds at most {MAX_CHILDREN} steps"
+            "a task holds at most {MAX_CHILDREN} live children"
         )));
     }
     let same_tree = child.is_some_and(|c| c.root_id == parent.root_id);
@@ -1646,7 +1646,7 @@ pub fn split(
     actor: Actor,
 ) -> Result<Option<TaskNode>, UpdateError> {
     if steps.is_empty() {
-        return Err(UpdateError::InvalidHierarchy("a split needs at least one step".into()));
+        return Err(UpdateError::InvalidHierarchy("a split needs at least one child".into()));
     }
     let Some(parent) = get(conn, user_id, task_id)? else { return Ok(None) };
     if parent.depth >= MAX_DEPTH {
@@ -1657,7 +1657,7 @@ pub fn split(
     let existing = live_children(conn, task_id)? as usize;
     if existing + steps.len() > MAX_CHILDREN {
         return Err(UpdateError::InvalidHierarchy(format!(
-            "a task holds at most {MAX_CHILDREN} steps; it has {existing}"
+            "a task holds at most {MAX_CHILDREN} live children; it has {existing}"
         )));
     }
     if live_in_tree(conn, parent.root_id)? as usize + steps.len() > MAX_TREE_NODES {

@@ -1409,8 +1409,8 @@ mod tests {
                 tool_calls: vec![
                     ToolCall {
                         id: "c1".into(),
-                        name: "task_create".into(),
-                        args: r#"{"title":"buy milk"}"#.into(),
+                        name: "task_save".into(),
+                        args: r#"{"tasks":[{"title":"buy milk"}]}"#.into(),
                     },
                     ToolCall { id: "c2".into(), name: "memory_find".into(), args: "[1".into() },
                 ],
@@ -1434,8 +1434,8 @@ mod tests {
             seen.into_inner(),
             vec![
                 "thinking:a task, then a lookup",
-                "call:0:task_create",
-                "result:0:task_create:false",
+                "call:0:task_save",
+                "result:0:task_save:false",
                 "call:1:memory_find",
                 "result:1:memory_find:true",
                 "reply:done",
@@ -1451,7 +1451,7 @@ mod tests {
     fn a_streamed_talk_round_hands_over_its_reasoning_and_text_piece_by_piece() {
         use crate::providers::mock::StreamPiece::{Call, Text, Thought};
         let (db, tmp) = env();
-        let call = ToolCall { id: "c1".into(), name: "task_create".into(), args: r#"{"title":"buy milk"}"#.into() };
+        let call = ToolCall { id: "c1".into(), name: "task_save".into(), args: r#"{"tasks":[{"title":"buy milk"}]}"#.into() };
         let llm = MockLLM::streamed(vec![
             vec![Thought("a task, "), Thought("then done"), Call(call)],
             vec![Thought("say so"), Text("Added "), Text("it.")],
@@ -1473,8 +1473,8 @@ mod tests {
             vec![
                 "thinking~a task, ",
                 "thinking~then done",
-                "call:0:task_create",
-                "result:0:task_create:false",
+                "call:0:task_save",
+                "result:0:task_save:false",
                 "thinking~say so",
                 "reply~Added ",
                 "reply~it.",
@@ -1536,8 +1536,8 @@ mod tests {
                 text: String::new(),
                 tool_calls: vec![ToolCall {
                     id: "c1".into(),
-                    name: "task_create".into(),
-                    args: r#"{"title":"buy milk"}"#.into(),
+                    name: "task_save".into(),
+                    args: r#"{"tasks":[{"title":"buy milk"}]}"#.into(),
                 }],
             },
             ChatResponse { text: "added it".into(), tool_calls: vec![] },
@@ -1559,8 +1559,8 @@ mod tests {
             batch_call(
                 "b1",
                 &serde_json::json!([
-                    { "tool": "task_create", "args": { "title": "buy milk" } },
-                    { "tool": "task_create", "args": { "title": "call the dentist" } },
+                    { "tool": "task_save", "args": { "tasks": [{ "title": "buy milk" }] } },
+                    { "tool": "task_save", "args": { "tasks": [{ "title": "call the dentist" }] } },
                 ]),
             ),
             ChatResponse { text: "both added".into(), tool_calls: vec![] },
@@ -1685,8 +1685,8 @@ mod tests {
                 text: String::new(),
                 tool_calls: vec![ToolCall {
                     id: "c1".into(),
-                    name: "task_create".into(),
-                    args: r#"{"title":"buy milk"}"#.into(),
+                    name: "task_save".into(),
+                    args: r#"{"tasks":[{"title":"buy milk"}]}"#.into(),
                 }],
             },
             ChatResponse { text: "added buy milk!".into(), tool_calls: vec![] },
@@ -1706,8 +1706,8 @@ mod tests {
         assert_eq!(out.tool_calls, 1);
         assert_eq!(out.steps.len(), 1);
         let step = &out.steps[0];
-        assert_eq!(step.name, "task_create");
-        assert_eq!(step.args, r#"{"title":"buy milk"}"#);
+        assert_eq!(step.name, "task_save");
+        assert_eq!(step.args, r#"{"tasks":[{"title":"buy milk"}]}"#);
         assert!(step.result.contains("saved"), "{}", step.result);
         assert!(!step.is_error);
         let title: String = db
@@ -1722,7 +1722,7 @@ mod tests {
         assert!(!seen[0].system.contains("# Today's plan"), "the system prompt holds nothing that changes between sessions");
         assert!(matches!(&seen[0].messages[0], Message::User(t) if t.starts_with("<context>") && t.contains("# Today's plan")));
         assert!(seen[0].tool_names.contains(&"context_edit".to_string()));
-        assert!(!seen[0].tool_names.contains(&"schedule_insert".to_string()));
+        assert!(!seen[0].tool_names.contains(&"share_note".to_string()));
         // second turn carried the tool result back
         assert_eq!(seen[1].n_messages, 4);
         match &seen[1].messages[3] {
@@ -1794,7 +1794,7 @@ mod tests {
             text: "looping".into(),
             tool_calls: vec![ToolCall {
                 id: "c".into(),
-                name: "memory_query".into(),
+                name: "memory_find".into(),
                 args: r#"{"query":"x"}"#.into(),
             }],
         };
@@ -1826,7 +1826,7 @@ mod tests {
             text: "looping".into(),
             tool_calls: vec![ToolCall {
                 id: "c".into(),
-                name: "memory_query".into(),
+                name: "memory_find".into(),
                 args: r#"{"query":"x"}"#.into(),
             }],
         };
@@ -1876,12 +1876,12 @@ mod tests {
             tool_calls: vec![ToolCall { id: id.into(), name: name.into(), args: args.into() }],
         };
         let llm = MockLLM::scripted(vec![
-            call("a", "task_list", "{}"),
-            call("b", "task_list", "{ }"),
-            call("c", "task_create", r#"{"title":"milk"}"#),
-            call("d", "task_list", "{}"),
-            call("e", "goal_create", r#"{"title":"move"}"#),
-            call("f", "task_list", "{}"),
+            call("a", "task_find", "{}"),
+            call("b", "task_find", "{ }"),
+            call("c", "task_save", r#"{"tasks":[{"title":"milk"}]}"#),
+            call("d", "task_find", "{}"),
+            call("e", "goal_save", r#"{"goals":[{"title":"move"}]}"#),
+            call("f", "task_find", "{}"),
             call("g", "memory_find", "[1"),
             call("h", "memory_find", "[1"),
             ChatResponse { text: "done".into(), tool_calls: vec![] },
@@ -1903,7 +1903,7 @@ mod tests {
         let (db, tmp) = env();
         let lookup = |n: usize| ChatResponse {
             text: String::new(),
-            tool_calls: vec![ToolCall { id: format!("c{n}"), name: "memory_query".into(), args: format!(r#"{{"query":"q{n}"}}"#) }],
+            tool_calls: vec![ToolCall { id: format!("c{n}"), name: "memory_find".into(), args: format!(r#"{{"query":"q{n}"}}"#) }],
         };
         let mut script: Vec<_> = (0..LOOKUP_ROUNDS).map(lookup).collect();
         script.push(ChatResponse { text: "ok".into(), tool_calls: vec![] });
@@ -1920,7 +1920,7 @@ mod tests {
         let (db, tmp) = env();
         let lookup = |n: usize| ChatResponse {
             text: String::new(),
-            tool_calls: vec![ToolCall { id: format!("c{n}"), name: "task_create".into(), args: format!(r#"{{"title":"t{n}"}}"#) }],
+            tool_calls: vec![ToolCall { id: format!("c{n}"), name: "task_save".into(), args: format!(r#"{{"tasks":[{{"title":"t{n}"}}]}}"#) }],
         };
         let mut script: Vec<_> = (0..TALK_MAX_TURNS - 1).map(lookup).collect();
         script.push(ChatResponse { text: "made them; more left".into(), tool_calls: vec![] });
@@ -1940,7 +1940,7 @@ mod tests {
     fn create_call(id: &str) -> ChatResponse {
         ChatResponse {
             text: String::new(),
-            tool_calls: vec![ToolCall { id: id.into(), name: "task_create".into(), args: format!(r#"{{"title":"t{id}"}}"#) }],
+            tool_calls: vec![ToolCall { id: id.into(), name: "task_save".into(), args: format!(r#"{{"tasks":[{{"title":"t{id}"}}]}}"#) }],
         }
     }
 
@@ -2003,7 +2003,7 @@ mod tests {
             text: String::new(),
             tool_calls: vec![ToolCall {
                 id: "c".into(),
-                name: "memory_query".into(),
+                name: "memory_find".into(),
                 args: r#"{"query":"x"}"#.into(),
             }],
         };
@@ -2027,7 +2027,7 @@ mod tests {
             text: String::new(),
             tool_calls: vec![ToolCall {
                 id: "c".into(),
-                name: "memory_query".into(),
+                name: "memory_find".into(),
                 args: r#"{"query":"x"}"#.into(),
             }],
         };
@@ -2041,7 +2041,7 @@ mod tests {
         assert!(seen[0].system.contains("following up on your own plan"));
         assert!(matches!(&seen[0].messages[0], Message::User(t) if t.contains("# Today's plan")));
         assert!(seen[0].tool_names.contains(&"stay_quiet".to_string()));
-        assert!(!seen[0].tool_names.contains(&"calendar_add".to_string()));
+        assert!(!seen[0].tool_names.contains(&"calendar_save".to_string()));
         assert_eq!(seen[0].must_call, None);
         let last = seen.last().unwrap();
         assert_eq!(last.tool_names, ["say", "stay_quiet"], "the last round is offered only its endings");
@@ -2056,7 +2056,7 @@ mod tests {
         let caller = FakeCaller(Default::default());
         let lookup = |n: usize| ChatResponse {
             text: String::new(),
-            tool_calls: vec![ToolCall { id: format!("l{n}"), name: "memory_query".into(), args: r#"{"query":"x"}"#.into() }],
+            tool_calls: vec![ToolCall { id: format!("l{n}"), name: "memory_find".into(), args: r#"{"query":"x"}"#.into() }],
         };
         let mut script = vec![ChatResponse {
             text: String::new(),
@@ -2074,7 +2074,7 @@ mod tests {
         let (db, tmp) = env();
         let lookup = |n: usize| ChatResponse {
             text: String::new(),
-            tool_calls: vec![ToolCall { id: format!("l{n}"), name: "memory_query".into(), args: r#"{"query":"x"}"#.into() }],
+            tool_calls: vec![ToolCall { id: format!("l{n}"), name: "memory_find".into(), args: r#"{"query":"x"}"#.into() }],
         };
         let llm = MockLLM::scripted((0..TALK_MAX_TURNS).map(lookup).collect());
         run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi").unwrap();
@@ -2216,9 +2216,9 @@ mod tests {
             batch_call(
                 "b1",
                 &serde_json::json!([
-                    { "tool": "task_create", "args": { "title": "buy milk" } },
-                    { "tool": "task_update", "args": { "task_id": 999, "state": "done" } },
-                    { "tool": "task_create", "args": { "title": "call the dentist" } },
+                    { "tool": "task_save", "args": { "tasks": [{ "title": "buy milk" }] } },
+                    { "tool": "task_save", "args": { "tasks": [{ "id": 999, "state": "done" }] } },
+                    { "tool": "task_save", "args": { "tasks": [{ "title": "call the dentist" }] } },
                 ]),
             ),
             ChatResponse { text: "both added".into(), tool_calls: vec![] },
@@ -2242,12 +2242,12 @@ mod tests {
         assert_eq!(
             seen.into_inner(),
             vec![
-                "call:0:task_create",
-                "result:0:task_create:false",
-                "call:1:task_update",
-                "result:1:task_update:false",
-                "call:2:task_create",
-                "result:2:task_create:false",
+                "call:0:task_save",
+                "result:0:task_save:false",
+                "call:1:task_save",
+                "result:1:task_save:false",
+                "call:2:task_save",
+                "result:2:task_save:false",
                 "reply:both added",
             ]
         );
@@ -2256,7 +2256,7 @@ mod tests {
         assert!(!is_error, "a failing call inside a batch is not a failed batch");
         let results = result["results"].as_array().unwrap();
         assert_eq!(results.len(), 3);
-        assert_eq!(results[0]["tool"], "task_create");
+        assert_eq!(results[0]["tool"], "task_save");
         assert_eq!(results[0]["ok"], true);
         assert!(results[0]["result"]["saved"][0]["id"].is_i64());
         assert_eq!(results[1]["ok"], false, "a refused item reads as not ok");
@@ -2279,10 +2279,10 @@ mod tests {
             batch_call(
                 "b1",
                 &serde_json::json!([
-                    { "tool": "task_create", "args": { "title": "buy milk", "is_now": "true" } },
-                    { "tool": "task_update", "args": { "task_id": "1", "duration_min": "30", "state": "in_progress" } },
-                    { "tool": "task_update", "args": "{\"task_id\": 1, \"progress\": \"40\"}" },
-                    { "tool": "task_update", "args": { "task_id": "one", "state": "done" } },
+                    { "tool": "task_save", "args": { "tasks": [{ "title": "buy milk", "is_now": "true" }] } },
+                    { "tool": "task_save", "args": { "tasks": [{ "id": "1", "duration_min": "30", "state": "in_progress" }] } },
+                    { "tool": "task_save", "args": "{\"tasks\": [{\"id\": 1, \"progress\": \"40\"}]}" },
+                    { "tool": "task_save", "args": { "tasks": [{ "id": "#one", "state": "done" }] } },
                 ]),
             ),
             ChatResponse { text: "done".into(), tool_calls: vec![] },
@@ -2313,8 +2313,8 @@ mod tests {
             ChatResponse {
                 text: String::new(),
                 tool_calls: vec![
-                    call("1", "task_create", r#"{"title":"buy milk"}"#),
-                    call("2", "task_update", r#"{"task_id":"1","duration_min":"30"}"#),
+                    call("1", "task_save", r#"{"tasks":[{"title":"buy milk"}]}"#),
+                    call("2", "task_save", r#"{"tasks":[{"id":"1","duration_min":"30"}]}"#),
                 ],
             },
             ChatResponse { text: "done".into(), tool_calls: vec![] },
@@ -2335,7 +2335,7 @@ mod tests {
                 &serde_json::json!([
                     { "tool": "batch", "args": { "calls": [] } },
                     { "tool": "say", "args": { "text": "hello" } },
-                    { "tool": "memory_query", "args": { "query": "school" } },
+                    { "tool": "memory_find", "args": { "query": "school" } },
                 ]),
             ),
             ChatResponse {
@@ -2370,14 +2370,14 @@ mod tests {
 
         assert_eq!(out.tool_calls, 2, "a refused call never runs");
         let names: Vec<&str> = out.steps.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, vec!["memory_query", "stay_quiet"]);
+        assert_eq!(names, vec!["memory_find", "stay_quiet"]);
         assert!(out.reply.contains("quiet"), "a batch ended the session: {}", out.reply);
     }
 
     #[test]
     fn a_batch_over_the_cap_or_empty_runs_nothing() {
         let (db, tmp) = env();
-        let one = serde_json::json!({ "tool": "task_create", "args": { "title": "x" } });
+        let one = serde_json::json!({ "tool": "task_save", "args": { "tasks": [{ "title": "x" }] } });
         for calls in [
             serde_json::Value::Array(vec![one; tools::MAX_BATCH_CALLS + 1]),
             serde_json::json!([]),
@@ -2648,7 +2648,7 @@ mod tests {
         let llm = MockLLM::scripted(vec![
             ChatResponse {
                 text: String::new(),
-                tool_calls: vec![ToolCall { id: "c1".into(), name: "task_list".into(), args: "{}".into() }],
+                tool_calls: vec![ToolCall { id: "c1".into(), name: "task_find".into(), args: "{}".into() }],
             },
             ChatResponse {
                 text: String::new(),
@@ -2675,7 +2675,7 @@ mod tests {
         let llm = MockLLM::scripted(vec![
             ChatResponse {
                 text: String::new(),
-                tool_calls: vec![ToolCall { id: "c1".into(), name: "memory_query".into(), args: r#"{"query":"x"}"#.into() }],
+                tool_calls: vec![ToolCall { id: "c1".into(), name: "memory_find".into(), args: r#"{"query":"x"}"#.into() }],
             },
         ]);
         let _ = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Inbox, now(), &[], "item");
@@ -2701,8 +2701,8 @@ mod tests {
                 text: String::new(),
                 tool_calls: vec![ToolCall {
                     id: "c1".into(),
-                    name: "task_create".into(),
-                    args: r#"{"title":"buy milk"}"#.into(),
+                    name: "task_save".into(),
+                    args: r#"{"tasks":[{"title":"buy milk"}]}"#.into(),
                 }],
             },
             ChatResponse { text: "added buy milk!".into(), tool_calls: vec![] },
@@ -2740,7 +2740,7 @@ mod tests {
             text: "looping".into(),
             tool_calls: vec![ToolCall {
                 id: "c".into(),
-                name: "memory_query".into(),
+                name: "memory_find".into(),
                 args: r#"{"query":"x"}"#.into(),
             }],
         };
@@ -2780,8 +2780,8 @@ mod tests {
                 text: String::new(),
                 tool_calls: vec![ToolCall {
                     id: "c1".into(),
-                    name: "task_create".into(),
-                    args: r#"{"title":"buy milk"}"#.into(),
+                    name: "task_save".into(),
+                    args: r#"{"tasks":[{"title":"buy milk"}]}"#.into(),
                 }],
             }]),
             rounds: 1,
@@ -2799,7 +2799,7 @@ mod tests {
         assert!(error.unwrap().contains("timed out reading response"));
         assert_eq!(rounds(&detail).len(), 2);
         assert!(rounds(&detail)[0]["error"].is_null());
-        assert_eq!(rounds(&detail)[0]["calls"][0]["name"], "task_create");
+        assert_eq!(rounds(&detail)[0]["calls"][0]["name"], "task_save");
         assert!(rounds(&detail)[1]["error"].as_str().unwrap().contains("timed out"));
         assert!(rounds(&detail)[1]["calls"].as_array().unwrap().is_empty());
     }
@@ -2825,7 +2825,7 @@ mod tests {
             batch_call(
                 "b1",
                 &serde_json::json!([
-                    { "tool": "task_create", "args": { "title": "buy milk" } },
+                    { "tool": "task_save", "args": { "tasks": [{ "title": "buy milk" }] } },
                     { "tool": "task_frobnicate", "args": { "task_id": 999 } },
                 ]),
             ),
@@ -2838,7 +2838,7 @@ mod tests {
         assert_eq!((turns, tool_calls), (2, 2));
         let calls = rounds(&detail)[0]["calls"].as_array().unwrap();
         assert_eq!(calls.len(), 2, "the batch envelope itself is not a call");
-        assert_eq!(calls[0]["name"], "task_create");
+        assert_eq!(calls[0]["name"], "task_save");
         assert_eq!(calls[1]["name"], "task_frobnicate");
         assert_eq!(calls[1]["is_error"], true);
         assert_eq!(calls[1]["error_kind"], "unknown_tool");
@@ -2853,8 +2853,8 @@ mod tests {
                 text: String::new(),
                 tool_calls: vec![ToolCall {
                     id: "c1".into(),
-                    name: "task_create".into(),
-                    args: serde_json::json!({ "title": title }).to_string(),
+                    name: "task_save".into(),
+                    args: serde_json::json!({ "tasks": [{ "title": title }] }).to_string(),
                 }],
             },
             ChatResponse { text: "done".into(), tool_calls: vec![] },
@@ -2934,7 +2934,7 @@ mod tests {
         assert!(!seen[0].system.contains("SECRET STANDING LINE"));
         assert!(!seen[0].system.contains("# Standing context"));
         assert!(!seen[0].system.contains("SECRET NOTE"));
-        assert!(!seen[0].tool_names.iter().any(|n| n.starts_with("memory_") || n == "task_create" || n == "share_note"));
+        assert!(!seen[0].tool_names.iter().any(|n| n.starts_with("memory_") || n == "task_save" || n == "share_note"));
         let conn = db.lock().unwrap();
         let (kind, detail): (String, String) = conn.query_row("SELECT kind, detail FROM event_log WHERE kind LIKE 'share%'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         assert_eq!(kind, "share_session");
@@ -2956,7 +2956,7 @@ mod tests {
         let llm = MockLLM::scripted(vec![]);
         let d = deps(&db, &tmp, &llm);
         let run = |key| {
-            run_tool(&d, 1, "aki", SessionKind::Call, "task_create", r#"{"title":"essay"}"#, Some(("c1", key)))
+            run_tool(&d, 1, "aki", SessionKind::Call, "task_save", r#"{"tasks":[{"title":"essay"}]}"#, Some(("c1", key)))
         };
         let first = run("1:0");
         assert!(!first.1, "{}", first.0);

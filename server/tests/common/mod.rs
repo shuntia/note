@@ -298,8 +298,8 @@ pub fn lay_block(state: &AppState, cfg: &std::path::Path, task_id: i64, date: ji
         &conn,
         &ctx,
         note_server::tools::SessionKind::Talk,
-        "plan_tasks",
-        &format!(r#"{{"date":"{date}","task_ids":[{task_id}],"start":"{start}"}}"#),
+        "day_save",
+        &format!(r#"{{"date":"{date}","items":[{{"task":{task_id},"at":"{start}"}}]}}"#),
     )
     .unwrap();
 }

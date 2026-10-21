@@ -1258,7 +1258,7 @@ fn not_about(context: &str, event_id: i64) -> String {
 /// wait would only double.
 fn laid_a_wake(out: &crate::agent::SessionOutcome) -> bool {
     out.steps.iter().any(|s| {
-        !s.is_error && (s.name == "trigger_set" || (s.name == "day_save" && s.result.contains("\"id\":\"e")))
+        !s.is_error && s.name == "day_save" && s.result.contains("\"id\":\"e")
     })
 }
 
@@ -2220,7 +2220,7 @@ mod tests {
 
     #[test]
     fn only_a_terminal_step_decides_and_closing_text_never_does() {
-        assert!(decision(&outcome("  Back on the essay?  ", vec![step("task_list", "{}")])).is_none());
+        assert!(decision(&outcome("  Back on the essay?  ", vec![step("task_find", "{}")])).is_none());
         assert!(decision(&outcome("Let me look at the plan", Vec::new())).is_none());
         let (name, _) = decision(&outcome("x", vec![step("stay_quiet", r#"{"quiet":true,"reason":"r"}"#)])).unwrap();
         assert_eq!(name, "stay_quiet");
@@ -2238,7 +2238,7 @@ mod tests {
             is_error,
             thinking: None,
         };
-        let steps = [step("task_read", false), step("order_move", false), step("task_update", true), step("stay_quiet", false)];
+        let steps = [step("task_find", false), step("day_save", false), step("task_save", true), step("stay_quiet", false)];
         let logged = steps
             .iter()
             .filter(|s| log_change(&conn, uid, 9, &s.name, &s.args, &s.result, s.is_error).unwrap())
@@ -2247,6 +2247,6 @@ mod tests {
         let detail: String = conn
             .query_row("SELECT detail FROM event_log WHERE kind = 'wake_change'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(detail, r#"event 9: order_move {"task_id":3}"#);
+        assert_eq!(detail, r#"event 9: day_save {"task_id":3}"#);
     }
 }

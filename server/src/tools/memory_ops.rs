@@ -711,80 +711,6 @@ pub fn remove(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, Tool
     Ok(env.into_value())
 }
 
-fn rewrite(raw: &str, f: impl FnOnce(&mut serde_json::Map<String, Value>) -> Option<Value>) -> Result<String, ToolError> {
-    let mut map = loose::args(raw)?;
-    Ok(f(&mut map).unwrap_or(Value::Object(map)).to_string())
-}
-
-fn op_of(map: &mut serde_json::Map<String, Value>) -> String {
-    map.remove("op").and_then(|v| loose::text(&v)).unwrap_or_default().trim().to_lowercase()
-}
-
-/// `memory_write`, read as the `memory_save` it means.
-pub fn write_adapter(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolError> {
-    let raw = rewrite(raw, |m| {
-        match op_of(m).as_str() {
-            "supersede" => {
-                if let Some(id) = m.remove("id") {
-                    m.insert("supersedes".into(), id);
-                }
-            }
-            "update" => {}
-            _ => {
-                m.remove("id");
-            }
-        }
-        Some(json!({ ITEMS: [Value::Object(std::mem::take(m))] }))
-    })?;
-    save(conn, ctx, &raw)
-}
-
-/// `note_write`, read as the `memory_save` or `memory_remove` it means.
-pub fn note_adapter(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolError> {
-    let mut removing = false;
-    let raw = rewrite(raw, |m| {
-        match op_of(m).as_str() {
-            "remove" | "delete" => {
-                removing = true;
-                return Some(json!({ "ids": [m.remove("id").unwrap_or(Value::Null)] }));
-            }
-            "keep" => m.retain(|k, _| k == "id"),
-            "add" => {
-                m.remove("id");
-                m.insert("kind".into(), NOTE.into());
-            }
-            _ => {
-                m.insert("kind".into(), NOTE.into());
-            }
-        }
-        Some(json!({ ITEMS: [Value::Object(std::mem::take(m))] }))
-    })?;
-    if removing {
-        remove(conn, ctx, &raw)
-    } else {
-        save(conn, ctx, &raw)
-    }
-}
-
-/// `note_settle`, read as the `memory_save` or `memory_remove` it means.
-pub fn settle_adapter(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolError> {
-    let mut map = loose::args(raw)?;
-    let id = map.remove("id").unwrap_or(Value::Null);
-    let outcome = map.remove("outcome").and_then(|v| loose::text(&v)).unwrap_or_default();
-    if outcome.trim().eq_ignore_ascii_case("drop") {
-        return remove(conn, ctx, &json!({ "ids": [id] }).to_string());
-    }
-    let kind = map.remove("category").and_then(|v| kind_of(&v)).unwrap_or_else(|| {
-        let note = loose::text(&id)
-            .and_then(|s| notes::resolve(conn, ctx.data_dir, ctx.username, s.trim()).ok())
-            .and_then(|full| notes::get(ctx.data_dir, ctx.username, &full).ok().flatten());
-        if note.is_some_and(|n| n.windowed()) { "episodic" } else { "semantic" }
-    });
-    map.insert("id".into(), id);
-    map.insert("kind".into(), kind.into());
-    save(conn, ctx, &json!({ ITEMS: [Value::Object(map)] }).to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use crate::tools::{dispatch, PreparedVectors, SessionKind, ToolCtx};
@@ -926,21 +852,19 @@ mod tests {
     }
 
     #[test]
-    fn the_old_names_run_through_memory_save_and_say_so() {
+    fn a_memory_is_superseded_and_a_note_kept_settled_and_removed() {
         let (conn, tmp) = env();
-        let out = talk(&conn, &tmp, "memory_write", json!({"op": "add", "category": "semantic", "summary": "likes tea", "body": "green"}));
-        let tea = id(&out, 0);
-        assert!(out["warnings"][0].as_str().unwrap().contains("memory_write is now memory_save"));
-        let out = talk(&conn, &tmp, "memory_write", json!({"op": "supersede", "id": tea, "summary": "likes coffee", "body": "black"}));
+        let tea = id(&talk(&conn, &tmp, "memory_save", json!({"items": [{"kind": "semantic", "title": "likes tea", "body": "green"}]})), 0);
+        let out = talk(&conn, &tmp, "memory_save", json!({"items": [{"title": "likes coffee", "body": "black", "supersedes": tea}]}));
         assert_eq!(out["saved"][0]["supersedes"], tea.as_str());
-        assert_eq!(talk(&conn, &tmp, "memory_query", json!({"query": "coffee"}))["items"][0]["title"], "likes coffee");
-        let note = id(&talk(&conn, &tmp, "note_write", json!({"op": "add", "title": "flight home", "until": "2026-10-07T17:00", "tz": "America/New_York"})), 0);
+        assert_eq!(talk(&conn, &tmp, "memory_find", json!({"query": "coffee"}))["items"][0]["title"], "likes coffee");
+        let note = id(&talk(&conn, &tmp, "memory_save", json!({"items": [{"kind": "note", "title": "flight home", "until": "2026-10-07T17:00", "tz": "America/New_York"}]})), 0);
         assert_eq!(notes(&conn, &tmp)[0].until.as_deref(), Some("2026-10-08T06:00:00+09:00"));
-        assert_eq!(talk(&conn, &tmp, "note_write", json!({"op": "keep", "id": note}))["saved"][0]["op"], "kept");
-        let out = run(&conn, &tmp, SessionKind::Nightly, "note_settle", json!({"id": note, "outcome": "memory"}));
-        assert_eq!(out["saved"][0]["kind"], "episodic", "a windowed note settles as episodic");
-        let other = id(&talk(&conn, &tmp, "note_write", json!({"op": "add", "title": "milk"})), 0);
-        assert_eq!(talk(&conn, &tmp, "note_write", json!({"op": "remove", "id": other}))["removed"][0]["title"], "milk");
+        assert_eq!(talk(&conn, &tmp, "memory_save", json!({"items": [{"id": note}]}))["saved"][0]["op"], "kept");
+        let out = run(&conn, &tmp, SessionKind::Nightly, "memory_save", json!({"items": [{"id": note, "kind": "episodic"}]}));
+        assert_eq!(out["saved"][0]["kind"], "episodic", "{out}");
+        let other = id(&talk(&conn, &tmp, "memory_save", json!({"items": [{"kind": "note", "title": "milk"}]})), 0);
+        assert_eq!(talk(&conn, &tmp, "memory_remove", json!({"ids": [other]}))["removed"][0]["title"], "milk");
     }
 
     #[test]

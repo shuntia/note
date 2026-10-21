@@ -803,13 +803,13 @@ mod tests {
                 tool_calls: vec![
                     ToolCall {
                         id: "1".into(),
-                        name: "note_settle".into(),
-                        args: format!(r#"{{"id":"{ended}","outcome":"memory","summary":"saw the dentist on 2026-08-30"}}"#),
+                        name: "memory_save".into(),
+                        args: format!(r#"{{"items":[{{"id":"{ended}","kind":"episodic","title":"saw the dentist on 2026-08-30"}}]}}"#),
                     },
                     ToolCall {
                         id: "2".into(),
-                        name: "note_settle".into(),
-                        args: format!(r#"{{"id":"{stale}","outcome":"drop"}}"#),
+                        name: "memory_remove".into(),
+                        args: format!(r#"{{"ids":["{stale}"]}}"#),
                     },
                 ],
             },

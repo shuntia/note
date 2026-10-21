@@ -672,15 +672,6 @@ pub fn remove(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, Tool
     Ok(env.into_value())
 }
 
-/// `calendar_skip`, run as `calendar_save` with its date under `skip`.
-pub fn skip_adapter(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolError> {
-    let mut args = loose::args(raw)?;
-    if let Some(date) = args.remove("date") {
-        args.insert("skip".into(), json!([date]));
-    }
-    save(conn, ctx, &Value::Object(args).to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use crate::tools::testkit::{call, ctx, env, saved, talk};
@@ -766,8 +757,8 @@ mod tests {
         assert_eq!(entry(&conn, id).exceptions, ["2099-09-18", "2099-09-21"]);
         talk(&conn, &tmp, "calendar_save", json!({"entries": [{"id": "School", "unskip": ["2099-09-18"]}]}));
         assert_eq!(entry(&conn, id).exceptions, ["2099-09-21"]);
-        let out = talk(&conn, &tmp, "calendar_skip", json!({"entry_id": id, "date": "2099-09-22"}));
-        assert!(out["warnings"][0].as_str().unwrap().contains("calendar_save"));
+        let out = talk(&conn, &tmp, "calendar_save", json!({"entries": [{"entry_id": id, "skip": "2099-09-22"}]}));
+        assert_eq!(out["ok"], true, "{out}");
         assert_eq!(entry(&conn, id).exceptions, ["2099-09-21", "2099-09-22"]);
     }
 
@@ -851,7 +842,7 @@ mod tests {
         assert_eq!(registry(SessionKind::Trigger).iter().filter(|t| t.starts_with("calendar_")).count(), 1);
         let (conn, tmp) = env("UTC");
         call(&conn, &tmp, SessionKind::Trigger, "calendar_find", "{}").unwrap();
-        for name in ["calendar_save", "calendar_remove", "calendar_add", "calendar_update", "calendar_skip"] {
+        for name in ["calendar_save", "calendar_remove"] {
             assert_eq!(call(&conn, &tmp, SessionKind::Trigger, name, SCHOOL).unwrap_err().kind, "forbidden", "{name}");
         }
         for kind in [SessionKind::Import, SessionKind::Inbox] {
