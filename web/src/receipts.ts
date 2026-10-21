@@ -113,6 +113,39 @@ const TABLE: Record<string, Receipt> = {
     failed: 'receipt.memoryWrite.failed',
   },
 
+  memory_find: {
+    doing: (a) => say(a.id === undefined ? TABLE.memory_query.doing : TABLE.memory_read.doing, a),
+    done: (a) => say(a.id === undefined ? TABLE.memory_query.done : TABLE.memory_read.done, a),
+    failed: 'receipt.memoryQuery.failed',
+  },
+  memory_save: {
+    doing: (a) => {
+      const items = nodes(a, 'items')
+      return t(items.length === 1 && isNote(items[0]) ? 'receipt.noteWrite.doing' : 'receipt.memoryWrite.doing')
+    },
+    done: (a) => {
+      const items = nodes(a, 'items')
+      if (items.length !== 1) return t('receipt.memorySave.done', { count: items.length })
+      const one = items[0]
+      const title = str(one, 'title')
+      const kind = str(one, 'kind')
+      if (isNote(one) && one.id !== undefined && kind && kind !== 'note') return t('receipt.memorySave.settled')
+      if (isNote(one)) {
+        if (one.id === undefined) return say(TABLE.note_write.done, { ...one, op: 'add' })
+        if (Object.keys(one).length === 1) return t('receipt.noteWrite.kept')
+        return say(TABLE.note_write.done, { ...one, op: 'update' })
+      }
+      const op = str(one, 'supersedes') ? 'supersede' : one.id === undefined ? 'add' : 'update'
+      return say(TABLE.memory_write.done, { op, summary: title })
+    },
+    failed: 'receipt.memoryWrite.failed',
+  },
+  memory_remove: {
+    doing: 'receipt.memoryRemove.doing',
+    done: (a) => t('receipt.memoryRemove.done', { count: Array.isArray(a.ids) ? a.ids.length : 1 }),
+    failed: 'receipt.memoryRemove.failed',
+  },
+
   task_create: {
     doing: 'receipt.taskCreate.doing',
     done: (a) => {
@@ -594,6 +627,12 @@ const TABLE: Record<string, Receipt> = {
 }
 
 // The items a write carries under `key`, or the call itself when it sent one bare.
+// A working note: kind note, or the short id the context shows a note by.
+function isNote(item: Args): boolean {
+  const id = typeof item.id === 'string' ? item.id : ''
+  return str(item, 'kind') === 'note' || (id !== '' && id.length < 36)
+}
+
 function nodes(a: Args, key: string): Args[] {
   const list = a[key]
   if (Array.isArray(list)) return list.filter((x): x is Args => typeof x === 'object' && x !== null)

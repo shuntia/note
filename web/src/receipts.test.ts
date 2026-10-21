@@ -17,6 +17,27 @@ describe('note receipts', () => {
   })
 })
 
+describe('memory receipts', () => {
+  test('memory_find reads as a search or a read', () => {
+    expect(receipt('memory_find', '{"query":"tea"}', false)).toBe('Searched memory for “tea”')
+    expect(receipt('memory_find', '{"id":"0f0e"}', false)).toBe('Read a saved note')
+  })
+  test('memory_save reads as the note or memory it wrote', () => {
+    expect(doing('memory_save', '{"items":[{"kind":"note","title":"call the bank"}]}')).toBe('Writing a note')
+    expect(receipt('memory_save', '{"items":[{"kind":"note","title":"call the bank"}]}', false)).toBe('Noted “call the bank”')
+    expect(receipt('memory_save', '{"items":[{"id":"1a2b3c4d"}]}', false)).toBe('Kept a note')
+    expect(receipt('memory_save', '{"items":[{"id":"1a2b3c4d","title":"milk"}]}', false)).toBe('Changed a note to “milk”')
+    expect(receipt('memory_save', '{"items":[{"id":"1a2b3c4d","kind":"semantic"}]}', false)).toBe('Kept a note as a memory')
+    expect(receipt('memory_save', '{"items":[{"title":"likes tea"}]}', false)).toBe('Remembered: likes tea')
+    expect(receipt('memory_save', '{"items":[{"supersedes":"x","title":"coffee now"}]}', false)).toBe('Replaced an older note: coffee now')
+    expect(receipt('memory_save', '{"items":[{"title":"a"},{"title":"b"}]}', false)).toBe('Saved 2 items to memory')
+    expect(receipt('memory_save', '{"items":[]}', true)).toBe("Couldn't save that to memory")
+  })
+  test('memory_remove counts what it cleared', () => {
+    expect(receipt('memory_remove', '{"ids":["a","b"]}', false)).toBe('Cleared 2 items from memory')
+  })
+})
+
 describe('order receipts', () => {
   test('each order tool reads plainly', () => {
     expect(receipt('order_set', '{"task_ids":[1,2]}', false)).toBe('Put 2 tasks in order')
