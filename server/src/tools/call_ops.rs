@@ -33,7 +33,7 @@ pub struct CallArgs {
     pub brief: Option<String>,
     /// The tasks it pushes on; default the wake-up's own.
     #[serde(default)]
-    #[schemars(with = "Vec<i64>")]
+    #[schemars(with = "Vec<i64>", extend("items" = { "type": ["integer", "string"] }))]
     pub task_ids: Vec<serde_json::Value>,
 }
 

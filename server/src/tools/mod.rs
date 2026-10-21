@@ -800,7 +800,7 @@ const TOOLS: &[ToolSpec] = tools![
     "timezone_set": schema::<zone_ops::SetArgs> => run!(&zone_ops::set);
         "Set the user's time zone when they say they are elsewhere or your clock is off; \
          wake-ups and blocks keep their moment.",
-    "say": schema::<trigger_ops::SayArgs> => run!(only &trigger_ops::say), terminal_in = &[SessionKind::Trigger];
+    "say": schema::<trigger_ops::SayArgs> => run!(&trigger_ops::say), terminal_in = &[SessionKind::Trigger];
         "Say this to the user and end the session: one or two warm sentences, no greeting \
          ritual. It lands in the thread and as a notification. To call instead, use call_user. \
          With await_min the session waits instead of ending: the message goes out now, and \

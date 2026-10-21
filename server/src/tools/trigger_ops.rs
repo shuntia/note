@@ -17,9 +17,10 @@ pub struct SayArgs {
     /// a question wait 15 without it; 0 waits for nothing.
     #[serde(default)]
     pub await_min: Option<u32>,
-    /// The tasks these words push on, by id; omit to take the wake-up's own.
+    /// The tasks these words push on; default the wake-up's own.
     #[serde(default)]
-    pub task_ids: Vec<i64>,
+    #[schemars(with = "Vec<i64>", extend("items" = { "type": ["integer", "string"] }))]
+    pub task_ids: Vec<serde_json::Value>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -58,14 +59,15 @@ pub(crate) fn zone_arg(tz: Option<&str>) -> Result<Option<jiff::tz::TimeZone>, T
 
 /// The trigger session's terminal word. The firing path is what delivers it and
 /// writes it to the thread, so the tool only vets the text.
-pub fn say(args: &SayArgs) -> Result<serde_json::Value, ToolError> {
+pub fn say(conn: &Connection, ctx: &ToolCtx, args: &SayArgs) -> Result<serde_json::Value, ToolError> {
     let text = args.text.trim();
     if text.is_empty() || text.len() > triggers::MAX_SAY_BYTES {
         return Err(ToolError::rejected(format!("text must be 1 to {} bytes", triggers::MAX_SAY_BYTES)));
     }
     let mut out = serde_json::json!({ "said": text, "memory": args.memory });
-    if !args.task_ids.is_empty() {
-        out["task_ids"] = serde_json::json!(args.task_ids);
+    let task_ids = super::call_ops::resolve_task_ids(conn, ctx.user_id, &args.task_ids)?;
+    if !task_ids.is_empty() {
+        out["task_ids"] = task_ids.into();
     }
     if args.await_min.is_none() && asks(text) {
         out["await_min"] = triggers::QUESTION_WAIT_MIN.into();
@@ -191,6 +193,17 @@ mod tests {
         let out = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say", r#"{"text":"hi"}"#)
             .unwrap();
         assert_eq!(out["memory"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn say_reads_a_task_by_its_title() {
+        let (conn, tmp) = env();
+        let made = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "task_save", r#"{"tasks":[{"title":"Lab report"}]}"#).unwrap();
+        let id = made["saved"][0]["id"].as_i64().unwrap();
+        let out = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say", r#"{"text":"lab report?","task_ids":["lab report", "2"]}"#).unwrap();
+        assert_eq!(out["task_ids"], serde_json::json!([id, 2]));
+        let e = dispatch(&conn, &ctx(&tmp), SessionKind::Trigger, "say", r#"{"text":"x","task_ids":["nothing like it"]}"#).unwrap_err();
+        assert_eq!(e.kind, "rejected");
     }
 
     #[test]
