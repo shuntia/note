@@ -1,5 +1,5 @@
 [workspace]
-members = ["server", "voice-proto", "voice"]
+members = ["server", "voice-proto", "voice", "eval"]
 resolver = "2"
 
 [workspace.lints.clippy]

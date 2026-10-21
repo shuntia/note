@@ -1,0 +1,58 @@
+kind = "talk"
+local_hour = 9
+description = "A course syllabus becomes one goal, its units and their lessons"
+request = """
+Here's the syllabus for my visual arts course. Please put the whole thing into my tasks: one goal for the course, due on the cumulative exam, with each unit as a task due on its date, that unit's lessons inside it sized from the rough lengths, and the exam itself as a task too. Go ahead and set it all up, no need to check with me first.
+
+Unit 1: Drawing foundations (due {+17})
+- Line and mark-making (about 45 min)
+- Contour drawing (about 1 hr)
+- Gesture drawing (30 min)
+- Basic shapes and forms (45 min)
+- Value scales (40 min)
+- Light and shadow on spheres (1 hr)
+- Still life sketch (1.5 hr)
+- Unit 1 sketchbook review (30 min)
+
+Unit 2: Perspective and space (due {+29})
+- One-point perspective (1 hr)
+- Two-point perspective (1 hr)
+- Three-point perspective (1 hr 15 min)
+- Foreshortening (45 min)
+- Atmospheric perspective (30 min)
+- Interior room drawing (1.5 hr)
+- Street scene study (1.5 hr)
+- Unit 2 critique prep (30 min)
+
+Unit 3: Color theory (due {+44})
+- Color wheel painting (1 hr)
+- Hue, value and saturation (45 min)
+- Complementary schemes (40 min)
+- Analogous schemes (40 min)
+- Warm and cool temperature (30 min)
+- Color mixing drills (1 hr)
+- Limited palette study (1 hr 15 min)
+- Color and mood (45 min)
+- Unit 3 color journal (30 min)
+
+Unit 4: Composition (due {+58})
+- Rule of thirds (30 min)
+- Balance and symmetry (45 min)
+- Leading lines (30 min)
+- Focal point and emphasis (45 min)
+- Negative space (40 min)
+- Thumbnail studies (1 hr)
+- Final composition draft (2 hr)
+
+Unit 5: Portfolio and art history (due {+58})
+- Renaissance overview (45 min)
+- Impressionism overview (45 min)
+- Modern movements (45 min)
+- Artist statement draft (1 hr)
+- Selecting portfolio pieces (45 min)
+- Photographing artwork (30 min)
+- Portfolio layout (1 hr)
+- Portfolio review (30 min)
+
+Cumulative exam: {+59}
+"""

@@ -65,7 +65,7 @@
             inherit version;
             src = lib.fileset.toSource {
               root = ./.;
-              fileset = lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./server ./voice-proto ./voice ];
+              fileset = lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./server ./voice-proto ./voice ./eval/Cargo.toml ./eval/src ];
             };
             strictDeps = true;
             nativeBuildInputs = [ pkgs.pkg-config ];
@@ -75,7 +75,7 @@
           # Keyed on Cargo.lock, so the dependency tree compiles once and is
           # reused by every later build of the crate.
           cargoArtifacts = craneLib.buildDepsOnly (commonArgs // {
-            cargoExtraArgs = "--locked --workspace --exclude note-voice";
+            cargoExtraArgs = "--locked --workspace --exclude note-voice --exclude note-eval";
           });
 
           server = craneLib.buildPackage (commonArgs // {
@@ -212,11 +212,11 @@
           # clients refuse to start without CA roots.
           tests = craneLib.cargoTest (commonArgs // {
             inherit cargoArtifacts;
-            cargoTestExtraArgs = "--workspace --exclude note-voice";
+            cargoTestExtraArgs = "--workspace --exclude note-voice --exclude note-eval";
             SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
             src = lib.fileset.toSource {
               root = ./.;
-              fileset = lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./server ./voice-proto ./voice ./config/defaults ];
+              fileset = lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./server ./voice-proto ./voice ./eval/Cargo.toml ./eval/src ./config/defaults ];
             };
           });
 

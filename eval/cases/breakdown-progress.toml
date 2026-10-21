@@ -1,0 +1,4 @@
+kind = "talk"
+local_hour = 9
+description = "A sized task splits into parts with the finished one marked"
+request = "Outline's done. Split the rest into drafting, citations and proofreading, about an hour total."

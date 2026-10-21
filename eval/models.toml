@@ -1,0 +1,18 @@
+# Free OpenRouter models only: the harness refuses any id without `:free` or
+# with a non-zero price in the catalogue.
+base_url = "https://openrouter.ai/api/v1"
+
+[[models]]
+short = "minimax"
+id = "minimax/minimax-m3.1-flash:free"
+name = "MiniMax M3.1 Flash"
+
+[[models]]
+short = "nemotron"
+id = "nvidia/nemotron-3-ultra-550b-a55b:free"
+name = "Nemotron 3 Ultra"
+
+[[models]]
+short = "gemma"
+id = "google/gemma-4-31b-it:free"
+name = "Gemma 4 31B"
