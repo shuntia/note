@@ -11,12 +11,13 @@ pub const MAX_REMOVE: usize = 20;
 
 /// Fields a model hands `task_save` that another tool takes.
 const ELSEWHERE: &[(&str, &str)] = &[
-    ("event_id", "schedule_move or schedule_drop"),
-    ("date", "plan_tasks"),
-    ("start", "plan_tasks"),
-    ("at", "plan_tasks"),
-    ("scheduled_at", "plan_tasks"),
-    ("prompt", "trigger_set"),
+    ("event_id", "day_save"),
+    ("date", "day_save"),
+    ("start", "day_save"),
+    ("at", "day_save"),
+    ("scheduled_at", "day_save"),
+    ("prompt", "day_save (a wake item)"),
+    ("wake", "day_save"),
 ];
 
 pub(super) const NODE_FIELDS: &[&str] =
@@ -696,7 +697,7 @@ impl<'a> Saver<'a> {
             .query_row("SELECT parent_id FROM tasks WHERE id = ?1", [id], |x| x.get(0))
             .map_err(internal)?;
         let Some(parent) = parent else {
-            self.ignore(r, "before", "top-level tasks keep no order of their own; the day's order is order_move's");
+            self.ignore(r, "before", "top-level tasks keep no order of their own; the day's order is day_save's");
             return Ok(());
         };
         let mut stmt = self
@@ -1624,7 +1625,7 @@ mod tests {
     fn fields_that_belong_elsewhere_or_nowhere_are_ignored_and_named() {
         let (conn, tmp) = env("UTC");
         let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "x", "event_id": 4, "colour": "red", "state": "Completed", "urgency": "urgent", "notify": "silent"}]}));
-        assert_eq!(field(&out, "ignored", "0", "event_id").unwrap()["why"], "event_id belongs to schedule_move or schedule_drop");
+        assert_eq!(field(&out, "ignored", "0", "event_id").unwrap()["why"], "event_id belongs to day_save");
         assert_eq!(field(&out, "ignored", "0", "colour").unwrap()["why"], "not a field here");
         let t = task(&conn, saved(&out, "0"));
         assert_eq!((t.state.as_str(), t.urgency.as_str(), t.notify.as_str()), ("done", "high", "none"));

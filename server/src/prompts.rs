@@ -133,7 +133,7 @@ mod tests {
             let trigger = load("trigger");
             for name in [
                 "say", "stay_quiet", "call_user", "cancel_on",
-                "order_set", "order_move", "order_drop", "note_write", "trigger_set",
+                "day_find", "day_save", "day_remove", "note_write",
             ] {
                 assert!(trigger.contains(name), "the trigger prompt ({lang:?}) never mentions {name}");
             }
@@ -141,15 +141,17 @@ mod tests {
                 let text = load(name);
                 assert!(text.contains("ids") || text.contains("ID"), "the {name} prompt ({lang:?}) never keeps ids from the user");
             }
-            assert!(!load("persona").contains("trigger_budget"), "the daily budget belongs to the context, which drops it when uncapped");
+            assert!(!load("persona").contains("extra_wakes"), "the daily budget belongs to the context, which drops it when uncapped");
             let planning = load("planning");
-            assert!(planning.contains("order_set"), "the planning prompt ({lang:?}) never sets the order");
+            assert!(planning.contains("day_save") && planning.contains("replace"), "the planning prompt ({lang:?}) never sets the day's list");
             for name in NAMES {
                 assert!(!load(name).contains("plan_auto"), "the {name} prompt ({lang:?}) still calls plan_auto");
                 for old in [
                     "task_create", "task_update", "task_split", "task_delete", "task_list", "task_search", "task_read",
                     "task_bulk_update", "goal_create", "goal_update", "goal_list", "calendar_list", "calendar_add",
-                    "calendar_update", "calendar_skip",
+                    "calendar_update", "calendar_skip", "plan_list", "plan_tasks", "plan_carry", "order_set",
+                    "order_move", "order_drop", "schedule_move", "schedule_drop", "schedule_insert", "trigger_set",
+                    "trigger_budget",
                 ] {
                     assert!(!load(name).contains(old), "the {name} prompt ({lang:?}) still calls {old}");
                 }

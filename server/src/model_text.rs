@@ -426,12 +426,12 @@ pub fn settings(l: Lang, name: &str, factor: Option<(f64, i64)>, budget: Option<
     let factor = factor.map(|(value, sample)| plan_factor(l, value, sample)).unwrap_or_default();
     let budget = budget.map(|(spent, allowance)| match l {
         Lang::En => format!(
-            "Trigger points you may lay today: {spent} of {allowance} used; to exceed it, ask the user and \
-             call trigger_budget only after they agree\n"
+            "Wake-ups you may lay today: {spent} of {allowance} used; to exceed it, ask the user and \
+             pass extra_wakes with day_save only after they agree\n"
         ),
         Lang::Ja => format!(
-            "今日置けるトリガーポイント: {allowance}件中{spent}件使用済み。超えるなら先にユーザーに聞き、\
-             同意を得てから trigger_budget を呼ぶ\n"
+            "今日置ける目覚め: {allowance}件中{spent}件使用済み。超えるなら先にユーザーに聞き、\
+             同意を得てから day_save に extra_wakes を付ける\n"
         ),
     });
     let budget = budget.unwrap_or_default();
@@ -713,9 +713,9 @@ pub fn close_day_prompt(l: Lang) -> &'static str {
     l.of(
         "It is the close of the day. In one or two lines say what is \
          still pending and what got done, then ask whether to carry the rest to tomorrow. If they say \
-         yes, call plan_carry.",
+         yes, call day_save with carry: true.",
         "一日の締めくくりです。まだ残っていることと終わったことを一、二行で伝え、\
-         残りを明日に回すかどうか尋ねてください。回すと言われたら plan_carry を呼びます。",
+         残りを明日に回すかどうか尋ねてください。回すと言われたら day_save を carry: true で呼びます。",
     )
 }
 
@@ -748,11 +748,11 @@ pub fn also_due(l: Lang, prompts: &[String]) -> String {
 pub fn lay_day_prompt(l: Lang) -> &'static str {
     l.of(
         "The user's day has begun. Lay the day: check today's order and set it if the night left \
-         it empty or wrong, then lay 4 to 8 wake-ups with trigger_set, each tied to a moment — \
+         it empty or wrong, then lay 4 to 8 wake-ups as day_save wake items, each tied to a moment — \
          just after a work session's planned end, before and after calendar events, midday, late \
          afternoon. Then stay quiet unless something needs the user now.",
         "ユーザーの一日が始まりました。一日を組んでください: 今日の順番を確かめ、夜のうちに空か\
-         ずれていれば決め、trigger_set で目覚めを4〜8個、それぞれある瞬間に結びつけて置く — \
+         ずれていれば決め、day_save の wake で目覚めを4〜8個、それぞれある瞬間に結びつけて置く — \
          作業セッションの予定の終わりの直後、カレンダーの予定の前後、昼、夕方。そのあと、今\
          ユーザーに必要なことがなければ黙る。",
     )

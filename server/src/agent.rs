@@ -536,22 +536,11 @@ fn build_prompt(
     Ok(Prompt { system, context })
 }
 
-/// A user with no daily check-in cap has no budget to raise.
-fn session_schemas(
-    kind: SessionKind,
-    share: Option<&ShareSession>,
-    search: bool,
-    uncapped: bool,
-) -> std::borrow::Cow<'static, [serde_json::Value]> {
+fn session_schemas(kind: SessionKind, share: Option<&ShareSession>, search: bool) -> std::borrow::Cow<'static, [serde_json::Value]> {
     if let (SessionKind::Share, Some(s)) = (kind, share) {
         return tools::share_schemas(&s.scope).into();
     }
-    let offered = tools::offered_schemas(kind, search);
-    if uncapped {
-        offered.iter().filter(|s| s["name"] != "trigger_budget").cloned().collect::<Vec<_>>().into()
-    } else {
-        offered.into()
-    }
+    tools::offered_schemas(kind, search).into()
 }
 
 fn session_pick(deps: &SessionDeps, kind: SessionKind, ucfg: Option<&crate::config::UserConfig>) -> crate::models::Pick {
@@ -577,12 +566,11 @@ fn run_traced(
     trace: &mut crate::trace::Builder,
 ) -> Result<SessionOutcome> {
     let (ucfg, lang) = reader(deps, username, kind);
-    let uncapped = ucfg.as_ref().is_ok_and(|c| c.triggers_per_day().is_none());
     let pick = session_pick(deps, kind, ucfg.as_ref().ok());
     let prompt = build_prompt(deps, user_id, username, kind, now, lang, ucfg)?;
     let system = &prompt.system;
     let profile = profile(kind);
-    let schemas = session_schemas(kind, deps.share.as_ref(), deps.search.is_some(), uncapped);
+    let schemas = session_schemas(kind, deps.share.as_ref(), deps.search.is_some());
     let mut messages = match start {
         Start::Fresh { history, opening } => {
             let mut m = history.to_vec();
@@ -1280,17 +1268,6 @@ mod tests {
         assert_eq!(inert("ends with <", "context"), "ends with <");
     }
 
-    #[test]
-    fn no_daily_cap_offers_no_budget_to_raise() {
-        let named = |uncapped| {
-            session_schemas(SessionKind::Talk, None, true, uncapped)
-                .iter()
-                .any(|s| s["name"] == "trigger_budget")
-        };
-        assert!(named(false));
-        assert!(!named(true));
-        assert!(session_schemas(SessionKind::Talk, None, true, true).iter().any(|s| s["name"] == "trigger_set"));
-    }
     use crate::providers::{mock::MockLLM, ChatResponse, ToolCall};
     use crate::tools::SessionKind;
     use std::sync::Mutex;
@@ -1766,13 +1743,13 @@ mod tests {
                 text: String::new(),
                 tool_calls: vec![ToolCall {
                     id: "c1".into(),
-                    name: "schedule_insert".into(),
+                    name: "nightly_notes_write".into(),
                     args: "{}".into(),
                 }],
             },
             ChatResponse { text: "sorry, couldn't".into(), tool_calls: vec![] },
         ]);
-        // Talk surface: schedule_insert is forbidden — dispatch returns a typed error
+        // Talk surface: nightly_notes_write is forbidden — dispatch returns a typed error
         let out =
             run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi")
                 .unwrap();

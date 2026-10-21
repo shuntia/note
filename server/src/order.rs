@@ -1,15 +1,34 @@
+//! The day's task list: each date's tasks in the order Now offers them, a
+//! timed one pointing at the block event that delivers it.
+
 use crate::tasks::{self, QueueEntry};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 
 pub const MAX_ITEMS: usize = 60;
+/// How soon a timed item's start may be for Now to offer it already.
+pub const LEAD_MIN: i64 = 10;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Item {
     pub task_id: i64,
     pub title: String,
-    /// The task a step belongs to.
+    /// The task a part belongs to.
     pub parent: Option<String>,
+    /// The block delivering it, with its start and end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end: Option<String>,
+}
+
+/// One stored row of a day, whatever its task's state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Slot {
+    pub task_id: i64,
+    pub event_id: Option<i64>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -25,61 +44,105 @@ pub enum OrderError {
 }
 
 /// The day's open items by position; an item that is finished, dropped or
-/// deleted, or a step whose task is, has left it.
-pub fn list(
-    conn: &Connection,
-    user_id: i64,
-    date: jiff::civil::Date,
-) -> rusqlite::Result<Vec<Item>> {
-    let mut stmt = conn.prepare(
-        "SELECT t.id, t.title, p.title FROM run_order o
-         JOIN tasks t ON t.id = o.task_id
+/// deleted, or whose block was dropped, has left it.
+pub fn list(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> rusqlite::Result<Vec<Item>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT t.id, t.title, p.title, e.id, e.wall_time, e.end_wall_time FROM day_items d
+         JOIN tasks t ON t.id = d.task_id
          LEFT JOIN tasks p ON p.id = t.parent_id
          JOIN tasks r ON r.id = t.root_id
-         WHERE o.user_id = ?1 AND o.date = ?2 AND t.user_id = ?1
+         LEFT JOIN events e ON e.id = d.event_id
+         WHERE d.user_id = ?1 AND d.date = ?2 AND t.user_id = ?1
            AND t.state IN ('open','in_progress')
            AND (p.id IS NULL OR p.state IN ('open','in_progress'))
            AND r.state IN ('open','in_progress')
-         ORDER BY o.position",
+           AND (e.id IS NULL OR e.status != 'dropped')
+         ORDER BY d.position",
     )?;
     let rows = stmt.query_map((user_id, date.to_string()), |r| {
         Ok(Item {
             task_id: r.get(0)?,
             title: r.get(1)?,
             parent: r.get(2)?,
+            event_id: r.get(3)?,
+            at: r.get(4)?,
+            end: r.get(5)?,
         })
     })?;
     rows.collect()
 }
 
 pub fn ids(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> rusqlite::Result<Vec<i64>> {
-    Ok(list(conn, user_id, date)?
-        .into_iter()
-        .map(|i| i.task_id)
-        .collect())
+    Ok(list(conn, user_id, date)?.into_iter().map(|i| i.task_id).collect())
 }
 
-/// Replaces the day's whole order; every id must be one of the user's open
-/// tasks or steps, named once.
-pub fn set(
-    conn: &Connection,
-    user_id: i64,
-    date: jiff::civil::Date,
-    task_ids: &[i64],
-) -> Result<Vec<Item>, OrderError> {
-    let tx = conn.unchecked_transaction()?;
-    let items = replace(&tx, user_id, date, task_ids)?;
-    tx.commit()?;
-    Ok(items)
+/// Every row of the day by position.
+pub fn slots(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> rusqlite::Result<Vec<Slot>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT task_id, event_id FROM day_items WHERE user_id = ?1 AND date = ?2 ORDER BY position",
+    )?;
+    let rows = stmt.query_map((user_id, date.to_string()), |r| Ok(Slot { task_id: r.get(0)?, event_id: r.get(1)? }))?;
+    rows.collect()
 }
 
-/// `set` for a caller already inside a transaction.
-pub fn replace(
-    conn: &Connection,
-    user_id: i64,
-    date: jiff::civil::Date,
-    task_ids: &[i64],
-) -> Result<Vec<Item>, OrderError> {
+/// The start of a slot's block while it is still live.
+fn live_start(conn: &Connection, event_id: Option<i64>) -> rusqlite::Result<Option<i64>> {
+    let Some(id) = event_id else { return Ok(None) };
+    let wall: Option<String> = conn
+        .query_row("SELECT wall_time FROM events WHERE id = ?1 AND status != 'dropped'", [id], |r| r.get(0))
+        .optional()?;
+    Ok(wall.map(|w| crate::templates::wall_minutes(&w)))
+}
+
+/// Stores `slots` as the whole day, in order: a slot whose block was dropped
+/// leaves, and the timed ones are put in time order among the places timed
+/// ones hold.
+pub fn write(conn: &Connection, user_id: i64, date: jiff::civil::Date, slots: &[Slot]) -> rusqlite::Result<()> {
+    let mut kept: Vec<(Slot, Option<i64>)> = Vec::with_capacity(slots.len());
+    for s in slots {
+        if kept.iter().any(|(k, _)| k.task_id == s.task_id) {
+            continue;
+        }
+        let start = live_start(conn, s.event_id)?;
+        if s.event_id.is_some() && start.is_none() {
+            continue;
+        }
+        kept.push((*s, start));
+    }
+    let mut timed: Vec<(Slot, Option<i64>)> = kept.iter().copied().filter(|(_, t)| t.is_some()).collect();
+    timed.sort_by_key(|(_, t)| *t);
+    let mut timed = timed.into_iter();
+    let ordered: Vec<Slot> = kept
+        .iter()
+        .map(|(s, t)| if t.is_some() { timed.next().map_or(*s, |(n, _)| n) } else { *s })
+        .collect();
+    conn.execute("DELETE FROM day_items WHERE user_id = ?1 AND date = ?2", (user_id, date.to_string()))?;
+    let mut insert = conn.prepare_cached(
+        "INSERT INTO day_items (user_id, date, position, task_id, event_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+    )?;
+    for (position, s) in ordered.iter().enumerate() {
+        insert.execute((user_id, date.to_string(), position as i64, s.task_id, s.event_id))?;
+    }
+    Ok(())
+}
+
+/// Gives `task_id` the block `event_id` on that day: its row when it has one,
+/// else a new one in time order.
+pub fn attach(conn: &Connection, user_id: i64, date: jiff::civil::Date, task_id: i64, event_id: i64) -> rusqlite::Result<()> {
+    let mut all = slots(conn, user_id, date)?;
+    match all.iter_mut().find(|s| s.task_id == task_id) {
+        Some(s) => s.event_id = Some(event_id),
+        None => all.push(Slot { task_id, event_id: Some(event_id) }),
+    }
+    write(conn, user_id, date, &all)
+}
+
+/// Takes the row holding the block `event_id` off its day.
+pub fn detach_event(conn: &Connection, event_id: i64) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM day_items WHERE event_id = ?1", [event_id]).map(|_| ())
+}
+
+fn checked(conn: &Connection, user_id: i64, task_ids: &[i64]) -> Result<(), OrderError> {
     if task_ids.len() > MAX_ITEMS {
         return Err(OrderError::TooMany);
     }
@@ -98,17 +161,52 @@ pub fn replace(
             }
         }
     }
-    conn.execute(
-        "DELETE FROM run_order WHERE user_id = ?1 AND date = ?2",
-        (user_id, date.to_string()),
-    )?;
-    for (position, id) in task_ids.iter().enumerate() {
+    Ok(())
+}
+
+/// Replaces the day's whole list of open items; every id must be one of the
+/// user's open tasks, named once. A named item keeps its block, an open one
+/// left out leaves the day with its block, and closed ones stay behind.
+pub fn set(conn: &Connection, user_id: i64, date: jiff::civil::Date, task_ids: &[i64]) -> Result<Vec<Item>, OrderError> {
+    let tx = conn.unchecked_transaction()?;
+    let items = replace(&tx, user_id, date, task_ids)?;
+    tx.commit()?;
+    Ok(items)
+}
+
+/// `set` for a caller already inside a transaction.
+pub fn replace(conn: &Connection, user_id: i64, date: jiff::civil::Date, task_ids: &[i64]) -> Result<Vec<Item>, OrderError> {
+    checked(conn, user_id, task_ids)?;
+    let before = slots(conn, user_id, date)?;
+    let open: Vec<i64> = ids(conn, user_id, date)?;
+    let mut after: Vec<Slot> = task_ids
+        .iter()
+        .map(|&id| before.iter().find(|s| s.task_id == id).copied().unwrap_or(Slot { task_id: id, event_id: None }))
+        .collect();
+    for s in &before {
+        if task_ids.contains(&s.task_id) {
+            continue;
+        }
+        if open.contains(&s.task_id) {
+            drop_block(conn, s.event_id)?;
+        } else {
+            after.push(*s);
+        }
+    }
+    write(conn, user_id, date, &after)?;
+    Ok(list(conn, user_id, date)?)
+}
+
+/// Drops a block still waiting, so its task is no longer due then.
+pub fn drop_block(conn: &Connection, event_id: Option<i64>) -> rusqlite::Result<()> {
+    if let Some(id) = event_id {
         conn.execute(
-            "INSERT INTO run_order (user_id, date, position, task_id) VALUES (?1, ?2, ?3, ?4)",
-            (user_id, date.to_string(), position as i64, id),
+            "UPDATE events SET status = 'dropped', decided_at = ?2
+             WHERE id = ?1 AND status IN ('pending','snoozed','fired')",
+            (id, jiff::Timestamp::now().to_string()),
         )?;
     }
-    Ok(list(conn, user_id, date)?)
+    Ok(())
 }
 
 /// `ids` with `task_id` taken out and put back in front of `before`, or last;
@@ -123,8 +221,8 @@ pub fn placed(ids: &[i64], task_id: i64, before: Option<i64>) -> Option<Vec<i64>
     Some(out)
 }
 
-/// What Now offers next: today's order, one entry per task, then the queue
-/// behind it.
+/// What Now offers next: today's open items whose block, if any, starts
+/// within `LEAD_MIN`, one entry per tree, then the queue behind them.
 pub fn candidates(
     conn: &Connection,
     user_id: i64,
@@ -132,11 +230,16 @@ pub fn candidates(
     now: jiff::Timestamp,
     limit: usize,
 ) -> rusqlite::Result<Vec<QueueEntry>> {
-    let today = now.to_zoned(tz.clone()).date();
+    let local = now.to_zoned(tz.clone());
+    let today = local.date();
+    let soon = i64::from(local.hour()) * 60 + i64::from(local.minute()) + LEAD_MIN;
     let mut out: Vec<QueueEntry> = Vec::new();
     for item in list(conn, user_id, today)? {
         if out.len() == limit {
             break;
+        }
+        if item.at.as_deref().is_some_and(|at| crate::templates::wall_minutes(at) > soon) {
+            continue;
         }
         let Some(held) = tasks::get(conn, user_id, item.task_id)? else {
             continue;

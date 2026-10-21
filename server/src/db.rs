@@ -512,6 +512,7 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE conversations ADD COLUMN model TEXT;
      ALTER TABLE conversations ADD COLUMN effort TEXT;",
     TREE,
+    DAY,
 ];
 
 /// v65: tasks form one tree. Each due/size/Now column loses its parent-only
@@ -569,6 +570,43 @@ const TREE: &str = "
                 ORDER BY c.id LIMIT 1)
         END, task_id)
       WHERE task_id IS NOT NULL;
+";
+
+/// v66: the day is one list. `day_items` takes over from `run_order`; a timed
+/// item points at the block event that delivers it. Positions only order a
+/// day, so the appended blocks start past any copied row.
+const DAY: &str = "
+    CREATE TABLE day_items (
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        date TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        event_id INTEGER REFERENCES events(id) ON DELETE SET NULL,
+        UNIQUE (user_id, date, task_id)
+    );
+    CREATE INDEX idx_day_items_day ON day_items(user_id, date, position);
+    CREATE INDEX idx_day_items_event ON day_items(event_id) WHERE event_id IS NOT NULL;
+
+    INSERT INTO day_items (user_id, date, position, task_id)
+        SELECT user_id, date, position, task_id FROM run_order;
+
+    CREATE TEMP TABLE day_blocks AS
+        SELECT p.user_id, p.date, et.task_id, MIN(e.id) AS event_id
+        FROM events e JOIN plans p ON p.id = e.plan_id JOIN event_tasks et ON et.event_id = e.id
+        WHERE e.end_wall_time IS NOT NULL AND e.status IN ('pending','snoozed','fired')
+          AND e.wall_time = (SELECT MIN(e2.wall_time) FROM events e2 JOIN event_tasks et2 ON et2.event_id = e2.id
+                             WHERE e2.plan_id = e.plan_id AND et2.task_id = et.task_id
+                               AND e2.end_wall_time IS NOT NULL AND e2.status IN ('pending','snoozed','fired'))
+        GROUP BY p.user_id, p.date, et.task_id;
+    UPDATE day_items SET event_id = (SELECT b.event_id FROM day_blocks b
+        WHERE b.user_id = day_items.user_id AND b.date = day_items.date AND b.task_id = day_items.task_id);
+    INSERT INTO day_items (user_id, date, position, task_id, event_id)
+        SELECT b.user_id, b.date, 1000000 + ROW_NUMBER() OVER (PARTITION BY b.user_id, b.date ORDER BY e.wall_time, e.id),
+               b.task_id, b.event_id
+        FROM day_blocks b JOIN events e ON e.id = b.event_id
+        WHERE NOT EXISTS (SELECT 1 FROM run_order o
+                          WHERE o.user_id = b.user_id AND o.date = b.date AND o.task_id = b.task_id);
+    DROP TABLE day_blocks;
 ";
 
 pub fn server_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
@@ -785,7 +823,7 @@ mod tests {
              INSERT INTO work_sessions (user_id, title, started_at) VALUES (1, 'free', 'x');",
         )
         .unwrap();
-        apply_migrations(&conn, BASELINE, MIGRATIONS).unwrap();
+        apply_migrations(&conn, BASELINE, &MIGRATIONS[..10]).unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(v, 65);
         type Row = (i64, i64, i64, i64, String, bool, Option<String>, Option<String>);
@@ -831,6 +869,58 @@ mod tests {
         assert!(conn.execute("UPDATE tasks SET due_on = '2026-11-02', due_at = NULL WHERE id = 3", []).is_err());
         assert!(conn.execute("UPDATE tasks SET depth = 5 WHERE id = 3", []).is_err());
         assert!(conn.execute("UPDATE tasks SET category = 'x' WHERE id = 3", []).is_err(), "a child still carries no category");
+    }
+
+    #[test]
+    fn v66_puts_the_order_and_its_blocks_on_one_day_list() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        apply_migrations(&conn, BASELINE, &MIGRATIONS[..10]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('aitest','h','member');
+             INSERT INTO tasks (id, user_id, title, created_at, updated_at) VALUES (1, 1, 'essay', 'x', 'x');
+             INSERT INTO tasks (id, user_id, title, created_at, updated_at, parent_id)
+                 VALUES (2, 1, 'outline', 'x', 'x', 1), (3, 1, 'draft', 'x', 'x', 1);
+             INSERT INTO tasks (id, user_id, title, created_at, updated_at) VALUES (4, 1, 'laundry', 'x', 'x'), (5, 1, 'lab', 'x', 'x');
+             UPDATE tasks SET state = 'done' WHERE id = 2;
+             INSERT INTO work_sessions (user_id, task_id, leaf_id, title, started_at, step_index, step_count, step_name)
+                 VALUES (1, 1, 3, 'essay', 'x', 2, 2, 'draft');
+             INSERT INTO run_order (user_id, date, position, task_id)
+                 VALUES (1, '2026-10-21', 0, 3), (1, '2026-10-21', 1, 4), (1, '2026-10-22', 0, 4);
+             INSERT INTO plans (id, user_id, date, created_at) VALUES (1, 1, '2026-10-21', 'x');
+             INSERT INTO events (id, plan_id, kind, wall_time, end_wall_time, alert, status)
+                 VALUES (1, 1, 'draft', '13:00', '14:00', 0, 'pending'), (2, 1, 'lab', '15:00', '16:00', 0, 'pending'),
+                        (3, 1, 'lab', '10:00', '11:00', 0, 'dropped'), (4, 1, 'trigger', '09:00', NULL, 1, 'pending');
+             INSERT INTO event_tasks (event_id, task_id) VALUES (1, 3), (2, 5), (3, 4), (4, 4);",
+        )
+        .unwrap();
+        apply_migrations(&conn, BASELINE, MIGRATIONS).unwrap();
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 66);
+        let rows: Vec<(String, i64, Option<i64>)> = conn
+            .prepare("SELECT date, task_id, event_id FROM day_items ORDER BY date, position")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            [
+                ("2026-10-21".to_string(), 3, Some(1)),
+                ("2026-10-21".to_string(), 4, None),
+                ("2026-10-21".to_string(), 5, Some(2)),
+                ("2026-10-22".to_string(), 4, None),
+            ],
+            "the order stays first, its block linked; a block outside it joins after; a dropped block and a wake-up's link do not"
+        );
+        conn.execute("DELETE FROM event_tasks WHERE event_id = 1", []).unwrap();
+        conn.execute("DELETE FROM events WHERE id = 1", []).unwrap();
+        let untimed: Option<i64> = conn.query_row("SELECT event_id FROM day_items WHERE task_id = 3", [], |r| r.get(0)).unwrap();
+        assert_eq!(untimed, None, "an item outlives its block");
+        let leaf: Option<i64> = conn.query_row("SELECT leaf_id FROM work_sessions", [], |r| r.get(0)).unwrap();
+        assert_eq!(leaf, Some(3));
+        assert!(conn.execute("INSERT INTO day_items (user_id, date, position, task_id) VALUES (1, '2026-10-21', 9, 4)", []).is_err());
     }
 
     #[test]

@@ -295,3 +295,24 @@ fn answered_checkin(state: &AppState, date: jiff::civil::Date) {
             .unwrap();
     note_server::talk::append_text(&conn, id, "user", "fine", now).unwrap();
 }
+
+#[tokio::test]
+async fn a_days_list_is_set_by_its_date_and_read_back_as_items() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let date = ahead(2);
+    let mut ids = Vec::new();
+    for title in ["laundry", "essay"] {
+        let (_, task) = call(&app, &cookie, Method::POST, "/api/tasks", Some(&format!(r#"{{"title":"{title}"}}"#))).await;
+        ids.push(task["id"].as_i64().unwrap());
+    }
+    let body = format!(r#"{{"task_ids":[{},{}]}}"#, ids[1], ids[0]);
+    let (status, set) = call(&app, &cookie, Method::PUT, &format!("/api/day/{date}/order"), Some(&body)).await;
+    assert_eq!(status, StatusCode::OK, "{set}");
+    assert_eq!(set["task_ids"], serde_json::json!([ids[1], ids[0]]));
+    let (_, day) = call(&app, &cookie, Method::GET, &format!("/api/day/{date}"), None).await;
+    let tasks: Vec<&serde_json::Value> = day["items"].as_array().unwrap().iter().filter(|i| i["kind"] == "task").collect();
+    assert_eq!(tasks.iter().map(|i| i["task"].as_i64().unwrap()).collect::<Vec<_>>(), [ids[1], ids[0]]);
+    assert_eq!(tasks[0]["id"], format!("t{}", ids[1]));
+    let (status, _) = call(&app, &cookie, Method::PUT, "/api/day/someday/order", Some(&body)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}

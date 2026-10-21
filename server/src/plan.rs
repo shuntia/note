@@ -603,16 +603,62 @@ pub fn move_to_tomorrow(
          WHERE id = ?2",
         (new_id, event_id, jiff::Timestamp::now().to_string()),
     )?;
+    if ev.is_block {
+        crate::order::detach_event(conn, event_id)?;
+        let held: Option<i64> = conn
+            .query_row("SELECT task_id FROM event_tasks WHERE event_id = ?1 LIMIT 1", [new_id], |r| r.get(0))
+            .optional()?;
+        if let Some(task_id) = held {
+            crate::order::attach(conn, user_id, tomorrow, task_id, new_id)?;
+        }
+    }
     if let Some(tx) = tx {
         tx.commit()?;
     }
     Ok(Some((new_id, tomorrow)))
 }
 
-/// The close of the day, applied: every block of the day still waiting on the
-/// user goes to tomorrow, and what is left of the day's checks is dropped
-/// rather than fired into an evening that is over. Returns how many blocks
-/// moved.
+/// What carrying a day moved.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Carried {
+    /// Blocks that kept their time on the next day.
+    pub blocks: usize,
+    /// Items that went to the front of the next day's list untimed, a block
+    /// whose time there was taken among them.
+    pub untimed: usize,
+    /// Wake-ups of the day that were dropped.
+    pub dropped: usize,
+}
+
+impl Carried {
+    pub fn moved(&self) -> usize {
+        self.blocks + self.untimed
+    }
+}
+
+/// Whether `start`-`end` on `date` runs into a fixed commitment or a block
+/// still waiting.
+fn taken(conn: &Connection, user_id: i64, date: jiff::civil::Date, start: &str, end: &str) -> Result<bool> {
+    if !crate::calendar::overlaps(conn, user_id, date, start, end)?.is_empty() {
+        return Ok(true);
+    }
+    let clash: Option<i64> = conn
+        .query_row(
+            "SELECT e.id FROM events e JOIN plans p ON p.id = e.plan_id
+             WHERE p.user_id = ?1 AND p.date = ?2 AND e.end_wall_time IS NOT NULL
+               AND e.status IN ('pending','snoozed','fired') AND e.wall_time < ?4 AND ?3 < e.end_wall_time
+             LIMIT 1",
+            (user_id, date.to_string(), start, end),
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(clash.is_some())
+}
+
+/// The close of the day, applied: what is left of the day's list goes to the
+/// front of the next day's, a block keeping its time unless that time is taken
+/// there, and what is left of the day's checks is dropped rather than fired
+/// into an evening that is over.
 pub fn carry(
     conn: &Connection,
     config_dir: &std::path::Path,
@@ -620,12 +666,47 @@ pub fn carry(
     user_id: i64,
     date: jiff::civil::Date,
     now: jiff::Timestamp,
-) -> Result<usize> {
+) -> Result<Carried> {
     let template = crate::config::UserConfig::load(config_dir, username)
         .ok()
         .and_then(|c| Template::load(config_dir, username, &c.template).ok())
         .unwrap_or(Template { events: Vec::new() });
     let tx = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
+    let next = date.tomorrow()?;
+    let mut out = Carried::default();
+    let mut front: Vec<crate::order::Slot> = Vec::new();
+    for item in crate::order::list(conn, user_id, date)? {
+        let shape = match item.event_id {
+            Some(id) => block_shape(conn, user_id, id)?.filter(|(_, _, st)| matches!(st.as_str(), "pending" | "snoozed" | "fired")),
+            None => None,
+        };
+        if let (Some(id), Some((start, end, _))) = (item.event_id, shape) {
+            if !taken(conn, user_id, next, &start, &end)? {
+                match move_to_tomorrow(conn, user_id, id, &template) {
+                    Ok(Some(_)) => {
+                        out.blocks += 1;
+                        continue;
+                    }
+                    Ok(None) | Err(ShiftError::Decided { .. }) => {}
+                    Err(e) => return Err(anyhow::Error::from(e)),
+                }
+            }
+            crate::order::drop_block(conn, Some(id))?;
+        }
+        front.push(crate::order::Slot { task_id: item.task_id, event_id: None });
+        out.untimed += 1;
+    }
+    let left: Vec<crate::order::Slot> = crate::order::slots(conn, user_id, date)?
+        .into_iter()
+        .filter(|s| !front.iter().any(|f| f.task_id == s.task_id))
+        .collect();
+    crate::order::write(conn, user_id, date, &left)?;
+    if !front.is_empty() {
+        let there = crate::order::slots(conn, user_id, next)?;
+        let mut ahead = front.clone();
+        ahead.extend(there.into_iter().filter(|s| !front.iter().any(|f| f.task_id == s.task_id)));
+        crate::order::write(conn, user_id, next, &ahead)?;
+    }
     let blocks: Vec<i64> = {
         let mut stmt = conn.prepare(
             "SELECT e.id FROM events e
@@ -638,15 +719,14 @@ pub fn carry(
         let rows = stmt.query_map((user_id, date.to_string()), |r| r.get(0))?;
         rows.collect::<rusqlite::Result<_>>()?
     };
-    let mut moved = 0;
     for id in blocks {
         match move_to_tomorrow(conn, user_id, id, &template) {
-            Ok(Some(_)) => moved += 1,
+            Ok(Some(_)) => out.blocks += 1,
             Ok(None) | Err(ShiftError::Decided { .. }) => {}
             Err(e) => return Err(anyhow::Error::from(e)),
         }
     }
-    let dropped = conn.execute(
+    out.dropped = conn.execute(
         "UPDATE events SET status = 'dropped', decided_at = ?1
          WHERE kind = ?2 AND status IN ('pending', 'snoozed')
            AND plan_id IN (SELECT id FROM plans WHERE user_id = ?3 AND date = ?4)",
@@ -656,12 +736,15 @@ pub fn carry(
         conn,
         Some(user_id),
         "plan_carried",
-        &format!("{date}: {moved} block(s) to tomorrow, {dropped} check(s) dropped"),
+        &format!(
+            "{date}: {} block(s) and {} item(s) to tomorrow, {} check(s) dropped",
+            out.blocks, out.untimed, out.dropped
+        ),
     )?;
     if let Some(tx) = tx {
         tx.commit()?;
     }
-    Ok(moved)
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -974,7 +1057,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(carry(&conn, tmp.path(), "aki", uid, date, now).unwrap(), 1);
+        assert_eq!(carry(&conn, tmp.path(), "aki", uid, date, now).unwrap().moved(), 1);
 
         let today = events_for(&conn, uid, date).unwrap();
         let block = today.iter().find(|e| e.id == 2).unwrap();
@@ -990,7 +1073,33 @@ mod tests {
         assert_eq!((landed.wall_time.as_str(), landed.end_wall_time.as_deref()), ("09:30", Some("12:30")));
         assert_eq!(landed.task.as_ref().unwrap().title, "essay");
 
-        assert_eq!(carry(&conn, tmp.path(), "aki", uid, date, now).unwrap(), 0, "nothing left to move");
+        assert_eq!(carry(&conn, tmp.path(), "aki", uid, date, now).unwrap().moved(), 0, "nothing left to move");
+    }
+
+    #[test]
+    fn carrying_puts_the_rest_of_the_list_in_front_of_tomorrows_and_a_taken_time_goes_untimed() {
+        let (conn, uid, tmp, date) = day_with_a_block();
+        let next: jiff::civil::Date = "2026-09-01".parse().unwrap();
+        let task = |title: &str| {
+            crate::tasks::create(&conn, uid, crate::tasks::NewTask { title: title.into(), ..Default::default() }, "manual", crate::tasks::Actor::User)
+                .unwrap()
+                .id
+        };
+        let (laundry, essay, email) = (task("laundry"), 1, task("email"));
+        crate::order::set(&conn, uid, date, &[laundry]).unwrap();
+        crate::order::attach(&conn, uid, date, essay, 2).unwrap();
+        crate::order::set(&conn, uid, next, &[email]).unwrap();
+        crate::calendar::create(&conn, uid, crate::calendar::Fields {
+            title: "dentist".into(), kind: "fixed".into(), start_time: "10:00".into(), end_time: "11:00".into(),
+            on_date: Some("2026-09-01".into()), ..Default::default()
+        }).unwrap();
+        let now: jiff::Timestamp = "2026-08-31T21:30:00Z".parse().unwrap();
+        let carried = carry(&conn, tmp.path(), "aki", uid, date, now).unwrap();
+        assert_eq!((carried.blocks, carried.untimed), (0, 2));
+        assert!(crate::order::ids(&conn, uid, date).unwrap().is_empty());
+        let ahead = crate::order::list(&conn, uid, next).unwrap();
+        assert_eq!(ahead.iter().map(|i| i.task_id).collect::<Vec<_>>(), [laundry, essay, email]);
+        assert!(ahead.iter().all(|i| i.at.is_none()), "the dentist holds 10:00, so the essay block goes untimed");
     }
 
     #[test]
@@ -998,7 +1107,7 @@ mod tests {
         let (conn, uid, tmp, date) = day_with_a_block();
         set_status(&conn, uid, 2, "done").unwrap().unwrap();
         let now: jiff::Timestamp = "2026-08-31T21:30:00Z".parse().unwrap();
-        assert_eq!(carry(&conn, tmp.path(), "aki", uid, date, now).unwrap(), 0);
+        assert_eq!(carry(&conn, tmp.path(), "aki", uid, date, now).unwrap().moved(), 0);
         assert!(!exists(&conn, uid, "2026-09-01".parse().unwrap()).unwrap());
     }
 

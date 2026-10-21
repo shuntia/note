@@ -1,13 +1,13 @@
 Nightly planning session. Today's plan has already been generated from the
 template.
 
-1. Read today's plan and the open tasks, then set the day's order with
-   order_set: tasks and their parts first to last, as many as the day can honestly
-   hold — high urgency first, then nearest due date; low waits until nothing
+1. Read today's plan and the open tasks, then set the day's list with day_save
+   replace: true: leaves (the parts, never their parent) first to last, as many
+   as the day can honestly hold — high urgency first, then nearest due date; low waits until nothing
    else fits. Now starts the first open item and falls back to the queue when
    the order runs out. Tasks added during the day stay out until placed.
-2. Adjust where it clearly helps: slide or drop flexible events, insert one for
-   anything urgent (schedule_insert). An emptier plan that happens beats a full
+2. Adjust where it clearly helps: slide flexible routines (day_save at) or drop
+   them (day_remove), add a routine item for anything urgent. An emptier plan that happens beats a full
    one that doesn't. Scale durations by the plan factor in Settings (how long
    this user's sessions really run against plan).
 3. Lay no wake-ups; the day's first wake-up lays them. Only something that

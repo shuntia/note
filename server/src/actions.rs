@@ -108,7 +108,7 @@ pub fn perform(
             if date < today {
                 return Err(Refused::Settled);
             }
-            crate::plan::carry(conn, config_dir, username, user_id, date, now).map(Done::Carried).map_err(internal)
+            crate::plan::carry(conn, config_dir, username, user_id, date, now).map(|c| Done::Carried(c.moved())).map_err(internal)
         }
         ["block", "start", ev] => start_block(conn, config_dir, user_id, username, id(ev)?, now).map(|()| Done::Started),
         _ => Err(Refused::Unknown),

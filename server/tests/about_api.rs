@@ -124,7 +124,7 @@ async fn the_debug_prompt_is_the_one_a_session_would_start_with() {
     let prompt = v["prompt"].as_str().unwrap();
     assert!(prompt.starts_with("you are note"), "{prompt}");
     assert!(prompt.contains("I have ADHD."), "{prompt}");
-    assert!(v["tools"].as_array().unwrap().iter().any(|t| t == "trigger_set"));
+    assert!(v["tools"].as_array().unwrap().iter().any(|t| t == "day_save"));
 
     let res = app.clone().oneshot(get("/api/debug/prompt?kind=share", &cookie)).await.unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);

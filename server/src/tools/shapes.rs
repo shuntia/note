@@ -164,6 +164,66 @@ pub fn calendar_remove() -> Value {
     json!({ "type": "object", "properties": { "ids": ids("Entries to delete for good.") }, "required": ["ids"] })
 }
 
+pub fn day_find() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "date": { "type": "string", "description": DAY },
+            "days": { "type": "integer", "description": "How many days, 1-7; default 1." }
+        }
+    })
+}
+
+pub fn day_save() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "date": { "type": "string", "description": "The day; default today, and for the nightly run the day it plans." },
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "An item of the day as day_find lists it (t412, e88), to change it." },
+                        "task": { "type": id_or_title(), "description": "A task to place (id or exact title)." },
+                        "at": { "type": "string", "description": "HH:MM, 9am or +20min. On a task it makes a block; empty makes it untimed." },
+                        "minutes": { "type": "integer", "description": "A block's length; default the task's size." },
+                        "before": { "type": id_or_title(), "description": "Place the task in front of this item of the list; \"end\" puts it last." },
+                        "wake": { "type": "string", "description": "A wake-up: your note on what to look at when at comes." },
+                        "ring": { "type": "boolean", "description": "The wake-up calls the user." },
+                        "cancel_on": { "type": "string", "enum": ["reply", "task"], "description": "What calls the wake-up off first: the user writing back in thread, or task finished." },
+                        "session_check": { "type": "boolean", "description": "A check on the open work session, dropped when it ends." },
+                        "thread": { "type": "integer", "description": "The conversation the wake-up speaks in; default the day's check-in thread." },
+                        "routine": { "type": "string", "description": "Add a routine of this name at at." },
+                        "flexibility": { "type": "string", "enum": ["fixed", "slide", "drop"], "description": "A new routine's; default slide." },
+                        "snooze_min": { "type": "integer", "description": "Hold back a routine's delivery this long." }
+                    }
+                }
+            },
+            "replace": { "type": "boolean", "description": "The task items given become the day's whole task list, in order." },
+            "carry": { "type": "boolean", "description": "Move what is left of the day to the next: untimed items to its front, blocks at their time." },
+            "extra_wakes": {
+                "type": "object",
+                "properties": { "n": { "type": "integer" }, "reason": { "type": "string" } },
+                "description": "Raise the day's wake-up budget by n, only once the user agreed; reason is what they agreed to."
+            },
+            "tz": { "type": "string", "description": "The IANA zone the times are given in, when not the user's." }
+        },
+        "required": ["items"]
+    })
+}
+
+pub fn day_remove() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "date": { "type": "string", "description": DAY },
+            "ids": ids("Items to take off the day: t412, e88, or a task's exact title.")
+        },
+        "required": ["ids"]
+    })
+}
+
 pub fn task_brief() -> Value {
     json!({
         "type": "object",

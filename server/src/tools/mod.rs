@@ -1,15 +1,13 @@
 pub mod calendar_ops;
 pub mod call_ops;
 pub mod context_ops;
+pub mod day_ops;
 pub mod goal_ops;
 pub mod inbox_ops;
 pub mod loose;
 pub mod memory_ops;
 pub mod note_ops;
-pub mod order_ops;
-pub mod plan_ops;
 pub mod review_ops;
-pub mod schedule_ops;
 pub mod shapes;
 pub mod share_ops;
 pub mod summary_ops;
@@ -376,17 +374,8 @@ const MEMORY_WRITE: &[&str] = &["memory_write"];
 const NOTES: &[&str] = &["note_write"];
 /// Settling working memory into long-term memory is the nightly run's job.
 const NOTE_SETTLE: &[&str] = &["note_settle"];
-const PLAN_READ: &[&str] = &["plan_list"];
-const PLAN_LAY: &[&str] = &["plan_tasks"];
-/// Moving the rest of a day to the next is the user's call, so it lives only
-/// where they are there to make it.
-const PLAN_CARRY: &[&str] = &["plan_carry"];
-const ORDER: &[&str] = &["order_set", "order_move", "order_drop"];
-const SCHEDULE: &[&str] = &["schedule_move", "schedule_drop"];
-const SCHEDULE_INSERT: &[&str] = &["schedule_insert"];
-const TRIGGERS: &[&str] = &["trigger_set"];
-/// Raising the day's budget needs the user's agreement first.
-const TRIGGER_BUDGET: &[&str] = &["trigger_budget"];
+const DAY_READ: &[&str] = &["day_find"];
+const DAY_WRITE: &[&str] = &["day_save", "day_remove"];
 const CONTEXT: &[&str] = &["context_edit"];
 /// Moving the account to another zone follows what the user says, so it lives
 /// where they speak.
@@ -419,18 +408,12 @@ const DOMAINS: &[&[&str]] = &[
     GOALS_WRITE,
     CALENDAR_READ,
     CALENDAR_WRITE,
+    DAY_READ,
+    DAY_WRITE,
     MEMORY_READ,
     MEMORY_WRITE,
     NOTES,
     NOTE_SETTLE,
-    PLAN_READ,
-    PLAN_LAY,
-    PLAN_CARRY,
-    ORDER,
-    SCHEDULE,
-    SCHEDULE_INSERT,
-    TRIGGERS,
-    TRIGGER_BUDGET,
     CONTEXT,
     TIMEZONE,
     CALL_USER,
@@ -480,16 +463,11 @@ const TALK: &[&str] = registry_of![
     GOALS_WRITE,
     CALENDAR_READ,
     CALENDAR_WRITE,
+    DAY_READ,
+    DAY_WRITE,
     MEMORY_READ,
     MEMORY_WRITE,
     NOTES,
-    PLAN_READ,
-    PLAN_LAY,
-    PLAN_CARRY,
-    ORDER,
-    SCHEDULE,
-    TRIGGERS,
-    TRIGGER_BUDGET,
     CONTEXT,
     TIMEZONE,
     CALL_USER,
@@ -504,16 +482,12 @@ const NIGHTLY: &[&str] = registry_of![
     GOALS_WRITE,
     CALENDAR_READ,
     CALENDAR_WRITE,
+    DAY_READ,
+    DAY_WRITE,
     MEMORY_READ,
     MEMORY_WRITE,
     NOTES,
     NOTE_SETTLE,
-    PLAN_READ,
-    PLAN_LAY,
-    ORDER,
-    SCHEDULE,
-    SCHEDULE_INSERT,
-    TRIGGERS,
     CONTEXT,
     CALL_USER,
     NIGHTLY_NOTES,
@@ -525,15 +499,11 @@ const TRIGGER: &[&str] = registry_of![
     TASK_WRITE,
     GOALS_READ,
     CALENDAR_READ,
+    DAY_READ,
+    DAY_WRITE,
     MEMORY_READ,
     MEMORY_WRITE,
     NOTES,
-    PLAN_READ,
-    PLAN_LAY,
-    PLAN_CARRY,
-    ORDER,
-    SCHEDULE,
-    TRIGGERS,
     CALL_USER,
     SEARCH,
     BATCH,
@@ -554,7 +524,7 @@ const IMPORT: &[&str] = registry_of![BRIEF];
 const INBOX: &[&str] = registry_of![MEMORY_READ, DECIDE];
 const SUMMARIZE: &[&str] = registry_of![SUMMARY];
 const REVIEW: &[&str] = registry_of![MEMORY_WRITE, REVIEW_WRITE];
-const SHARE: &[&str] = registry_of![TASK_READ, GOALS_READ, CALENDAR_READ, PLAN_READ, SHARE_NOTE];
+const SHARE: &[&str] = registry_of![TASK_READ, GOALS_READ, CALENDAR_READ, DAY_READ, SHARE_NOTE];
 const CALL: &[&str] = registry_of![
     TASK_READ,
     TASK_WRITE,
@@ -563,15 +533,11 @@ const CALL: &[&str] = registry_of![
     GOALS_WRITE,
     CALENDAR_READ,
     CALENDAR_WRITE,
+    DAY_READ,
+    DAY_WRITE,
     MEMORY_READ,
     MEMORY_WRITE,
     NOTES,
-    PLAN_READ,
-    PLAN_LAY,
-    PLAN_CARRY,
-    ORDER,
-    SCHEDULE,
-    TRIGGERS,
     TIMEZONE,
     SEARCH,
     CALL_ONLY,
@@ -805,6 +771,20 @@ const TOOLS: &[ToolSpec] = tools![
     "calendar_remove": shapes::calendar_remove => run!(raw calendar_ops::remove), writes = true;
         "Delete calendar entries for good, for a commitment that has ended; to drop single dates, skip them \
          with calendar_save.",
+    "day_find": shapes::day_find => run!(kind raw day_ops::find), share = Some(|s| s.today), reads = true;
+        "Read a day as one list in order: task items (t ids) with their path, time and size, wake-ups and \
+         routines (e ids), calendar events (c ids, changed with calendar_save), and its free windows. \
+         Default today; the nightly run reads the day it plans. days reads up to 7 days.",
+    "day_save": shapes::day_save => run!(kind raw day_ops::save), writes = true;
+        "Place tasks on a day, and lay wake-ups and routines. A task item is untimed, in the order Now \
+         follows, or with at a block; a parent places its open parts in order; one already on the day is \
+         moved or updated. replace makes the task items given the day's whole list. A block meeting a fixed \
+         commitment or another block moves past it. A wake-up is wake plus at: a moment to look again, then \
+         message, call (ring) or stay quiet; one within 20 minutes of another is laid too, with a warning \
+         naming it. carry moves what is left of the day to the next.",
+    "day_remove": shapes::day_remove => run!(kind raw day_ops::remove), writes = true;
+        "Take items off a day: task items (the task itself stays), wake-ups, and routines that may be \
+         dropped.",
     "inbox_decide": schema::<inbox_ops::DecideArgs> => run!(inbox_ops::decide), embed = Embed::Facts, terminal_in = &[SessionKind::Inbox];
         "Decide what this one item is worth, in a single call that ends the session: \
          \"remembered\" writes 1 to 10 durable facts, \"task\" leaves it to the importer to \
@@ -825,14 +805,6 @@ const TOOLS: &[ToolSpec] = tools![
          1500 bytes of plain lines that every session reads.",
     "context_edit": schema::<context_ops::EditArgs> => run!(context_ops::edit);
         "Edit the standing context document: replace a unique snippet or append a line.",
-    "schedule_move": schema::<schedule_ops::MoveArgs> => run!(schedule_ops::move_event), writes = true;
-        "Move a plan event. A routine takes minutes; a block (it has a start and an end, and \
-         never notifies) takes a new start, end or both.",
-    "schedule_drop": schema::<schedule_ops::DropArgs> => run!(&schedule_ops::drop_event), writes = true;
-        "Drop a droppable plan event for today. If it is moving rather than going away, add \
-         the replacement first and name it in moved_to_event_id.",
-    "schedule_insert": schema::<schedule_ops::InsertArgs> => run!(&schedule_ops::insert);
-        "Insert a new event into an existing day plan. A time that has gone by is refused.",
     "nightly_notes_write": schema::<context_ops::NightlyNotesArgs> => run!(&context_ops::nightly_notes_write);
         "Replace last night's brief for tomorrow's sessions: 5-12 plain lines, no markdown \
          headers, nothing that will read as stale. Every session tomorrow reads it; write it \
@@ -849,48 +821,6 @@ const TOOLS: &[ToolSpec] = tools![
          still matters; remove deletes it once it no longer does. An add whose title an \
          existing note already reads is refused with that note's id. Anything longer is a \
          memory_write the note may name by id; anything the user has to do is a task.",
-    "plan_tasks": schema::<plan_ops::PlanTasksArgs> => run!(&plan_ops::plan_tasks);
-        "Lay tasks out as consecutive blocks on one day's plan — how \"schedule these tasks \
-         for tomorrow morning\" is done. Each block runs its task's duration (25 minutes if \
-         none), in the order given, from start, gap_min apart, none ending after end. Blocks \
-         never ping the user; not for routines or reminders. Refused, changing nothing, when a \
-         task is already on that day, a block would overlap something planned, or they do not \
-         fit before end.",
-    "plan_carry": schema::<plan_ops::PlanCarryArgs> => run!(plan_ops::plan_carry);
-        "Carry what is left of a day (default today) to the next: every block still waiting \
-         moves to tomorrow with its task, the day's remaining check-ins are dropped, and \
-         nothing done or dropped moves. This is what the user agreeing to carry the rest to \
-         tomorrow means.",
-    "order_set": schema::<order_ops::SetArgs> => run!(kind &order_ops::set), writes = true;
-        "Set the day's order, replacing the whole list. Now starts the first open item and \
-         falls back to the queue once the order runs out; finished items leave on their own. \
-         The nightly run sets the day it is planning, every other session today. A running \
-         work session's task stays first.",
-    "order_move": schema::<order_ops::MoveArgs> => run!(kind &order_ops::move_item), writes = true;
-        "Put one task or step into the day's order in front of before_task_id, or last, moving \
-         it if already there. A task added since the order was set is not in it until placed. \
-         The nightly run acts on the day it is planning, every other session on today.",
-    "order_drop": schema::<order_ops::DropArgs> => run!(kind &order_ops::drop_item), writes = true;
-        "Take one task or step out of the day's order; the task itself is untouched. The \
-         nightly run acts on the day it is planning, every other session on today.",
-    "plan_list": schema::<plan_ops::PlanListArgs> => run!(plan_ops::plan_list), share = Some(|s| s.today), reads = true;
-        "Read one day's plan (default today; the context lists only today's): every event \
-         with its event_id — the id the schedule tools take — times, status, flexibility, \
-         for a plan_tasks block the task_id it holds; later_trigger_days names the next days \
-         holding triggers.",
-    "trigger_set": schema::<trigger_ops::SetArgs> => run!(kind &trigger_ops::set), writes = true;
-        "Lay a trigger point: a moment to look again, then message the user, call them, or \
-         stay quiet. prompt is your note on what you are following up; when the user asked to \
-         be called, say so in it, lay it in the thread they asked in, and use call_user when \
-         it fires. date lays it on any later day; tz \
-         reads at and date in the IANA zone the user named the time in. Check plan_list \
-         first: a trigger within 20 minutes of a pending one is refused with that one named — \
-         reword it with replace set to its id, or pass also when both are wanted. cancel_on \
-         leaves a question open without nagging: a reply, a finished task or a settled event \
-         calls it off.",
-    "trigger_budget": schema::<trigger_ops::BudgetArgs> => run!(&trigger_ops::budget);
-        "Raise a day's check-in budget (today, or date) after the user has agreed to it, \
-         never before. reason is what they agreed to.",
     "timezone_set": schema::<zone_ops::SetArgs> => run!(&zone_ops::set);
         "Set the user's time zone when they say where they are (travelling, moved) or the \
          clock you show is off. Pending triggers and blocks keep the moment they were laid \
@@ -962,6 +892,17 @@ const TOOLS: &[ToolSpec] = tools![
     "calendar_add": shapes::any => run!(raw calendar_ops::save), adapter_for = Some("calendar_save"); "",
     "calendar_update": shapes::any => run!(raw calendar_ops::save), adapter_for = Some("calendar_save"); "",
     "calendar_skip": shapes::any => run!(raw calendar_ops::skip_adapter), adapter_for = Some("calendar_save"); "",
+    "plan_list": shapes::any => run!(kind raw day_ops::find), adapter_for = Some("day_find"); "",
+    "plan_tasks": shapes::any => run!(kind raw day_ops::plan_tasks), adapter_for = Some("day_save"); "",
+    "plan_carry": shapes::any => run!(kind raw day_ops::plan_carry), adapter_for = Some("day_save"); "",
+    "order_set": shapes::any => run!(kind raw day_ops::order_set), adapter_for = Some("day_save"); "",
+    "order_move": shapes::any => run!(kind raw day_ops::order_move), adapter_for = Some("day_save"); "",
+    "order_drop": shapes::any => run!(kind raw day_ops::order_drop), adapter_for = Some("day_remove"); "",
+    "schedule_move": shapes::any => run!(kind raw day_ops::schedule_move), adapter_for = Some("day_save"); "",
+    "schedule_drop": shapes::any => run!(kind raw day_ops::schedule_drop), adapter_for = Some("day_remove"); "",
+    "schedule_insert": shapes::any => run!(kind raw day_ops::schedule_insert), adapter_for = Some("day_save"); "",
+    "trigger_set": shapes::any => run!(kind raw day_ops::trigger_set), adapter_for = Some("day_save"); "",
+    "trigger_budget": shapes::any => run!(kind raw day_ops::trigger_budget), adapter_for = Some("day_save"); "",
 ];
 
 fn find(name: &str) -> Option<(usize, &'static ToolSpec)> {
@@ -1198,10 +1139,7 @@ fn run(
 
 /// `(tool prefix, unknown field, the tool that takes it)` for the fields a
 /// model most often hands the wrong tool.
-const ELSEWHERE: &[(&str, &str, &str)] = &[
-    ("note_write", "category", "memory_write"),
-    ("schedule_", "prompt", "trigger_set"),
-];
+const ELSEWHERE: &[(&str, &str, &str)] = &[("note_write", "category", "memory_write")];
 
 /// An unknown-field error, with the tool that takes that field where one
 /// obviously does.
@@ -1344,15 +1282,14 @@ mod tests {
         assert_eq!(v.content.unwrap(), direct[0]);
     }
 
-    /// Talk ⊆ Nightly but for `trigger_budget`, `plan_carry` and
-    /// `timezone_set`, which live where the user is there to agree to them or
-    /// say where they are; a wake-up's tools are the nightly's but for
+    /// Talk ⊆ Nightly but for `timezone_set`, which lives where the user is
+    /// there to say where they are; a wake-up's tools are the nightly's but for
     /// `work_end`; a review reads memory with the nightly's own tools plus the
     /// one that ends it; Summarize and Review share nothing with an import
     /// session.
     #[test]
     fn session_surfaces_nest_and_import_stands_apart() {
-        let asks_the_user = |t: &str| matches!(t, "trigger_budget" | "plan_carry" | "timezone_set");
+        let asks_the_user = |t: &str| t == "timezone_set";
         let wakeup_only = |t: &str| t == "work_end";
         assert!(registry(SessionKind::Talk)
             .iter()
@@ -1435,7 +1372,7 @@ mod tests {
         for kind in KINDS {
             assert!(!registry(kind).contains(&"plan_auto"), "{kind:?}");
         }
-        assert_eq!(PLAN_LAY, &["plan_tasks"]);
+        assert_eq!(DAY_WRITE, &["day_save", "day_remove"]);
     }
 
     /// A tool that ends a session is reachable from that session and from no
@@ -1716,8 +1653,8 @@ mod tests {
     #[test]
     fn the_share_registry_reads_only() {
         let r = registry(SessionKind::Share);
-        assert_eq!(r, ["task_find", "goal_find", "calendar_find", "plan_list", "share_note"]);
-        for gone in ["memory_query", "memory_write", "context_edit", "task_save", "task_create", "web_search", "batch", "trigger_set"] {
+        assert_eq!(r, ["task_find", "goal_find", "calendar_find", "day_find", "share_note"]);
+        for gone in ["memory_query", "memory_write", "context_edit", "task_save", "task_create", "web_search", "batch", "day_save", "plan_list"] {
             assert!(!r.contains(&gone), "{gone} leaked into the share registry");
         }
         assert!(is_terminal(SessionKind::Share, "share_note"));
@@ -1733,7 +1670,7 @@ mod tests {
         let no_tasks = crate::shares::ShareScope { tasks: false, ..Default::default() };
         assert!(!names(&no_tasks).iter().any(|n| n.starts_with("task_")));
         let no_today = crate::shares::ShareScope { today: false, ..Default::default() };
-        assert!(!names(&no_today).iter().any(|n| n == "plan_list" || n == "calendar_find"));
+        assert!(!names(&no_today).iter().any(|n| n == "day_find" || n == "calendar_find"));
         let no_goals = crate::shares::ShareScope { goals: false, ..Default::default() };
         assert!(!names(&no_goals).contains(&"goal_find".to_string()));
         assert!(!names(&crate::shares::ShareScope::default()).contains(&"share_note".to_string()));
@@ -1803,15 +1740,16 @@ mod tests {
     fn a_wake_up_tends_the_day_and_reads_but_never_writes_the_calendar() {
         let t = registry(SessionKind::Trigger);
         for name in [
-            "memory_write", "task_find", "task_save", "note_write", "order_set", "order_move", "order_drop",
-            "schedule_move", "schedule_drop", "trigger_set", "plan_tasks", "calendar_find", "goal_find", "web_search",
+            "memory_write", "task_find", "task_save", "note_write", "day_find", "day_save", "day_remove",
+            "calendar_find", "goal_find", "web_search",
         ] {
             assert!(t.contains(&name), "{name}");
         }
-        for name in ["calendar_save", "calendar_remove", "schedule_insert", "trigger_budget", "goal_save", "task_remove"] {
+        for name in ["calendar_save", "calendar_remove", "goal_save", "task_remove"] {
             assert!(!t.contains(&name), "{name}");
         }
         assert!(writes("order_move") && writes("task_save") && writes("trigger_set") && writes("task_update"));
+        assert!(writes("day_save") && writes("day_remove") && reads("day_find") && reads("plan_list"));
         assert!(!writes("task_find") && !writes("say") && !writes("plan_list") && !writes("task_list"));
         assert!(reads("task_find") && reads("task_read") && reads("task_find2"));
         let (conn, tmp) = env();
@@ -1870,13 +1808,13 @@ mod tests {
         }
     }
 
-    /// Talk's schemas this phase, in bytes (22,526 at phase 2); phase 5 brings the 15,000 cap.
-    const TALK_SCHEMA_BUDGET: usize = 22_600;
+    /// Talk's schemas this phase, in bytes (18,444 at phase 3); phase 5 brings the 15,000 cap.
+    const TALK_SCHEMA_BUDGET: usize = 18_500;
 
     #[test]
     fn talks_schemas_stay_within_this_phases_budget() {
         let bytes: usize = schemas(SessionKind::Talk).iter().map(|s| s.to_string().len()).sum();
         assert!(bytes <= TALK_SCHEMA_BUDGET, "Talk's schemas are {bytes} bytes");
-        assert_eq!(registry(SessionKind::Talk).len(), 28);
+        assert_eq!(registry(SessionKind::Talk).len(), 21);
     }
 }

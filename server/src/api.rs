@@ -67,6 +67,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/plan/range", get(plan_range))
         .route("/api/plan/{date}/carry", post(plan_carry))
         .route("/api/day/{date}", get(day_view))
+        .route("/api/day/{date}/order", put(day_order_put))
         .route("/api/debrief", get(debrief))
         .route("/api/events/{id}/shift", post(event_shift))
         .route("/api/events/{id}/snooze", post(event_snooze))
@@ -658,20 +659,37 @@ async fn order_put(
     user: CurrentUser,
     State(state): State<AppState>,
     Json(body): Json<OrderBody>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let today = jiff::Timestamp::now().to_zoned(user_zone(&state, &user.username)).date();
+    put_order(&state, &user, today, &body.task_ids)
+}
+
+/// Replaces one day's list of open task items, in the order given.
+async fn day_order_put(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(date): Path<String>,
+    Json(body): Json<OrderBody>,
+) -> axum::response::Response {
+    let Some(date) = date.parse::<jiff::civil::Date>().ok().filter(|d| within_a_year(*d)) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    put_order(&state, &user, date, &body.task_ids)
+}
+
+fn put_order(state: &AppState, user: &CurrentUser, date: jiff::civil::Date, task_ids: &[i64]) -> axum::response::Response {
     let set = {
         let conn = state.db();
-        let set = crate::order::set(&conn, user.id, today, &body.task_ids);
+        let set = crate::order::set(&conn, user.id, date, task_ids);
         if set.is_ok() {
-            let _ = crate::log::record(&conn, Some(user.id), "order_changed", &format!("{today}: by the user"));
+            let _ = crate::log::record(&conn, Some(user.id), "order_changed", &format!("{date}: by the user"));
         }
         set
     };
     match set {
         Ok(items) => {
             state.hub.broadcast_changed(user.id);
-            Json(order_json(today, &items)).into_response()
+            Json(order_json(date, &items)).into_response()
         }
         Err(crate::order::OrderError::Db(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         Err(e) => (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": e.to_string() })))
@@ -2648,9 +2666,10 @@ async fn day_view(
     if crate::plan::generate(&conn, user.id, &tmpl, date).is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
-    let (Ok(events), Ok(occurrences)) = (
+    let (Ok(events), Ok(occurrences), Ok(items)) = (
         crate::plan::events_for(&conn, user.id, date),
         crate::calendar::occurrences(&conn, user.id, date),
+        crate::tools::day_ops::items(&conn, &state.config_dir, &user.username, user.id, date),
     ) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
@@ -2676,6 +2695,7 @@ async fn day_view(
     };
     Json(serde_json::json!({
         "date": date.to_string(),
+        "items": items,
         "events": events,
         "calendar": occurrences,
         "free": free,
@@ -2751,7 +2771,7 @@ async fn plan_carry(
     }
     let conn = state.db();
     match crate::plan::carry(&conn, &state.config_dir, &user.username, user.id, date, now) {
-        Ok(moved) => Json(serde_json::json!({ "moved": moved })).into_response(),
+        Ok(carried) => Json(serde_json::json!({ "moved": carried.moved() })).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

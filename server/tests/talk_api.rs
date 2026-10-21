@@ -382,7 +382,7 @@ async fn multiple_tool_calls_keep_call_order_in_steps_and_rows() {
                     name: "task_create".into(),
                     args: r#"{"title":"call mom"}"#.into(),
                 },
-                ToolCall { id: "c2".into(), name: "schedule_insert".into(), args: "{}".into() },
+                ToolCall { id: "c2".into(), name: "nightly_notes_write".into(), args: "{}".into() },
             ],
         },
         ChatResponse { text: "one worked, one didn't".into(), tool_calls: vec![] },
@@ -406,8 +406,8 @@ async fn multiple_tool_calls_keep_call_order_in_steps_and_rows() {
     assert_eq!(steps.len(), 2);
     assert_eq!(steps[0]["name"], "task_create");
     assert_eq!(steps[0]["is_error"], false);
-    // schedule_insert is forbidden on the talk surface, so the error reaches the wire
-    assert_eq!(steps[1]["name"], "schedule_insert");
+    // nightly_notes_write is forbidden on the talk surface, so the error reaches the wire
+    assert_eq!(steps[1]["name"], "nightly_notes_write");
     assert_eq!(steps[1]["is_error"], true);
 
     let conn = state.db.lock().unwrap();
@@ -426,7 +426,7 @@ async fn multiple_tool_calls_keep_call_order_in_steps_and_rows() {
         vec![
             ("user", None),
             ("tool", Some("task_create")),
-            ("tool", Some("schedule_insert")),
+            ("tool", Some("nightly_notes_write")),
             ("assistant", None),
         ]
     );

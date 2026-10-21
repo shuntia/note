@@ -78,8 +78,8 @@ mod tests {
             .date()
             .checked_add(jiff::Span::new().days(2))
             .unwrap();
-        let laid = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "trigger_set",
-            &format!(r#"{{"at":"11:00","date":"{day}","prompt":"call them"}}"#)).unwrap();
+        let laid = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "day_save",
+            &format!(r#"{{"date":"{day}","items":[{{"wake":"call them","at":"11:00"}}]}}"#)).unwrap();
         let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "timezone_set",
             r#"{"zone":"America/New_York"}"#).unwrap();
         assert_eq!(out["was"], "America/Los_Angeles");
@@ -87,7 +87,7 @@ mod tests {
         let cfg = crate::config::UserConfig::load(tmp.path(), "aitest").unwrap();
         assert_eq!(cfg.timezone, "America/New_York");
         let wall: String = conn
-            .query_row("SELECT wall_time FROM events WHERE id = ?1", [laid["event_id"].as_i64().unwrap()], |r| {
+            .query_row("SELECT wall_time FROM events WHERE id = ?1", [laid["saved"][0]["id"].as_str().unwrap()[1..].parse::<i64>().unwrap()], |r| {
                 r.get(0)
             })
             .unwrap();

@@ -399,8 +399,7 @@ pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
     if lay.work_session_id.is_none() && !lay.system && session.is_none() {
         if pending_laid(conn, lay.user_id, local.date()).map_err(internal)? >= MAX_PENDING {
             return Err(Refusal::Rejected(format!(
-                "{MAX_PENDING} triggers already wait; drop some (schedule_drop) or lay this one \
-                 with replace before adding more"
+                "{MAX_PENDING} triggers already wait; take some off with day_remove, or reword one by its id, before adding more"
             )));
         }
         if let Some(allowance) = allowance(conn, lay.config_dir, lay.username, lay.user_id, date)
@@ -2119,7 +2118,7 @@ mod tests {
                 .unwrap();
         }
         let e = lay(&conn, &lay_at(&tmp, uid, "11:00")).unwrap_err();
-        assert!(matches!(&e, Refusal::Rejected(m) if m.contains("drop some")), "{e:?}");
+        assert!(matches!(&e, Refusal::Rejected(m) if m.contains("take some off")), "{e:?}");
         let mut system = lay_at(&tmp, uid, "11:00");
         system.system = true;
         lay(&conn, &system).unwrap();

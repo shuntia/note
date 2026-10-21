@@ -1614,7 +1614,7 @@ mod tests {
         let (conn, uid) = user();
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(
-            out.contains("# Settings\n\nUser: X\nTrigger points you may lay today: 0 of 12 used; to exceed it"),
+            out.contains("# Settings\n\nUser: X\nWake-ups you may lay today: 0 of 12 used; to exceed it"),
             "{out}"
         );
         assert!(!out.contains("template default"), "{out}");
@@ -1628,7 +1628,7 @@ mod tests {
         std::fs::write(tmp.path().join("users/aki/user.toml"), "triggers_per_day = -1\n").unwrap();
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("# Settings\n\nUser: X\n"), "{out}");
-        assert!(!out.contains("Trigger points") && !out.contains("trigger_budget"), "{out}");
+        assert!(!out.contains("Wake-ups you may lay") && !out.contains("extra_wakes"), "{out}");
     }
 
     #[test]
@@ -1842,6 +1842,6 @@ mod tests {
         assert!(!order.contains("item-12 "), "{order}");
         assert!(order.ends_with("- ... and 18 more"), "{order}");
         assert!(!order.contains(&"o".repeat(120)), "{order}");
-        assert!(block.contains("Trigger points you may lay today"), "{block}");
+        assert!(block.contains("Wake-ups you may lay today"), "{block}");
     }
 }

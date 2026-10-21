@@ -1556,6 +1556,8 @@ pub struct Snapshot {
     rows: Vec<Vec<rusqlite::types::Value>>,
     ids: Vec<i64>,
     links: Vec<(i64, i64)>,
+    /// `(user_id, date, position, task_id, event_id)` of each day row.
+    days: Vec<(i64, String, i64, i64, Option<i64>)>,
 }
 
 pub fn snapshot(conn: &Connection, user_id: i64, task_id: i64) -> rusqlite::Result<Snapshot> {
@@ -1583,7 +1585,13 @@ pub fn snapshot(conn: &Connection, user_id: i64, task_id: i64) -> rusqlite::Resu
     let links = stmt
         .query_map([task_id], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(Snapshot { task_id, columns, rows, ids, links })
+    let mut stmt = conn.prepare(&format!(
+        "{SUBTREE} SELECT user_id, date, position, task_id, event_id FROM day_items WHERE task_id IN sub"
+    ))?;
+    let days = stmt
+        .query_map([task_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(Snapshot { task_id, columns, rows, ids, links, days })
 }
 
 /// Puts the snapshot back in one transaction: nodes the session added are gone,
@@ -1612,6 +1620,13 @@ pub fn restore(conn: &Connection, snap: &Snapshot) -> rusqlite::Result<()> {
         tx.execute(
             "INSERT INTO event_tasks (event_id, task_id) VALUES (?1, ?2)",
             (event_id, task_id),
+        )?;
+    }
+    for (user_id, date, position, task_id, event_id) in &snap.days {
+        tx.execute(
+            "INSERT OR IGNORE INTO day_items (user_id, date, position, task_id, event_id)
+             SELECT ?1, ?2, ?3, ?4, (SELECT id FROM events WHERE id = ?5)",
+            (user_id, date, position, task_id, event_id),
         )?;
     }
     let parent: Option<i64> = tx

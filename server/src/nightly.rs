@@ -472,7 +472,7 @@ mod tests {
             let rows = close_day_rows(&conn);
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].0, crate::config::DEFAULT_CLOSE_DAY_TIME);
-            assert!(rows[0].1.contains("plan_carry"));
+            assert!(rows[0].1.contains("carry: true"));
             conn.execute("DELETE FROM debriefs", []).unwrap();
         }
         run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
