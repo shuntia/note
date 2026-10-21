@@ -1007,10 +1007,10 @@ pub fn share_mark_due_soon(l: Lang) -> &'static str {
     l.of(" [due soon]", " [期限間近]")
 }
 
-pub fn share_steps(l: Lang, done: i64, total: i64) -> String {
+pub fn share_parts(l: Lang, done: i64, total: i64) -> String {
     match l {
-        Lang::En => format!(", {done} of {total} steps done"),
-        Lang::Ja => format!("、{total}ステップ中{done}完了"),
+        Lang::En => format!(", {done} of {total} parts done"),
+        Lang::Ja => format!("、{total}件中{done}件完了"),
     }
 }
 

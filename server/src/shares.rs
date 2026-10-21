@@ -927,7 +927,7 @@ fn task_line(l: crate::text::Lang, t: &TaskRow, scope: &ShareScope) -> String {
         s.push_str(&mt::share_goal_due(l, d));
     }
     if t.steps > 0 {
-        s.push_str(&mt::share_steps(l, t.done_steps, t.steps));
+        s.push_str(&mt::share_parts(l, t.done_steps, t.steps));
     }
     if scope.categories.len() != 1 && !t.category.is_empty() {
         let _ = write!(s, " ({})", t.category);
