@@ -286,6 +286,9 @@ impl Service {
     }
 
     fn finish(&self, call_id: &str, outcome: Outcome) {
+        if let Outcome::Failed { reason } = &outcome {
+            eprintln!("voice: call {call_id} failed: {reason}");
+        }
         self.send(call_id, CallBody::Outcome { outcome });
         self.end(call_id);
     }
@@ -376,6 +379,7 @@ impl Service {
                 s.send(&id, CallBody::Ringing);
             })
             .await;
+            eprintln!("voice: ringing {mxid} in {room_id} for call {call_id}: {}", outcome.as_str());
             if outcome == Outcome::Answered {
                 svc.join_and_run(&call_id, &room_id, &mxid, profile, &rx, Direction::Outbound).await;
             } else {
@@ -572,6 +576,7 @@ impl Service {
 
     async fn answer_for_note(self: &Arc<Self>, start: InboundStart, room: &str, mxid: &str, device: Option<&str>) {
         if !self.still_calling(room, mxid, device).await {
+            eprintln!("voice: {mxid} hung up in {room} before Note answered");
             return self.finish(&start.call_id, Outcome::Failed { reason: "the caller hung up".into() });
         }
         self.join_and_run(&start.call_id, room, mxid, start.profile, &start.hang_up, Direction::Inbound).await;
@@ -788,7 +793,14 @@ impl Service {
         }
         let links: Vec<(String, String)> =
             lock(&self.state).data.links.values().map(|l| (l.room_id.clone(), l.mxid.clone())).collect();
-        let Detect::Answer { room, mxid, key } = detector.on_event(ev, &links, &|room| self.busy(room), now_ms()) else {
+        let busy = |room: &str| {
+            let busy = self.busy(room);
+            if busy {
+                eprintln!("voice: a call is already up in {room}; not answering another");
+            }
+            busy
+        };
+        let Detect::Answer { room, mxid, key } = detector.on_event(ev, &links, &busy, now_ms()) else {
             return;
         };
         let device = match ev {
