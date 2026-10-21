@@ -53,6 +53,16 @@ describe('find, save and remove receipts', () => {
     expect(receipt('task_find', '{"id":3}', false)).toBe('Read a task')
     expect(receipt('task_find', '{"overdue":true}', false)).toBe('Looked over what is overdue')
   })
+  test('the day tools read as the change they carry', () => {
+    expect(receipt('day_save', '{"items":[{"task":4,"at":"14:00"}]}', false)).toBe('Laid 1 task onto today from 14:00')
+    expect(receipt('day_save', '{"items":[{"wake":"see whether the draft started","at":"+30min"}]}', false)).toBe('Set a check-in in 30 min')
+    expect(receipt('day_save', '{"replace":true,"items":[{"task":1},{"task":2}]}', false)).toBe('Put 2 tasks in order')
+    expect(receipt('day_save', '{"carry":true}', false)).toBe('Carried the rest of today over')
+    expect(receipt('day_save', '{"items":[1,2,3]}', false)).toBe('Saved 3 items to today')
+    expect(receipt('day_save', '{"items":[]}', true)).toBe("Couldn't change the day")
+    expect(receipt('day_remove', '{"ids":["t4"]}', false)).toBe('Took an item off the day')
+    expect(receipt('day_find', '{}', false)).toBe("Looked at today's plan")
+  })
   test('removals, goals and the calendar read plainly', () => {
     expect(receipt('task_remove', '{"ids":[1]}', false)).toBe('Deleted a task')
     expect(receipt('task_remove', '{"ids":[1,2,3]}', false)).toBe('Deleted 3 tasks')

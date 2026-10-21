@@ -422,6 +422,41 @@ const TABLE: Record<string, Receipt> = {
     done: 'receipt.calendarRemove.done',
     failed: 'receipt.calendarRemove.failed',
   },
+  day_find: {
+    doing: 'receipt.planList.doing',
+    done: (a) => t('receipt.planList.done', { day: dayWord(str(a, 'date')) }),
+    failed: 'receipt.planList.failed',
+  },
+  day_save: {
+    doing: 'receipt.daySave.doing',
+    done: (a) => {
+      const date = str(a, 'date')
+      if (a.carry === true) return t('receipt.planCarry.done', { day: dayWord(date) })
+      const items = nodes(a, 'items')
+      const count = Array.isArray(a.items) ? a.items.length : items.length
+      const extra = a.extra_wakes as Args | undefined
+      if (count === 0 && extra && typeof extra === 'object') return say(TABLE.trigger_budget.done, { extra: extra.n })
+      if (a.replace === true) return t('receipt.orderSet.done', { count })
+      if (count !== 1) return t('receipt.daySave.done', { count, day: dayWord(date) })
+      const one = items[0] ?? {}
+      if (str(one, 'wake')) return laid(one, 'at')
+      if (str(one, 'routine'))
+        return say(TABLE.schedule_insert.done, { kind: one.routine, date, time: str(one, 'at') })
+      const snooze = num(one, 'snooze_min')
+      if (snooze !== null) return t('receipt.scheduleSnooze.doneFor', { span: span(snooze) })
+      const at = str(one, 'at')
+      const vars = { count: 1, day: dayWord(date) }
+      if (one.task === undefined && str(one, 'id').startsWith('e') && at) return t('receipt.scheduleReshape.moved', { start: at })
+      return at ? t('receipt.planTasks.doneFrom', { ...vars, start: at }) : t('receipt.planTasks.done', vars)
+    },
+    failed: 'receipt.daySave.failed',
+  },
+  day_remove: {
+    doing: 'receipt.dayRemove.doing',
+    done: (a) => t('receipt.dayRemove.done', { count: Array.isArray(a.ids) ? a.ids.length : 1 }),
+    failed: 'receipt.dayRemove.failed',
+  },
+
   calendar_skip: {
     doing: 'receipt.calendarSkip.doing',
     done: (a) => t('receipt.calendarSkip.done', { day: dayPhrase(str(a, 'date')) }),
