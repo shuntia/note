@@ -231,9 +231,12 @@ impl<'a> Saver<'a> {
                 None => self.ignore(r, "state", "a state is open, in_progress, done or dropped"),
             }
         }
+        let mut finished = Vec::new();
         if let Some(v) = obj.take(&["done", "completed", "finished"]) {
-            if node.state.is_none() {
-                node.state = loose::boolean(&v).map(|d| if d { "done" } else { "open" });
+            match loose::boolean(&v) {
+                Some(d) if node.state.is_none() => node.state = Some(if d { "done" } else { "open" }),
+                Some(_) => {}
+                None => finished = loose::list(v),
             }
         }
         if let Some(v) = obj.take(&["urgency", "priority"]) {
@@ -283,6 +286,12 @@ impl<'a> Saver<'a> {
         }
         if let Some(v) = obj.take(&["children", "steps", "subtasks", "items", "tasks", "parts"]) {
             node.children = loose::list(v);
+        }
+        for part in finished {
+            match loose::text(&part).map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+                Some(title) => node.children.push(json!({ "title": title, "state": "done" })),
+                None => self.ignore(r, "done", "done lists the titles of parts already finished"),
+            }
         }
         for field in obj.rest() {
             let why = loose::unknown(&field, ELSEWHERE);
@@ -1436,6 +1445,25 @@ mod tests {
         assert_eq!(out["saved"].as_array().unwrap().len(), 2);
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM tasks WHERE title = 'orphan'", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn done_lists_the_parts_already_finished_as_done_children() {
+        let (conn, tmp) = env("UTC");
+        let essay = saved(&talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "History essay", "minutes": 90}]})), "0");
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"id": essay, "done": ["Outline"],
+            "children": [{"title": "Drafting", "minutes": 30}, {"title": "Citations", "minutes": 20}, {"title": "Proofreading", "minutes": 10}]}]}));
+        assert_eq!(out["saved"][4]["ref"], "0.3", "{out}");
+        let kids = crate::tasks::node(&conn, 1, essay).unwrap().unwrap().children;
+        let outline = kids.iter().find(|k| k.task.title == "Outline").unwrap();
+        assert_eq!((kids.len(), outline.task.state.as_str()), (4, "done"));
+        assert!(task(&conn, essay).progress > 0);
+        talk(&conn, &tmp, "task_save", json!({"tasks": [{"id": essay, "done": ["drafting"]}]}));
+        let kids = crate::tasks::node(&conn, 1, essay).unwrap().unwrap().children;
+        assert_eq!(kids.len(), 4, "a finished part named again is the same child");
+        assert_eq!(kids.iter().find(|k| k.task.title.eq_ignore_ascii_case("drafting")).unwrap().task.state, "done");
+        let leaf = saved(&talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "Leaf", "done": true}]})), "0");
+        assert_eq!(task(&conn, leaf).state, "done");
     }
 
     #[test]
