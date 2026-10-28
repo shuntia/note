@@ -902,7 +902,11 @@ impl Handler for VoiceHandler {
                 svc.to_session(call_id, SessionIn::Frame(CallBody::HangUp));
                 svc.applied.set_applied(call_id, seq).map_err(|e| e.to_string())?;
             }
-            body @ (CallBody::Speak { .. } | CallBody::SpeakDone { .. } | CallBody::Play { .. } | CallBody::Drop { .. }) => {
+            body @ (CallBody::Speak { .. }
+            | CallBody::SpeakDone { .. }
+            | CallBody::Play { .. }
+            | CallBody::Drop { .. }
+            | CallBody::Mic { .. }) => {
                 svc.to_session(call_id, SessionIn::Frame(body));
                 svc.applied.set_applied(call_id, seq).map_err(|e| e.to_string())?;
             }

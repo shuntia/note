@@ -179,6 +179,8 @@ pub enum CallBody {
     Floor { floor: Floor },
     /// Voice → Note: the user cut reply `reply` off; `heard_chars` of its text were played.
     BargeIn { reply: u64, heard_chars: u32 },
+    /// Note → voice: the caller's input gain changed. Voice → Note: where auto left it, as the call ends.
+    Mic { mic: MicGain },
 }
 
 /// `UserQuiet`: VAD sees silence after speech. `Drained`: the playout queue emptied.
@@ -247,17 +249,26 @@ impl<'de> Deserialize<'de> for Pcm {
 }
 
 /// `voice` empty means the language's default voice.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VoiceProfile {
     pub language: String,
     pub voice: String,
     pub cue: bool,
+    #[serde(default)]
+    pub mic: MicGain,
 }
 
 impl Default for VoiceProfile {
     fn default() -> Self {
-        Self { language: "en".into(), voice: String::new(), cue: true }
+        Self { language: "en".into(), voice: String::new(), cue: true, mic: MicGain::default() }
     }
+}
+
+/// The input gain a call starts from; in `auto` it adapts from there.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct MicGain {
+    pub gain_db: f32,
+    pub auto: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,7 +307,7 @@ mod tests {
         let raw = r#"{"k":"start","user_id":1,"room_id":"!r","mxid":"@a","title":"t","ring_secs":30,"ring_by_ms":5}"#;
         let body: CallBody = serde_json::from_str(raw).unwrap();
         let CallBody::Start { voice, .. } = body else { panic!() };
-        assert_eq!(voice, VoiceProfile { language: "en".into(), voice: String::new(), cue: true });
+        assert_eq!(voice, VoiceProfile::default());
     }
 
     #[test]
@@ -311,6 +322,7 @@ mod tests {
             CallBody::Retract { turn: 2 },
             CallBody::Floor { floor: Floor::UserSpeaking },
             CallBody::BargeIn { reply: 3, heard_chars: 12 },
+            CallBody::Mic { mic: MicGain { gain_db: 7.5, auto: true } },
         ] {
             let s = serde_json::to_string(&body).unwrap();
             assert_eq!(serde_json::from_str::<CallBody>(&s).unwrap(), body, "{s}");

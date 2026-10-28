@@ -1,5 +1,8 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react'
+import { api } from '../api'
+import { desktop } from '../desktop'
 import { t } from '../i18n'
+import { gainScale, rememberGains } from '../mic'
 import { reducedMotion } from '../motion'
 import { declineRing, onCallFrame } from '../ws'
 import { CallControl, type CallOpen, type CallShown, type Phase } from './control'
@@ -64,7 +67,8 @@ export function CallView({
         load: async () => {
           audio = (await import('./audio')).webAudio
         },
-        connect: (events) => new CallSession(callUrl(location, call), audio(), events),
+        connect: (events) =>
+          new CallSession(callUrl(location, call), audio(), events, undefined, desktop() ? 'desktop' : 'web'),
         prime: primeAudio,
         release: () => releaseAudioContext(CUE_TAIL_MS),
         ring: ringtone,
@@ -81,6 +85,7 @@ export function CallView({
   const [shown, setShown] = useState<CallShown>(control.shown)
   const { phase, live, muted, caption, working, landed, shake } = shown
   const canvas = useRef<HTMLCanvasElement>(null)
+  const ring = useRef<HTMLSpanElement>(null)
   const root = useRef<HTMLDivElement>(null)
   const [swipe] = useState(() => new Swipe())
   const look = lookOf(phase, live)
@@ -112,6 +117,9 @@ export function CallView({
   }
 
   useEffect(() => control.mount(), [control])
+  useEffect(() => {
+    api.voiceMics().then((r) => rememberGains(r.mics), () => {})
+  }, [])
   const open = phase !== 'gone'
   useEffect(() => {
     if (!open) return
@@ -156,6 +164,7 @@ export function CallView({
     let form: Form = target(drawn.current.look, drawn.current.muted, drawn.current.working)
     let mic = 0
     let out = 0
+    let heard = 0
     let clock = 0
     let last = performance.now()
     const ink = () => getComputedStyle(el).getPropertyValue('--ink').trim() || 'currentColor'
@@ -171,6 +180,8 @@ export function CallView({
       clock += dt
       const lv = control.levels()
       mic = smooth(mic, Math.min(1, lv.mic * 4), dt)
+      heard = smooth(heard, Math.min(1, (lv.input ?? 0) * gainScale() * 4), dt)
+      ring.current?.style.setProperty('--level', heard.toFixed(3))
       out = smooth(out, Math.min(1, lv.out * 4), dt)
       const { look, muted, working } = drawn.current
       form = still ? stillForm(look, muted, working) : ease(form, target(look, muted, working), dt)
@@ -242,6 +253,7 @@ export function CallView({
         aria-pressed={phase === 'ringing' ? undefined : muted}
         onClick={tap}
       >
+        <span ref={ring} className="call-level" aria-hidden="true" />
         <canvas ref={canvas} aria-hidden="true" />
         <svg className={`call-mute${silenced ? ' on' : ''}`} viewBox="0 0 48 48" aria-hidden="true">
           <mask id={gap} maskUnits="userSpaceOnUse">

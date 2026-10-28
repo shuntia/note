@@ -218,6 +218,49 @@ async fn a_web_call_relays_audio_both_ways_and_drains_after_hang_up() {
     assert!(matches!(next(&mut ws).await, None | Some(Message::Close(_))));
 }
 
+fn mics(r: &Rig, id: &str) -> Vec<note_voice_proto::MicGain> {
+    r.fake_rec.bodies(id).into_iter().filter_map(|b| if let CallBody::Mic { mic } = b { Some(mic) } else { None }).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_web_calls_device_starts_from_its_learned_gain_and_keeps_the_new_one() {
+    use note_voice_proto::MicGain;
+    let r = rig().await;
+    let user_id: i64 = r.state.db().query_row("SELECT id FROM users WHERE username = 'aki'", [], |x| x.get(0)).unwrap();
+    note_server::voice::mics::seen(&r.state.db(), user_id, "desktop:ab", "Headset", jiff::Timestamp::now()).unwrap();
+    let mut ws = open(r.addr, &r.cookie, "").await;
+    frame(&mut ws, "open").await;
+    let id = started(&r, 1).await;
+    let CallBody::Start { voice, .. } = starts(&r)[0].1.clone() else { unreachable!() };
+    assert_eq!(voice.mic, MicGain { gain_db: 0.0, auto: true });
+    r.fake.send_call(&id, CallBody::Outcome { outcome: Outcome::Answered }).unwrap();
+
+    ws.send(Message::Text(r#"{"type":"mic","client":"desktop","key":"AB","label":"Headset"}"#.into())).await.unwrap();
+    eventually("the device's gain reaches the voice side", || mics(&r, &id).len() == 1).await;
+    r.fake.send_call(&id, CallBody::Mic { mic: MicGain { gain_db: 11.5, auto: true } }).unwrap();
+    let db = r.state.db.clone();
+    let stored = move || note_server::voice::mics::gain(&note_server::db_guard(&db), user_id, "desktop:ab");
+    eventually("the learned gain is kept", || stored().gain_db == 11.5).await;
+    assert_eq!(note_server::voice::mics::gain(&r.state.db(), user_id, "web:ab").gain_db, 0.0, "the browser's device is apart");
+
+    let manual = r#"{"gain_db":4}"#;
+    let res = r.state.clone();
+    let app = note_server::api::router(res);
+    let req = Request::put("/api/voice/mics/desktop:ab")
+        .header(axum::http::header::COOKIE, &r.cookie)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(Body::from(manual))
+        .unwrap();
+    assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
+    eventually("a change made during the call reaches it", || mics(&r, &id).len() == 2).await;
+    assert_eq!(mics(&r, &id)[1], MicGain { gain_db: 4.0, auto: false });
+
+    ws.send(Message::Text(r#"{"type":"mic","client":"phone","key":"zz"}"#.into())).await.unwrap();
+    ws.send(Message::Binary(pcm_bytes(1, 320).into())).await.unwrap();
+    eventually("audio after the bad device", || !audio_in(&r, &id).is_empty()).await;
+    assert_eq!(mics(&r, &id).len(), 2, "an unknown client is ignored");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn muted_audio_reaches_the_voice_side_as_silence() {
     let r = rig().await;

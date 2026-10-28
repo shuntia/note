@@ -44,6 +44,16 @@
 .call-view .call-mute.on :is(.call-mute-gap, .call-mute-slash) { stroke-dashoffset: 0; transition-delay: 120ms; }
 .call-view .call-circle:focus-visible { outline: 2px solid var(--line); outline-offset: 6px; }
 .call-view canvas { display: block; width: 100%; height: 100%; }
+.call-view .call-level {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  border: 1.5px solid var(--ink);
+  opacity: calc(var(--level, 0) * 0.45);
+  transform: scale(calc(0.84 + var(--level, 0) * 0.16));
+  pointer-events: none;
+}
+.call-view[data-muted='true'] .call-level { visibility: hidden; }
 .call-view .call-close {
   position: absolute;
   top: max(16px, env(safe-area-inset-top));
@@ -93,6 +103,7 @@
   .call-view { animation: none; }
   .call-view.gone { animation-duration: 150ms; }
   .call-view.shake .call-circle { animation: none; }
+  .call-view .call-level { transform: scale(0.92); }
   .call-view .call-mute, .call-view .call-mute :is(.call-mute-gap, .call-mute-slash) { transition: none; }
   .call-view .call-caption { animation-name: call-caption; animation-timing-function: steps(1, end); }
 }

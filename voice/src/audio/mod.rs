@@ -1,6 +1,7 @@
 pub mod mel;
 pub mod ears;
 pub mod engines;
+pub mod gain;
 pub mod language;
 pub mod turn;
 pub mod lines;

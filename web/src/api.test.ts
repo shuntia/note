@@ -16,6 +16,23 @@ test('a memory edit patches the fact and forgetting deletes it', async () => {
   expect(JSON.parse(calls[0][1].body as string)).toEqual({ summary: 'likes oolong', body: '' })
 })
 
+test('the mic list is read and a client is set by its encoded name', async () => {
+  const row = { client: 'web:a/b', kind: 'web', label: 'USB', gain_db: 9, auto: false }
+  const fetch = vi.fn(async () => new Response(JSON.stringify({ mics: [row] }), { status: 200 }))
+  vi.stubGlobal('fetch', fetch)
+  expect(await api.voiceMics()).toEqual({ mics: [row] })
+  await api.voiceMicSet('web:a/b', { gain_db: 9 })
+  await api.voiceMicSet('element', { auto: true })
+  const calls = fetch.mock.calls as unknown as [string, RequestInit | undefined][]
+  expect(calls.map(([path, init]) => [path, init?.method ?? 'GET'])).toEqual([
+    ['/api/voice/mics', 'GET'],
+    ['/api/voice/mics/web%3Aa%2Fb', 'PUT'],
+    ['/api/voice/mics/element', 'PUT'],
+  ])
+  expect(JSON.parse(calls[1][1]?.body as string)).toEqual({ gain_db: 9 })
+  expect(JSON.parse(calls[2][1]?.body as string)).toEqual({ auto: true })
+})
+
 test('the Matrix switches travel with a settings save', async () => {
   const fetch = vi.fn(async () => new Response('{}', { status: 200 }))
   vi.stubGlobal('fetch', fetch)

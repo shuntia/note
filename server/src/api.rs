@@ -57,6 +57,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/voice/test", post(voice_test))
         .route("/api/voice/voices", get(voice_voices))
         .route("/api/voice/preview", get(voice_preview))
+        .route("/api/voice/mics", get(voice_mics))
+        .route("/api/voice/mics/{client}", put(voice_mic_put))
         .route("/api/notify/test", post(notify_test))
         .route("/api/about", get(about_get).put(about_put))
         .route("/api/debug/prompt", get(debug_prompt))
@@ -2182,6 +2184,45 @@ async fn voice_voices(user: CurrentUser, State(state): State<AppState>, headers:
             Json(serde_json::json!({ "voices": voices })).into_response()
         }
         Err(refusal) => voice_refused(&state, &user, lang, NO_VOICES, &refusal),
+    }
+}
+
+/// The user's own calling clients and the input gain each starts from.
+async fn voice_mics(user: CurrentUser, State(state): State<AppState>) -> axum::response::Response {
+    match crate::voice::mics::list(&state.db(), user.id) {
+        Ok(mics) => Json(serde_json::json!({ "mics": mics })).into_response(),
+        Err(e) => {
+            eprintln!("voice: listing microphones failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// Sets the gain of one of the user's own clients; a live call on it takes the change at once.
+async fn voice_mic_put(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(client): Path<String>,
+    Json(patch): Json<crate::voice::mics::MicPatch>,
+) -> axum::response::Response {
+    use crate::voice::mics::{set, PatchError};
+    let saved = set(&state.db(), user.id, &client, patch, jiff::Timestamp::now());
+    match saved {
+        Ok(Ok(row)) => {
+            if let Some(voice) = &state.voice {
+                let mic = note_voice_proto::MicGain { gain_db: row.gain_db, auto: row.auto };
+                voice.mic_changed(user.id, &row.client, mic);
+            }
+            Json(row).into_response()
+        }
+        Ok(Err(PatchError::UnknownClient)) => {
+            (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "no such microphone" }))).into_response()
+        }
+        Ok(Err(PatchError::GainOutOfRange)) => invalid_field("gain_db", "must be 0 to 24"),
+        Err(e) => {
+            eprintln!("voice: saving a microphone failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }
 

@@ -1,4 +1,5 @@
 import { expect, test, vi } from 'vitest'
+import { micKey } from '../mic'
 import { CallSession, callUrl, parseFrame, type AudioIo, type Ended, type SocketLike } from './session'
 
 class FakeSocket implements SocketLike {
@@ -267,4 +268,27 @@ test('an odd trailing byte of playback audio is dropped', async () => {
   await s.start()
   sockets[0].binary(new Uint8Array([1, 0, 2, 0, 3]).buffer)
   expect(audio.played).toEqual([[[1, 2], 48000]])
+})
+
+test('the live mic is named to the server once open, and again when its device changes', async () => {
+  let device!: (track: { deviceId?: string; label: string }) => void
+  FakeSocket.startState = 0
+  const { s, sockets } = rig({
+    startMic: async (_f, onDevice) => {
+      device = onDevice!
+      device({ deviceId: 'dev-a', label: 'Desk mic' })
+    },
+  })
+  try {
+    await s.start()
+  } finally {
+    FakeSocket.startState = 1
+  }
+  const ws = sockets[0]
+  ws.opened()
+  const first = { type: 'mic', client: 'web', key: await micKey({ label: 'dev-a' }), label: 'Desk mic' }
+  await vi.waitFor(() => expect(ws.controls()).toEqual([{ type: 'mute', on: false }, first]))
+  device({ deviceId: 'dev-b', label: 'Headset' })
+  const second = { type: 'mic', client: 'web', key: await micKey({ label: 'dev-b' }), label: 'Headset' }
+  await vi.waitFor(() => expect(ws.controls()).toEqual([{ type: 'mute', on: false }, first, second]))
 })

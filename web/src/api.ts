@@ -1,4 +1,5 @@
 import { t } from './i18n'
+import type { Mic, MicPatch } from './mic'
 import type { ModelOffer, ModelPick } from './models'
 import type {
   AdminGate,
@@ -372,6 +373,9 @@ export const api = {
   voiceUnlink: () => request<void>('/api/voice/link', { method: 'DELETE' }),
   voiceTest: () => request<{ call_id: string }>('/api/voice/test', { method: 'POST' }),
   voiceVoices: () => request<{ voices: VoiceChoice[] }>('/api/voice/voices'),
+  voiceMics: () => request<{ mics: Mic[] }>('/api/voice/mics'),
+  voiceMicSet: (client: string, patch: MicPatch) =>
+    request<Mic>(`/api/voice/mics/${encodeURIComponent(client)}`, { method: 'PUT', body: JSON.stringify(patch) }),
   notifyTest: () => request<{ via: string }>('/api/notify/test', { method: 'POST' }),
   openWorkSession: () => request<WorkSession | null>('/api/sessions/open'),
   outages: () => request<{ outages: Outage[] }>('/api/outages'),

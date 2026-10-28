@@ -1,3 +1,4 @@
+import { micClientId, micFrame, micKey, setCurrentMic, type MicClient, type MicTrack } from '../mic'
 import type { Levels } from './form'
 
 export type LiveState = 'listening' | 'hearing' | 'thinking' | 'speaking'
@@ -43,7 +44,8 @@ export type SocketLike = {
 }
 
 export type AudioIo = {
-  startMic(onFrame: (pcm: Int16Array) => void): Promise<void>
+  // `onDevice` hears the capture track once it is live and again whenever its device changes.
+  startMic(onFrame: (pcm: Int16Array) => void, onDevice?: (track: MicTrack) => void): Promise<void>
   stopMic(): void
   play(pcm: Int16Array, rate: number): void
   flush(): void
@@ -74,18 +76,24 @@ export class CallSession {
   private rate = 48_000
   private muted = false
   private done = false
+  private micSaid: string | null = null
+  private micSeq = 0
 
   constructor(
     private readonly url: string,
     private readonly audio: AudioIo,
     private readonly on: CallEvents,
     private readonly open: (url: string) => SocketLike = (u) => new WebSocket(u) as unknown as SocketLike,
+    private readonly client: MicClient = 'web',
   ) {}
 
   // The mic comes first, so a refusal ends the call before the server ever opens one.
   async start(): Promise<void> {
     try {
-      await this.audio.startMic((pcm) => this.sendAudio(pcm))
+      await this.audio.startMic(
+        (pcm) => this.sendAudio(pcm),
+        (track) => void this.nameMic(track),
+      )
     } catch (e) {
       if (this.done) {
         this.audio.close()
@@ -106,7 +114,10 @@ export class CallSession {
     }
     const ws = this.open(this.url)
     ws.binaryType = 'arraybuffer'
-    ws.onopen = () => this.control({ type: 'mute', on: this.muted })
+    ws.onopen = () => {
+      this.control({ type: 'mute', on: this.muted })
+      if (this.micSaid) ws.send(this.micSaid)
+    }
     ws.onmessage = (e) => this.receive(e.data)
     ws.onclose = () => this.finish({ reason: 'dropped', conversationId: null })
     this.socket = ws
@@ -129,6 +140,7 @@ export class CallSession {
 
   close() {
     this.done = true
+    setCurrentMic(null)
     if (this.socket) {
       this.socket.onclose = null
       this.socket.close()
@@ -143,6 +155,16 @@ export class CallSession {
   private sendAudio(pcm: Int16Array) {
     if (this.socket?.readyState !== OPEN) return
     this.socket.send(this.muted ? new Int16Array(pcm.length) : pcm)
+  }
+
+  // A later device wins over an earlier one whose hash lands after it.
+  private async nameMic(track: MicTrack) {
+    const seq = ++this.micSeq
+    const key = await micKey(track)
+    if (seq !== this.micSeq || this.done) return
+    setCurrentMic(micClientId(this.client, key))
+    this.micSaid = micFrame(this.client, key, track.label)
+    if (this.socket?.readyState === OPEN) this.socket.send(this.micSaid)
   }
 
   private control(msg: object) {
@@ -169,6 +191,7 @@ export class CallSession {
   private finish(e: Ended) {
     if (this.done) return
     this.done = true
+    setCurrentMic(null)
     this.audio.stopMic()
     if (this.socket) {
       this.socket.onclose = null

@@ -10,6 +10,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::audio::ears::{stt_worker, Ears, SttCmd};
 use crate::audio::engines::{SpeechEngines, TurnDetector, Vad};
+use crate::audio::gain::Agc;
 use crate::audio::language::Choice;
 use crate::audio::lines::{render_lines, Line, Lines};
 use crate::audio::playout::{Clip, Playout};
@@ -189,6 +190,7 @@ pub async fn run_session(
             let end = live.run(inbox, &mut tasks, deps.max_len, deps.link_grace).await;
             tasks.audio.abort();
             tasks.stt.abort();
+            live.report_mic();
             end
         }
         Err(e) => SessionEnd::MediaFailed(format!("{e:#}")),
@@ -248,6 +250,7 @@ struct Live<S> {
     turn: TurnMachine,
     detector: Arc<dyn TurnDetector>,
     recent: Arc<Mutex<VecDeque<f32>>>,
+    mic: Arc<Mutex<Agc>>,
     stt: mpsc::UnboundedSender<SttCmd>,
     events_tx: mpsc::UnboundedSender<Event>,
     events: mpsc::UnboundedReceiver<Event>,
@@ -296,9 +299,11 @@ impl<S: Fn(CallBody)> Live<S> {
         let (events_tx, events) = mpsc::unbounded_channel();
         let (stt_tx, stt_rx) = mpsc::unbounded_channel();
         let recent = Arc::new(Mutex::new(VecDeque::with_capacity(TURN_SPAN)));
+        let mic = Arc::new(Mutex::new(Agc::new(deps.profile.mic)));
+        let ear = AudioIn { vad, mic: mic.clone(), stt: stt_tx.clone(), events: events_tx.clone(), recent: recent.clone(), start };
         let tasks = Tasks {
             stt: tokio::spawn(stt_worker(ears, stt_rx, events_tx.clone())),
-            audio: tokio::spawn(audio_in(media.clone(), vad, stt_tx.clone(), events_tx.clone(), recent.clone(), start)),
+            audio: tokio::spawn(audio_in(media.clone(), ear)),
         };
         let speech = SpeechQueue::new(speaker.clone(), base.clone());
         let order: &'static [Line] = match (voice_up.is_some(), deps.direction) {
@@ -343,6 +348,7 @@ impl<S: Fn(CallBody)> Live<S> {
             turn,
             detector: deps.engines.turn(&language),
             recent,
+            mic,
             stt: stt_tx,
             events_tx,
             events,
@@ -683,6 +689,14 @@ impl<S: Fn(CallBody)> Live<S> {
         self.act(actions);
     }
 
+    /// Tells Note where auto left the caller's gain, for the next call to start from.
+    fn report_mic(&self) {
+        let mic = self.mic.lock().expect("mic lock").settings();
+        if mic.auto {
+            (self.send)(CallBody::Mic { mic });
+        }
+    }
+
     fn frame(&mut self, body: CallBody) {
         if self.ending.is_some() {
             return;
@@ -703,6 +717,7 @@ impl<S: Fn(CallBody)> Live<S> {
                 self.playout.resume();
                 self.ending = Some(Ending::new(SessionEnd::HungUp));
             }
+            CallBody::Mic { mic } => self.mic.lock().expect("mic lock").set(mic),
             _ => {}
         }
         if reply.is_some_and(|r| self.speech.is_speaking(r)) {
@@ -761,19 +776,25 @@ fn shown(playing: bool, hearing: bool, thinking: bool) -> LiveState {
     }
 }
 
-/// Splits the user's audio into VAD windows and STT chunks, and keeps the last 8 s for Smart Turn.
-async fn audio_in(
-    media: Arc<dyn MediaIo>,
-    mut vad: Box<dyn Vad>,
+struct AudioIn {
+    vad: Box<dyn Vad>,
+    mic: Arc<Mutex<Agc>>,
     stt: mpsc::UnboundedSender<SttCmd>,
     events: mpsc::UnboundedSender<Event>,
     recent: Arc<Mutex<VecDeque<f32>>>,
     start: Instant,
-) {
+}
+
+/// Brings the user's audio to level, splits it into VAD windows and STT chunks, and keeps the last
+/// 8 s for Smart Turn.
+async fn audio_in(media: Arc<dyn MediaIo>, ear: AudioIn) {
+    let AudioIn { mut vad, mic, stt, events, recent, start } = ear;
     let mut window = Vec::with_capacity(VAD_WINDOW * 2);
     let mut chunk = Vec::with_capacity(STT_CHUNK * 2);
     let mut voiced = false;
-    while let Some(frame) = media.recv().await {
+    let mut speaking = false;
+    while let Some(mut frame) = media.recv().await {
+        mic.lock().expect("mic lock").process(&mut frame, speaking);
         {
             let mut recent = recent.lock().expect("recent audio lock");
             recent.extend(&frame);
@@ -785,6 +806,7 @@ async fn audio_in(
         while window.len() >= VAD_WINDOW {
             let speech = vad.push(&window[..VAD_WINDOW]);
             window.drain(..VAD_WINDOW);
+            speaking = speech;
             voiced |= speech;
             let _ = events.send(Event::Vad { at: start.elapsed(), speech });
         }
@@ -803,6 +825,7 @@ mod tests {
     use crate::audio::playout::FRAME;
     use crate::audio::tts::{ChunkedBackend, Renderer, Speaker};
     use std::sync::atomic::{AtomicBool, Ordering};
+    use note_voice_proto::MicGain;
     use tokio::sync::Notify;
 
     #[test]
@@ -1057,7 +1080,7 @@ mod tests {
             engines: Arc::new(engines(stt, tts)),
             lines: Arc::new(Lines::default()),
             cues: Arc::new(Cues { heard: Arc::new(vec![HEARD; FRAME]) }),
-            profile: VoiceProfile { language: "en".into(), voice: String::new(), cue },
+            profile: VoiceProfile { language: "en".into(), voice: String::new(), cue, ..VoiceProfile::default() },
             sidecars: Vec::new(),
             direction: Direction::Outbound,
             max_len: Duration::from_mins(30),
@@ -1087,6 +1110,39 @@ mod tests {
 
     async fn sleep_ms(ms: u64) {
         tokio::time::sleep(Duration::from_millis(ms)).await;
+    }
+
+    fn mics(c: &Call) -> Vec<MicGain> {
+        c.log().into_iter().filter_map(|b| if let CallBody::Mic { mic } = b { Some(mic) } else { None }).collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_quiet_caller_is_raised_and_the_learned_gain_goes_to_note_at_the_end() {
+        let tts = Arc::default();
+        let mut d = deps(Vec::new(), false, &tts);
+        d.profile.mic = MicGain { gain_db: 4.0, auto: true };
+        let mut c = call_with(d, audio(&[(0.01, 3000)]), tts);
+        sleep_ms(3500).await;
+        assert!(mics(&c).is_empty(), "nothing is reported mid-call");
+        c.frame(CallBody::HangUp);
+        assert_eq!((&mut c.end).await.unwrap(), SessionEnd::HungUp);
+        let reported = mics(&c);
+        assert_eq!(reported.len(), 1, "{reported:?}");
+        assert!(reported[0].auto && reported[0].gain_db > 8.0 && reported[0].gain_db <= 24.0, "{reported:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_manual_gain_is_not_reported_and_a_mid_call_change_takes_over() {
+        let tts = Arc::default();
+        let mut d = deps(Vec::new(), false, &tts);
+        d.profile.mic = MicGain { gain_db: 0.0, auto: true };
+        let mut c = call_with(d, audio(&[(0.01, 3000)]), tts);
+        sleep_ms(100).await;
+        c.frame(CallBody::Mic { mic: MicGain { gain_db: 6.0, auto: false } });
+        sleep_ms(3500).await;
+        c.frame(CallBody::HangUp);
+        (&mut c.end).await.unwrap();
+        assert!(mics(&c).is_empty(), "a manual gain stays where the user set it");
     }
 
     #[tokio::test(start_paused = true)]
@@ -1372,7 +1428,7 @@ mod tests {
 
     fn japanese_deps(tts: &Arc<FakeTts>, lines: Arc<Lines>, sidecars: Vec<Arc<dyn SpeechBackend>>) -> SessionDeps {
         let engines = Arc::new(FakeEngines { language: "ja", sidecar_base: Some("ja"), ..engines(Vec::new(), tts) });
-        let profile = VoiceProfile { language: "ja".into(), voice: String::new(), cue: false };
+        let profile = VoiceProfile { language: "ja".into(), voice: String::new(), cue: false, ..VoiceProfile::default() };
         SessionDeps { engines, lines, sidecars, profile, direction: Direction::Inbound, ..deps(Vec::new(), false, tts) }
     }
 
@@ -1998,7 +2054,7 @@ mod tests {
                 let d = SessionDeps {
                     engines: engines.clone(),
                     sidecars: vec![japanese_sidecar(&japanese)],
-                    profile: VoiceProfile { language: profile.into(), voice: String::new(), cue: false },
+                    profile: VoiceProfile { language: profile.into(), voice: String::new(), cue: false, ..VoiceProfile::default() },
                     direction: Direction::Inbound,
                     ..deps(Vec::new(), false, &tts)
                 };

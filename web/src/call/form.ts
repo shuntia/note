@@ -10,7 +10,8 @@ export type Form = {
   scale: number
   gear: number
 }
-export type Levels = { mic: number; out: number }
+// `input` is the capture stream's raw level, before the server's gain.
+export type Levels = { mic: number; out: number; input?: number }
 export type Pt = { x: number; y: number; a: number }
 
 export const BREATH_MS = 4000

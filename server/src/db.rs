@@ -514,7 +514,22 @@ const MIGRATIONS: &[&str] = &[
     TREE,
     DAY,
     CLEANUP,
+    MICS,
 ];
+
+/// v68: each user's input gain per calling client, and the client a call came in on.
+const MICS: &str = "
+    CREATE TABLE mic_gains (
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        client TEXT NOT NULL,
+        label TEXT NOT NULL DEFAULT '',
+        gain_db REAL NOT NULL DEFAULT 0 CHECK (gain_db BETWEEN 0 AND 24),
+        auto INTEGER NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (user_id, client)
+    );
+    ALTER TABLE voice_calls ADD COLUMN mic_client TEXT;
+";
 
 /// v65: tasks form one tree. Each due/size/Now column loses its parent-only
 /// CHECK by swapping in a fresh column, since the table cannot be rebuilt
@@ -954,7 +969,7 @@ mod tests {
              INSERT INTO day_items (user_id, date, position, task_id, event_id) VALUES (1, '2026-10-21', 0, 3, 1);",
         )
         .unwrap();
-        apply_migrations(&conn, BASELINE, MIGRATIONS).unwrap();
+        apply_migrations(&conn, BASELINE, &MIGRATIONS[..12]).unwrap();
         let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(v, 67);
         let tables: i64 = conn

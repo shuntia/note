@@ -1,5 +1,6 @@
 pub mod call;
 pub mod links;
+pub mod mics;
 pub mod outbox;
 pub mod web;
 
@@ -193,8 +194,8 @@ impl Voice {
                 return Err(RingBusy.into());
             }
             conn.execute(
-                "INSERT INTO voice_calls (id, user_id, direction, message, state, ring_by, created_at)
-                 VALUES (?1, ?2, 'outbound', ?3, 'starting', ?4, ?5)",
+                "INSERT INTO voice_calls (id, user_id, direction, message, state, ring_by, created_at, mic_client)
+                 VALUES (?1, ?2, 'outbound', ?3, 'starting', ?4, ?5, 'element')",
                 (&id, user_id, serde_json::to_string(msg)?, ring_by.to_string(), now.to_string()),
             )?;
         }
@@ -328,7 +329,7 @@ impl Voice {
         for old in replaced {
             self.hang_up(&old);
         }
-        let voice = self.handler.profile(user_id);
+        let voice = VoiceProfile { mic: note_voice_proto::MicGain { gain_db: 0.0, auto: true }, ..self.handler.profile(user_id) };
         let title = crate::text::call_title(crate::text::Lang::from_setting(&voice.language).unwrap_or_default());
         let sent = self.peer.send_call(
             &id,
@@ -361,6 +362,52 @@ impl Voice {
             self.calls.warm_up(user_id, msg);
         }
         Ok(web::WebCall { call_id: id, out })
+    }
+
+    /// The browser or desktop app's input device for the web call: noted for the user, and its gain
+    /// handed to the voice side.
+    pub fn web_mic(&self, call_id: &str, user_id: i64, client: &str, key: &str, label: &str) {
+        let Some(client) = mics::device_client(client, key) else { return };
+        let mic = {
+            let conn = crate::db_guard(&self.db);
+            let ours = conn
+                .execute(
+                    "UPDATE voice_calls SET mic_client = ?3 WHERE id = ?1 AND user_id = ?2 AND state != 'ended'",
+                    (call_id, user_id, &client),
+                )
+                .unwrap_or(0)
+                > 0;
+            if !ours {
+                return;
+            }
+            match mics::seen(&conn, user_id, &client, label, jiff::Timestamp::now()) {
+                Ok(mic) => mic,
+                Err(e) => return eprintln!("voice: noting the call's microphone failed: {e}"),
+            }
+        };
+        self.send_mic(call_id, mic);
+    }
+
+    /// Hands a gain the user set to each of their live calls on that client.
+    pub fn mic_changed(&self, user_id: i64, client: &str, mic: note_voice_proto::MicGain) {
+        let calls: Vec<String> = {
+            let conn = crate::db_guard(&self.db);
+            let Ok(mut stmt) =
+                conn.prepare("SELECT id FROM voice_calls WHERE user_id = ?1 AND mic_client = ?2 AND state != 'ended'")
+            else {
+                return;
+            };
+            stmt.query_map((user_id, client), |r| r.get(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
+        };
+        for call_id in calls {
+            self.send_mic(&call_id, mic);
+        }
+    }
+
+    fn send_mic(&self, call_id: &str, mic: note_voice_proto::MicGain) {
+        if let Err(e) = self.peer.send_call(call_id, CallBody::Mic { mic }) {
+            eprintln!("voice: journaling a gain for {call_id} failed: {e}");
+        }
     }
 
     pub fn web_audio(&self, call_id: &str, pcm: Vec<i16>) -> bool {
@@ -638,8 +685,13 @@ pub(crate) struct NoteHandler {
 }
 
 impl NoteHandler {
-    /// The user's call voice; the defaults when their config cannot be read.
+    /// The user's call voice, at Element X's gain; the defaults when their config cannot be read.
     fn profile(&self, user_id: i64) -> VoiceProfile {
+        let mic = mics::gain(&crate::db_guard(&self.db), user_id, mics::ELEMENT);
+        VoiceProfile { mic, ..self.voice(user_id) }
+    }
+
+    fn voice(&self, user_id: i64) -> VoiceProfile {
         let Some(config_dir) = self.config_dir.get() else {
             static WARNED: std::sync::Once = std::sync::Once::new();
             WARNED.call_once(|| eprintln!("voice: no config dir yet; calls use the default voice"));
@@ -693,8 +745,8 @@ impl NoteHandler {
             }
             let id = uuid::Uuid::new_v4().to_string();
             tx.execute(
-                "INSERT INTO voice_calls (id, user_id, direction, state, ring_by, created_at, inbound_key)
-                 VALUES (?1, ?2, 'inbound', 'starting', ?3, ?4, ?5)",
+                "INSERT INTO voice_calls (id, user_id, direction, state, ring_by, created_at, inbound_key, mic_client)
+                 VALUES (?1, ?2, 'inbound', 'starting', ?3, ?4, ?5, 'element')",
                 (&id, user_id, ring_by.to_string(), now.to_string(), key),
             )
             .map_err(|e| failed(&e))?;
@@ -862,6 +914,7 @@ impl Handler for NoteHandler {
                     | CallBody::Retract { .. }
                     | CallBody::Floor { .. }
                     | CallBody::BargeIn { .. } => {}
+                    CallBody::Mic { mic } => mics::learned(&tx, call_id, *mic).map_err(|e| e.to_string())?,
                 }
             }
             let live = known && state(&tx, call_id)?.as_deref() == Some("answered");

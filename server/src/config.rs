@@ -518,6 +518,7 @@ impl UserConfig {
             language: lang.code().into(),
             voice: self.voice_voice.clone().unwrap_or_default(),
             cue: self.voice_cue.unwrap_or(true),
+            mic: note_voice_proto::MicGain::default(),
         }
     }
 
@@ -752,7 +753,7 @@ mod tests {
         write(tmp.path(), "defaults/user.toml",
             "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
         let p = UserConfig::load(tmp.path(), "a").unwrap().voice_profile(Lang::En);
-        assert_eq!(p, note_voice_proto::VoiceProfile { language: "en".into(), voice: String::new(), cue: true });
+        assert_eq!(p, note_voice_proto::VoiceProfile::default());
         write(tmp.path(), "users/aki/user.toml", "voice_voice = \"bm_george\"\nvoice_cue = false\n");
         let p = UserConfig::load(tmp.path(), "aki").unwrap().voice_profile(Lang::Ja);
         assert_eq!((p.language.as_str(), p.voice.as_str(), p.cue), ("ja", "bm_george", false));

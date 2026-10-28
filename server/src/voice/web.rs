@@ -285,6 +285,8 @@ const SEND_LIMIT: Duration = Duration::from_secs(5);
 enum Control {
     Mute { on: bool },
     Hangup,
+    /// The input device the browser captures from; `client` is web or desktop.
+    Mic { client: String, key: String, #[serde(default)] label: String },
 }
 
 /// Opens the call the socket asked for and relays it until it ends.
@@ -313,7 +315,7 @@ pub async fn serve(
             if let Some(token) = ring {
                 state.hub.send(user_id, &serde_json::json!({ "type": "ring_taken", "ring": token }).to_string());
             }
-            relay(socket, &voice, call).await;
+            relay(socket, &voice, call, user_id).await;
         }
         Err(refusal) => refuse(socket, refusal.reason()).await,
     }
@@ -330,7 +332,7 @@ async fn send(socket: &mut WebSocket, message: Message) -> bool {
 
 /// After the browser hangs up, Note's last words keep flowing until the voice side's `Ended`;
 /// a browser that goes away hangs the call up and leaves its relay to that `Ended`.
-async fn relay(mut socket: WebSocket, voice: &Voice, call: WebCall) {
+async fn relay(mut socket: WebSocket, voice: &Voice, call: WebCall, user_id: i64) {
     let WebCall { call_id, mut out } = call;
     let opened = serde_json::json!({ "type": "open", "rate": OUT_RATE }).to_string();
     if !send(&mut socket, Message::Text(opened.into())).await {
@@ -366,6 +368,9 @@ async fn relay(mut socket: WebSocket, voice: &Voice, call: WebCall) {
                     Ok(Control::Hangup) if !hung_up => {
                         hung_up = true;
                         voice.hang_up(&call_id);
+                    }
+                    Ok(Control::Mic { client, key, label }) if !hung_up => {
+                        voice.web_mic(&call_id, user_id, &client, &key, &label);
                     }
                     _ => {}
                 },

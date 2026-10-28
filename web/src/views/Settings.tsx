@@ -17,6 +17,7 @@ import { deviceZone, knownDeviceZone } from '../zone'
 import { AboutSection } from './settings/AboutSection'
 import { ComputerGroup, PushRow } from './settings/ComputerGroup'
 import { DebugSection } from './settings/DebugSection'
+import { MicSection } from './settings/MicSection'
 import { PasswordSection } from './settings/PasswordSection'
 import { RING_CHOICES, RingChoices } from './settings/RingChoices'
 import { ScheduleList } from './settings/ScheduleList'
@@ -835,6 +836,13 @@ export function Settings({
                 )}
               </FoldRow>
             )}
+            <FoldRow label={t('settings.mic')} open={open === 'mic'} onToggle={fold('mic')}>
+              {open === 'mic' && (
+                <div className="set-fold-body">
+                  <MicSection />
+                </div>
+              )}
+            </FoldRow>
           </Group>
         )}
 
