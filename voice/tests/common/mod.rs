@@ -455,5 +455,6 @@ pub fn voice_config(dir: &std::path::Path, homeserver: String) -> VoiceServiceCo
         cues_dir: None,
         heard_cue_file: None,
         tts: Default::default(),
+        stt_idle_unload: 0,
     }
 }

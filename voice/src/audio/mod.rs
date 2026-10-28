@@ -3,6 +3,7 @@ pub mod ears;
 pub mod engines;
 pub mod gain;
 pub mod language;
+pub mod lazy;
 pub mod turn;
 pub mod lines;
 pub mod playout;

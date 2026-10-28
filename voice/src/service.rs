@@ -30,6 +30,8 @@ const INBOUND_JOIN_WAIT: Duration = Duration::from_secs(10);
 const INCOMING_CALL_WAIT: Duration = Duration::from_secs(3);
 const INBOUND_START_WAIT: Duration = Duration::from_secs(5);
 const CANT_REACH_MEMBER_MS: u64 = 60 * 1000;
+/// How often recognizers past their idle window are looked for.
+const REAP_EVERY: Duration = Duration::from_secs(30);
 
 /// What a live call runs on: the speech engines, and how to join a room's media.
 pub struct Backends {
@@ -808,6 +810,9 @@ impl Service {
             _ => in_call.iter().find(|(r, u, _)| *r == room && *u == mxid).map(|(_, _, d)| d.clone()),
         }
         .filter(|d| !d.is_empty());
+        if let Some(profile) = lock(&self.state).data.profiles.get(&mxid) {
+            self.backends.engines.warm(&profile.language);
+        }
         let svc = self.clone();
         let attempt = self.answering.begin(&room, move |start| svc.turn_away(&start));
         eprintln!("voice: {mxid} is calling in {room}");
@@ -865,6 +870,7 @@ impl Handler for VoiceHandler {
         let svc = self.svc().clone();
         match body {
             CallBody::Start { room_id, mxid, ring_secs, ring_by_ms, voice, direction, origin, .. } => {
+                svc.backends.engines.warm(&voice.language);
                 let room_busy = origin == Origin::Matrix && direction == Direction::Outbound && svc.busy(&room_id);
                 {
                     let mut st = lock(&svc.state);
@@ -1070,6 +1076,17 @@ pub async fn run_with(cfg: VoiceServiceConfig, peer_cfg: PeerConfig, backends: B
     svc.drop_delivered();
     svc.recover().await;
     tokio::spawn(svc.clone().check_unreported());
+    if cfg.stt_idle_unload > 0 {
+        let (engines, idle) = (svc.backends.engines.clone(), Duration::from_secs(cfg.stt_idle_unload));
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(REAP_EVERY.min(idle));
+            loop {
+                tick.tick().await;
+                let engines = engines.clone();
+                let _ = tokio::task::spawn_blocking(move || engines.reap(idle)).await;
+            }
+        });
+    }
     tokio::spawn(svc.clone().sync_forever());
     dial_forever(peer, cfg.socket.clone()).await;
     Ok(())

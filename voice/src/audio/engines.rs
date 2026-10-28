@@ -12,6 +12,7 @@ use sherpa_onnx::{
 };
 
 use super::language::{LanguageId, Scores, WhisperLanguageId};
+use super::lazy::{LazyStt, Slot};
 use super::mel::{log_mel, MEL_BINS, MEL_FRAMES};
 use super::stt::{Decoder, OfflineStt};
 use super::tts::{ChunkedBackend, Renderer, SpeechBackend};
@@ -33,6 +34,8 @@ pub trait SpeechToText: Send {
     fn reset(&mut self) {
         self.finish();
     }
+    /// A recognizer standing by starts loading its model.
+    fn wake(&mut self) {}
 }
 
 pub trait TurnDetector: Send + Sync {
@@ -69,7 +72,16 @@ impl BaseVoice {
 pub trait SpeechEngines: Send + Sync {
     fn languages(&self) -> Vec<String>;
     fn vad(&self, language: &str) -> anyhow::Result<Box<dyn Vad>>;
+    /// Its model loads now if it is not in, and the audio waits for it.
     fn stt(&self, language: &str) -> anyhow::Result<Box<dyn SpeechToText>>;
+    /// Like `stt`, but its model loads only once it is woken.
+    fn stt_standby(&self, language: &str) -> anyhow::Result<Box<dyn SpeechToText>> {
+        self.stt(language)
+    }
+    /// Starts loading the language's recognizer ahead of its call.
+    fn warm(&self, _language: &str) {}
+    /// Drops each recognizer no call has used for `idle`.
+    fn reap(&self, _idle: std::time::Duration) {}
     /// Panics when no language is loaded.
     fn turn(&self, language: &str) -> Arc<dyn TurnDetector>;
     /// The base voice of `language`. Panics when no language is loaded.
@@ -112,7 +124,7 @@ enum Recognizer {
 
 struct Language {
     vad_model: String,
-    recognizer: Recognizer,
+    recognizer: Arc<Slot<Recognizer>>,
     turn: Arc<OrtTurn>,
     tts: BaseVoice,
 }
@@ -182,8 +194,20 @@ impl Language {
             (None, Some(sidecar)) => BaseVoice::Sidecar(sidecar.clone()),
             (None, None) => anyhow::bail!("no base voice"),
         };
-        let (recognizer, provider) = recognizer(code, &set.stt, device, GpuAttempt::Try).context("loading the recognizer")?;
-        eprintln!("voice: {code} STT on {provider}");
+        let (code_owned, stt) = (code.to_owned(), set.stt.clone());
+        let recognizer = Slot::new(move || {
+            let start = std::time::Instant::now();
+            match recognizer(&code_owned, &stt, device, GpuAttempt::Try) {
+                Ok((recognizer, provider)) => {
+                    eprintln!("voice: {code_owned} STT loaded on {provider} in {:.2?}", start.elapsed());
+                    Ok(recognizer)
+                }
+                Err(e) => {
+                    eprintln!("voice: loading the {code_owned} recognizer failed: {e:#}");
+                    Err(e)
+                }
+            }
+        });
         let language = Language {
             vad_model: path_str(&set.vad)?,
             recognizer,
@@ -201,10 +225,26 @@ impl SpeechEngines for Engines {
     }
 
     fn stt(&self, language: &str) -> anyhow::Result<Box<dyn SpeechToText>> {
-        Ok(match &self.language(language)?.recognizer {
-            Recognizer::Online(recognizer) => Box::new(SherpaStt::new(recognizer.clone())),
-            Recognizer::Offline(recognizer) => Box::new(OfflineStt::new(recognizer.clone())),
-        })
+        Ok(Box::new(LazyStt::new(&self.language(language)?.recognizer, make_stt, true)))
+    }
+
+    fn stt_standby(&self, language: &str) -> anyhow::Result<Box<dyn SpeechToText>> {
+        Ok(Box::new(LazyStt::new(&self.language(language)?.recognizer, make_stt, false)))
+    }
+
+    fn warm(&self, language: &str) {
+        if let Some(l) = self.languages.get(language) {
+            l.recognizer.demand();
+        }
+    }
+
+    fn reap(&self, idle: std::time::Duration) {
+        let now = std::time::Instant::now();
+        for (code, l) in &self.languages {
+            if l.recognizer.reap(idle, now) {
+                eprintln!("voice: {code} STT unloaded after {idle:.0?} unused");
+            }
+        }
     }
 
     fn turn(&self, language: &str) -> Arc<dyn TurnDetector> {
@@ -233,6 +273,13 @@ pub const KOKORO: &str = "kokoro";
 /// The Kokoro speaker id for `voice`, or the model's default for an unknown or empty one.
 pub fn resolve_sid(kokoro: &KokoroModel, voice: &str) -> i32 {
     kokoro.speakers.iter().find(|v| v.id == voice).or(kokoro.speakers.first()).map_or(0, |v| v.sid)
+}
+
+fn make_stt(recognizer: &Arc<Recognizer>) -> Box<dyn SpeechToText> {
+    match recognizer.as_ref() {
+        Recognizer::Online(r) => Box::new(SherpaStt::new(r.clone())),
+        Recognizer::Offline(r) => Box::new(OfflineStt::new(r.clone())),
+    }
 }
 
 fn path_str(p: &Path) -> anyhow::Result<String> {
@@ -560,6 +607,7 @@ fn to_48k_i16(samples_24k: &[f32]) -> Vec<i16> {
 mod tests {
     use super::*;
     use crate::config::{models_from_dir, TtsConfig, VoiceEntry};
+    use std::time::Duration;
 
     fn models() -> Option<ModelsConfig> {
         std::env::var_os("NOTE_VOICE_MODELS").map(|d| models_from_dir(Path::new(&d), &TtsConfig::default()))
@@ -606,6 +654,7 @@ mod tests {
         assert_eq!(reader.spec().sample_rate, 16_000);
         let pcm16: Vec<f32> = reader.samples::<i16>().map(|s| f32::from(s.unwrap()) / 32768.0).collect();
         let mut stt = e.stt("ja").unwrap();
+        assert!(e.languages["ja"].recognizer.wait().is_some(), "partials come once the model is in");
         let mut partials = Vec::new();
         for c in pcm16.chunks(2560) {
             stt.accept(c);
@@ -630,6 +679,37 @@ mod tests {
         assert!(!tts.render("Hi.", "").unwrap().is_empty());
         m.clear();
         assert!(Engines::load(&m, Device::Auto).unwrap().languages().is_empty());
+    }
+
+    fn vram_mib() -> String {
+        let out = std::process::Command::new("nvidia-smi")
+            .args(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        let me = std::process::id().to_string();
+        out.lines().find(|l| l.starts_with(&format!("{me},"))).map_or("none".into(), |l| format!("{} MiB", l[me.len() + 1..].trim()))
+    }
+
+    /// Prints each language's load time and the process's VRAM with only Kokoro in, with a call's
+    /// recognizer in, and after the recognizer is dropped.
+    #[test]
+    #[ignore = "needs NOTE_VOICE_MODELS and a GPU"]
+    fn stt_loads_on_demand_and_unloading_frees_its_vram() {
+        let e = Engines::load(&models().unwrap(), Device::Auto).unwrap();
+        println!("idle, Kokoro only: {}", vram_mib());
+        for language in ["en", "ja", "en"] {
+            let start = std::time::Instant::now();
+            let stt = e.stt(language).unwrap();
+            let slot = &e.languages[language].recognizer;
+            assert!(slot.wait().is_some());
+            println!("{language}: ready {:.2?} after the call asked; during the call {}", start.elapsed(), vram_mib());
+            drop(stt);
+            e.reap(Duration::ZERO);
+            assert!(!slot.loaded());
+            std::thread::sleep(Duration::from_millis(500));
+            println!("{language}: unloaded, {}", vram_mib());
+        }
     }
 
     #[test]

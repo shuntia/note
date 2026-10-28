@@ -28,6 +28,13 @@ pub struct VoiceServiceConfig {
     pub heard_cue_file: Option<PathBuf>,
     #[serde(default)]
     pub tts: TtsConfig,
+    /// Seconds a recognizer no call uses stays loaded; 0 keeps it for good.
+    #[serde(default = "default_stt_idle_unload")]
+    pub stt_idle_unload: u64,
+}
+
+fn default_stt_idle_unload() -> u64 {
+    600
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -340,6 +347,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(cfg.device, Device::Cpu);
+        assert_eq!(cfg.stt_idle_unload, 600);
         let sets = cfg.model_sets();
         assert_eq!(sets["en"].turn, Path::new("/m/smart-turn.onnx"));
         assert_eq!(sets["en"].kokoro.as_ref().unwrap().speakers[0].id, "af_heart");

@@ -68,7 +68,8 @@ impl Ears {
         };
         if choosing {
             for language in speakable {
-                ears.listening.push((language.clone(), ears.engines.stt(language)?));
+                let stt = if language == fallback { ears.engines.stt(language)? } else { ears.engines.stt_standby(language)? };
+                ears.listening.push((language.clone(), stt));
             }
         } else {
             ears.chosen = Some(ears.engines.stt(fallback)?);
@@ -170,7 +171,9 @@ impl Ears {
 
     fn settle(&mut self, choice: Choice) -> Choice {
         let at = self.listening.iter().position(|(l, _)| *l == choice.language).expect("the choice is speakable");
-        self.chosen = Some(self.listening.swap_remove(at).1);
+        let mut chosen = self.listening.swap_remove(at).1;
+        chosen.wake();
+        self.chosen = Some(chosen);
         self.listening.clear();
         self.voiced = Vec::new();
         choice
