@@ -362,6 +362,10 @@ in
         RestartSec = 2;
         RestartSteps = 5;
         RestartMaxDelaySec = 60;
+        # Live speech keeps up while builds load the host.
+        CPUWeight = 10000;
+        IOWeight = 10000;
+        Nice = -10;
         UMask = "0077";
         NoNewPrivileges = true;
         PrivateTmp = true;

@@ -15,7 +15,7 @@ use super::language::{LanguageId, Scores, WhisperLanguageId};
 use super::mel::{log_mel, MEL_BINS, MEL_FRAMES};
 use super::stt::{Decoder, OfflineStt};
 use super::tts::{ChunkedBackend, Renderer, SpeechBackend};
-use crate::config::{KokoroModel, LanguageIdModel, ModelSet, ModelsConfig, SttModel};
+use crate::config::{KokoroModel, LanguageIdModel, ModelSet, ModelsConfig, SttModel, SttProvider, TransducerWeights};
 
 pub trait Vad: Send {
     /// One 512-sample (32 ms) window at 16 kHz; returns true while speech is detected.
@@ -182,9 +182,11 @@ impl Language {
             (None, Some(sidecar)) => BaseVoice::Sidecar(sidecar.clone()),
             (None, None) => anyhow::bail!("no base voice"),
         };
+        let (recognizer, provider) = recognizer(code, &set.stt, device, GpuAttempt::Try).context("loading the recognizer")?;
+        eprintln!("voice: {code} STT on {provider}");
         let language = Language {
             vad_model: path_str(&set.vad)?,
-            recognizer: recognizer(&set.stt).context("loading the recognizer")?,
+            recognizer,
             turn: Arc::new(OrtTurn::create(&set.turn).context("loading the turn model")?),
             tts,
         };
@@ -237,51 +239,58 @@ fn path_str(p: &Path) -> anyhow::Result<String> {
     p.to_str().map(str::to_owned).ok_or_else(|| anyhow!("{} is not UTF-8", p.display()))
 }
 
-fn recognizer(stt: &SttModel) -> anyhow::Result<Recognizer> {
-    match stt {
-        SttModel::OnlineTransducer { encoder, decoder, joiner, tokens } => {
+/// The recognizer on the model's provider, else on the CPU when `device` forbids CUDA or it fails to load there.
+fn recognizer(code: &str, stt: &SttModel, device: Device, gpu: GpuAttempt) -> anyhow::Result<(Recognizer, &'static str)> {
+    let model = stt.transducer();
+    if device != Device::Cpu && model.provider == SttProvider::Cuda {
+        if gpu == GpuAttempt::Try {
+            if let Some(recognizer) = create_recognizer(stt, &model.weights, "cuda")? {
+                return Ok((recognizer, "cuda"));
+            }
+        }
+        eprintln!("voice: CUDA STT unavailable for {code}, using the CPU");
+    }
+    let recognizer = create_recognizer(stt, model.cpu_weights(), "cpu")?
+        .ok_or_else(|| anyhow!("sherpa-onnx refused the recognizer config"))?;
+    Ok((recognizer, "cpu"))
+}
+
+fn create_recognizer(stt: &SttModel, weights: &TransducerWeights, provider: &str) -> anyhow::Result<Option<Recognizer>> {
+    let tokens = Some(path_str(&stt.transducer().tokens)?);
+    let (encoder, decoder, joiner) =
+        (Some(path_str(&weights.encoder)?), Some(path_str(&weights.decoder)?), Some(path_str(&weights.joiner)?));
+    Ok(match stt {
+        SttModel::OnlineTransducer(_) => {
             let config = OnlineRecognizerConfig {
                 model_config: OnlineModelConfig {
-                    transducer: OnlineTransducerModelConfig {
-                        encoder: Some(path_str(encoder)?),
-                        decoder: Some(path_str(decoder)?),
-                        joiner: Some(path_str(joiner)?),
-                    },
-                    tokens: Some(path_str(tokens)?),
+                    transducer: OnlineTransducerModelConfig { encoder, decoder, joiner },
+                    tokens,
                     num_threads: 4,
-                    provider: Some("cpu".into()),
+                    provider: Some(provider.into()),
                     ..Default::default()
                 },
                 decoding_method: Some("greedy_search".into()),
                 enable_endpoint: false,
                 ..Default::default()
             };
-            let recognizer =
-                OnlineRecognizer::create(&config).ok_or_else(|| anyhow!("sherpa-onnx refused the recognizer config"))?;
-            Ok(Recognizer::Online(Arc::new(recognizer)))
+            OnlineRecognizer::create(&config).map(|r| Recognizer::Online(Arc::new(r)))
         }
-        SttModel::OfflineTransducer { encoder, decoder, joiner, tokens } => {
+        SttModel::OfflineTransducer(_) => {
             let config = OfflineRecognizerConfig {
                 model_config: OfflineModelConfig {
-                    transducer: OfflineTransducerModelConfig {
-                        encoder: Some(path_str(encoder)?),
-                        decoder: Some(path_str(decoder)?),
-                        joiner: Some(path_str(joiner)?),
-                    },
-                    tokens: Some(path_str(tokens)?),
+                    transducer: OfflineTransducerModelConfig { encoder, decoder, joiner },
+                    tokens,
                     num_threads: 4,
-                    provider: Some("cpu".into()),
+                    provider: Some(provider.into()),
                     model_type: Some("transducer".into()),
                     ..Default::default()
                 },
                 decoding_method: Some("greedy_search".into()),
                 ..Default::default()
             };
-            let recognizer =
-                OfflineRecognizer::create(&config).ok_or_else(|| anyhow!("sherpa-onnx refused the recognizer config"))?;
-            Ok(Recognizer::Offline(Arc::new(recognizer)))
+            OfflineRecognizer::create(&config).map(|r| Recognizer::Offline(Arc::new(r)))
         }
-    }
+    })
 }
 
 impl Decoder for OfflineRecognizer {
@@ -621,6 +630,18 @@ mod tests {
         assert!(!tts.render("Hi.", "").unwrap().is_empty());
         m.clear();
         assert!(Engines::load(&m, Device::Auto).unwrap().languages().is_empty());
+    }
+
+    #[test]
+    #[ignore = "needs NOTE_VOICE_MODELS"]
+    fn a_failed_cuda_recognizer_falls_back_to_the_cpu_weights() {
+        let mut stt = models().unwrap()["en"].stt.clone();
+        assert!(matches!(recognizer("en", &stt, Device::Cuda, GpuAttempt::Fail), Ok((Recognizer::Online(_), "cpu"))));
+        if let SttModel::OnlineTransducer(t) = &mut stt {
+            t.cpu = None;
+            t.weights.encoder = "/nonexistent".into();
+        }
+        assert!(recognizer("en", &stt, Device::Cpu, GpuAttempt::Try).is_err(), "the CPU loads the fallback weights");
     }
 
     #[test]

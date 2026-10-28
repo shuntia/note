@@ -68,10 +68,51 @@ impl TtsConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SttModel {
-    /// A streaming zipformer, decoded as the audio comes.
-    OnlineTransducer { encoder: PathBuf, decoder: PathBuf, joiner: PathBuf, tokens: PathBuf },
-    /// A whole-utterance zipformer; the turn so far is re-decoded at a throttled cadence.
-    OfflineTransducer { encoder: PathBuf, decoder: PathBuf, joiner: PathBuf, tokens: PathBuf },
+    /// A streaming transducer, decoded as the audio comes.
+    OnlineTransducer(Transducer),
+    /// A whole-utterance transducer; the turn so far is re-decoded at a throttled cadence.
+    OfflineTransducer(Transducer),
+}
+
+impl SttModel {
+    pub fn transducer(&self) -> &Transducer {
+        match self {
+            SttModel::OnlineTransducer(t) | SttModel::OfflineTransducer(t) => t,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SttProvider {
+    #[default]
+    Cuda,
+    Cpu,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct TransducerWeights {
+    pub encoder: PathBuf,
+    pub decoder: PathBuf,
+    pub joiner: PathBuf,
+}
+
+/// `weights` run on `provider`; a CUDA one that fails to load runs on the CPU, from `cpu` when set.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Transducer {
+    #[serde(flatten)]
+    pub weights: TransducerWeights,
+    pub tokens: PathBuf,
+    #[serde(default)]
+    pub provider: SttProvider,
+    #[serde(default)]
+    pub cpu: Option<TransducerWeights>,
+}
+
+impl Transducer {
+    pub fn cpu_weights(&self) -> &TransducerWeights {
+        self.cpu.as_ref().unwrap_or(&self.weights)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -170,16 +211,21 @@ pub fn language_id_from_dir(dir: &Path) -> Option<LanguageIdModel> {
     (model.encoder.is_file() && model.decoder.is_file()).then_some(model)
 }
 
+/// The full-precision weights in `dir` on CUDA, with their int8 exports for the CPU.
+fn transducer(dir: &Path, stem: &str) -> Transducer {
+    let weights = |suffix: &str| TransducerWeights {
+        encoder: dir.join(format!("encoder{stem}{suffix}.onnx")),
+        decoder: dir.join(format!("decoder{stem}{suffix}.onnx")),
+        joiner: dir.join(format!("joiner{stem}{suffix}.onnx")),
+    };
+    Transducer { weights: weights(""), tokens: dir.join("tokens.txt"), provider: SttProvider::Cuda, cpu: Some(weights(".int8")) }
+}
+
 /// The sets laid out as `packages.note-voice-models`: "en" always, "ja" when its models are there,
 /// speaking through `tts.base_sidecar("ja")`.
 pub fn models_from_dir(dir: &Path, tts: &TtsConfig) -> ModelsConfig {
     let en = ModelSet {
-        stt: SttModel::OnlineTransducer {
-            encoder: dir.join("nemotron/encoder.int8.onnx"),
-            decoder: dir.join("nemotron/decoder.int8.onnx"),
-            joiner: dir.join("nemotron/joiner.int8.onnx"),
-            tokens: dir.join("nemotron/tokens.txt"),
-        },
+        stt: SttModel::OnlineTransducer(transducer(&dir.join("nemotron"), "")),
         kokoro: Some(KokoroModel {
             model: dir.join("kokoro/model.onnx"),
             voices: dir.join("kokoro/voices.bin"),
@@ -203,12 +249,7 @@ pub fn models_from_dir(dir: &Path, tts: &TtsConfig) -> ModelsConfig {
     let reazon = dir.join(REAZON_DIR);
     if reazon.join("tokens.txt").is_file() {
         let ja = ModelSet {
-            stt: SttModel::OfflineTransducer {
-                encoder: reazon.join("encoder-epoch-99-avg-1.int8.onnx"),
-                decoder: reazon.join("decoder-epoch-99-avg-1.int8.onnx"),
-                joiner: reazon.join("joiner-epoch-99-avg-1.int8.onnx"),
-                tokens: reazon.join("tokens.txt"),
-            },
+            stt: SttModel::OfflineTransducer(transducer(&reazon, "-epoch-99-avg-1")),
             kokoro: None,
             tts_sidecar: Some(tts.base_sidecar("ja")),
             vad: dir.join("silero_vad.onnx"),
@@ -321,7 +362,7 @@ mod tests {
         };
         let sets = models_from_dir(dir.path(), &tts);
         let ja = &sets["ja"];
-        assert!(matches!(&ja.stt, SttModel::OfflineTransducer { tokens, .. } if tokens == &reazon.join("tokens.txt")));
+        assert!(matches!(&ja.stt, SttModel::OfflineTransducer(t) if t.tokens == reazon.join("tokens.txt")));
         assert!(ja.kokoro.is_none());
         assert_eq!(ja.tts_sidecar.as_deref(), Some("ja-tts"));
         assert_eq!(ja.vad, sets["en"].vad);
@@ -382,6 +423,51 @@ mod tests {
         let both = r#"tts_sidecar = "ja"
             kokoro = { model = "/m", voices = "/v", tokens = "/t", data_dir = "/d", speakers = [] }"#;
         assert!(refused(both).contains("both"));
+    }
+
+    #[test]
+    fn an_stt_model_runs_on_cuda_unless_it_names_the_cpu_and_may_carry_cpu_weights() {
+        let stt = |fields: &str| -> SttModel {
+            let cfg: VoiceServiceConfig = toml::from_str(&format!(
+                r#"{BASE}
+                [models.en]
+                stt = {{ kind = "online_transducer", encoder = "/e", decoder = "/d", joiner = "/j", tokens = "/t"{fields} }}
+                tts_sidecar = "x"
+                vad = "/v"
+                turn = "/s"
+                "#
+            ))
+            .unwrap();
+            cfg.models["en"].stt.clone()
+        };
+        let plain = stt("");
+        let t = plain.transducer();
+        assert_eq!(t.provider, SttProvider::Cuda);
+        assert_eq!(t.cpu_weights(), &t.weights);
+        assert_eq!(t.weights.encoder, Path::new("/e"));
+        assert_eq!(stt(r#", provider = "cpu""#).transducer().provider, SttProvider::Cpu);
+        let both = stt(r#", cpu = { encoder = "/e8", decoder = "/d8", joiner = "/j8" }"#);
+        assert_eq!(both.transducer().cpu_weights().joiner, Path::new("/j8"));
+        assert!(toml::from_str::<VoiceServiceConfig>(&format!(
+            "{BASE}\n[models.en]\nstt = {{ kind = \"online_transducer\", encoder = \"/e\", decoder = \"/d\", joiner = \"/j\", tokens = \"/t\", provider = \"tpu\" }}\nvad = \"/v\"\nturn = \"/s\""
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn the_default_sets_run_full_precision_on_cuda_and_int8_on_the_cpu() {
+        let dir = tempfile::tempdir().unwrap();
+        let reazon = dir.path().join(REAZON_DIR);
+        std::fs::create_dir_all(&reazon).unwrap();
+        std::fs::write(reazon.join("tokens.txt"), "").unwrap();
+        let sets = models_from_dir(dir.path(), &TtsConfig::default());
+        let en = sets["en"].stt.transducer();
+        assert_eq!(en.provider, SttProvider::Cuda);
+        assert_eq!(en.weights.encoder, dir.path().join("nemotron/encoder.onnx"));
+        assert_eq!(en.cpu_weights().encoder, dir.path().join("nemotron/encoder.int8.onnx"));
+        let ja = sets["ja"].stt.transducer();
+        assert_eq!(ja.weights.joiner, reazon.join("joiner-epoch-99-avg-1.onnx"));
+        assert_eq!(ja.cpu_weights().joiner, reazon.join("joiner-epoch-99-avg-1.int8.onnx"));
     }
 
     #[test]
