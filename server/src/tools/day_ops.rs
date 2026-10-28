@@ -1528,7 +1528,9 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> R
     if items.is_empty() && !replace && !carry && day.env.saved.is_empty() {
         let gated = |i: &Value| i.get("ref").is_none() && matches!(i["field"].as_str(), Some("extra_wakes" | "carry"));
         if day.env.ignored.is_empty() {
-            day.env.warn("nothing to save: items was empty");
+            day.env.refuse_call(
+                r#"nothing was saved: items was empty. items is a list, like [{"wake":"check the essay is sent","at":"18:30","cancel_on":"reply"}] or [{"task":12,"at":"19:00"}]"#,
+            );
         } else if day.env.refused.is_empty() && !day.env.ignored.iter().all(gated) {
             day.env.refuse_call("nothing was saved: the day's items go in items, a list");
         }

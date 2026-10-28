@@ -219,7 +219,9 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> R
     }
     if goals.is_empty() {
         if rest.is_empty() {
-            saver.env.warn("nothing to save: goals was empty");
+            saver.env.refuse_call(
+                r#"nothing was saved: goals was empty. goals is a list, like [{"title":"Pass the January exam","due":"2027-01-20"}]"#,
+            );
         } else {
             saver.env.refuse_call("nothing was saved: the goals go in goals, a list");
         }
@@ -616,7 +618,7 @@ mod tests {
         assert_eq!(out["refused"][1]["ref"], "1");
         assert_eq!(out["saved"][0]["op"], "unchanged", "the same title is the same goal");
         let out = talk(&conn, &tmp, "goal_save", json!({"goals": []}));
-        assert_eq!(out["ok"], true);
+        assert_eq!(out["ok"], false, "an empty save is refused");
         let long = "goal ".repeat(60);
         let out = talk(&conn, &tmp, "goal_save", json!({"goals": [{"title": long}]}));
         let g = crate::goals::get(&conn, 1, saved(&out, "0")).unwrap().unwrap();

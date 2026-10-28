@@ -661,7 +661,7 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolEr
     }
     if items.is_empty() {
         if rest.is_empty() {
-            w.env.warn("nothing to save: items was empty");
+            w.env.refuse_call(r#"nothing was saved: items was empty. items is a list, like [{"title":"Works best in the morning"}]"#);
         } else {
             w.env.refuse_call("nothing was saved: the memories go in items, a list");
         }

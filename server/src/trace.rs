@@ -110,6 +110,11 @@ impl Builder {
         self.usage.add(usage);
     }
 
+    /// Completion tokens counted so far, reasoning included.
+    pub fn completion(&self) -> u64 {
+        self.usage.completion
+    }
+
     pub fn call(&mut self, name: &str, args: &str, result: &str, is_error: bool, ms: u64) {
         self.tool_calls += 1;
         let error_kind = is_error.then(|| error_kind_of(result)).flatten();

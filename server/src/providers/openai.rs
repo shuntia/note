@@ -1,4 +1,4 @@
-use super::{ChatRequest, ChatResponse, EmbeddingsProvider, FirstTokenTimeout, LLMProvider, ProviderError, StreamOpts, StreamSink, ToolCall};
+use super::{ChatRequest, ChatResponse, EmbeddingsProvider, FirstTokenTimeout, LLMProvider, ProviderError, StreamOpts, StreamSink, ToolCall, MAX_REASONING_BYTES};
 use crate::failure::Reason;
 use anyhow::{Context, Result};
 use std::io::BufRead;
@@ -278,6 +278,12 @@ fn wrap_tool(t: &serde_json::Value) -> serde_json::Value {
 
 /// `reasoning` asks an endpoint that supports it (`OpenRouter`) for the model's
 /// reasoning text; the field is absent when no effort is configured.
+/// A round's output ceiling, reasoning included.
+const MAX_TOKENS: u32 = 8192;
+/// With reasoning on, `OpenRouter` sizes the reasoning budget as a share of
+/// `max_tokens` by effort, so the ceiling is doubled to leave the answer room.
+const MAX_TOKENS_REASONING: u32 = 16_384;
+
 pub fn body(model: &str, req: &ChatRequest, reasoning: Option<&str>) -> serde_json::Value {
     let mut messages: Vec<serde_json::Value> = vec![serde_json::json!({"role": "system", "content": req.system})];
     for m in req.messages {
@@ -304,9 +310,10 @@ pub fn body(model: &str, req: &ChatRequest, reasoning: Option<&str>) -> serde_js
             }
         }
     }
-    let mut v = serde_json::json!({"model": model, "messages": messages});
+    let mut v = serde_json::json!({"model": model, "messages": messages, "max_tokens": MAX_TOKENS});
     if let Some(effort) = reasoning {
         v["reasoning"] = serde_json::json!({ "effort": effort });
+        v["max_tokens"] = MAX_TOKENS_REASONING.into();
     }
     if !req.tools.is_empty() {
         let tools: Vec<serde_json::Value> = req.tools.iter().map(wrap_tool).collect();
@@ -385,13 +392,20 @@ fn read_stream(
     let mut pending: Option<(u64, ToolCall)> = None;
     let mut heard = false;
     let mut done = false;
+    let mut thought_bytes = 0;
     loop {
         let wait = if heard { opts.stall } else { opts.first_token.saturating_sub(started.elapsed()) };
-        let line = match next_line(lines, wait, &*sink) {
+        let left = opts.round.saturating_sub(started.elapsed());
+        let line = match next_line(lines, wait.min(left), &*sink) {
             Next::Line(line) => line,
             Next::Ended => break,
             Next::Halted => {
                 crate::usage::record(crate::usage::Usage::openai_call(&usage));
+                return Ok(resp);
+            }
+            Next::Timeout if started.elapsed() >= opts.round => {
+                sink.cut();
+                record_partial(&usage, thought_bytes + resp.text.len());
                 return Ok(resp);
             }
             Next::Timeout if heard => {
@@ -419,10 +433,16 @@ fn read_stream(
         let thought = ["reasoning", "reasoning_content"].iter().map(|k| content_text(&delta[k])).find(|t| !t.is_empty());
         if let Some(thought) = thought {
             heard = true;
+            thought_bytes += thought.len();
             if reasoning && !sink.reasoning(&thought) {
                 crate::usage::record(crate::usage::Usage::openai_call(&usage));
                 return Ok(resp);
             }
+        }
+        if thought_bytes > MAX_REASONING_BYTES || started.elapsed() >= opts.round {
+            sink.cut();
+            record_partial(&usage, thought_bytes + resp.text.len());
+            return Ok(resp);
         }
         let text = content_text(&delta["content"]);
         if !text.is_empty() {
@@ -464,6 +484,15 @@ fn read_stream(
     }
     crate::usage::record(crate::usage::Usage::openai_call(&usage));
     Ok(resp)
+}
+
+/// Records a round cut before its usage arrived at about four bytes a token.
+fn record_partial(usage: &serde_json::Value, streamed_bytes: usize) {
+    let mut spent = crate::usage::Usage::openai_call(usage);
+    if spent.completion == 0 {
+        spent.completion = (streamed_bytes / 4) as u64;
+    }
+    crate::usage::record(spent);
 }
 
 const HALT_POLL: std::time::Duration = std::time::Duration::from_millis(100);
@@ -631,6 +660,8 @@ mod tests {
         let req = ChatRequest { system: "sys", messages: &msgs, tools: &[], background: false, plain: false, must_call: None, model: None, effort: None };
         assert!(body("gpt-x", &req, None).get("reasoning").is_none());
         assert_eq!(body("gpt-x", &req, Some("high"))["reasoning"]["effort"], "high");
+        assert_eq!(body("gpt-x", &req, None)["max_tokens"], MAX_TOKENS);
+        assert_eq!(body("gpt-x", &req, Some("high"))["max_tokens"], MAX_TOKENS_REASONING);
     }
 
     #[test]
@@ -1068,7 +1099,7 @@ mod tests {
     fn reasoning_holds_off_the_first_token_deadline() {
         let (tx, rx) = mpsc::channel();
         tx.send(Ok("data: {\"choices\":[{\"delta\":{\"reasoning\":\"hm\"}}]}".to_string())).unwrap();
-        let opts = StreamOpts { first_token: Duration::from_millis(50), stall: Duration::from_millis(400) };
+        let opts = StreamOpts { first_token: Duration::from_millis(50), stall: Duration::from_millis(400), round: crate::providers::ROUND_LIMIT };
         let feed = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(200));
             tx.send(Ok("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}".to_string())).unwrap();
@@ -1084,11 +1115,67 @@ mod tests {
         tx.send(Ok("data: {\"choices\":[{\"delta\":{\"content\":\"On it\"}}]}".to_string())).unwrap();
         let mut sink = Collect::default();
         let started = Instant::now();
-        let opts = StreamOpts { first_token: Duration::from_secs(5), stall: Duration::from_millis(100) };
+        let opts = StreamOpts { first_token: Duration::from_secs(5), stall: Duration::from_millis(100), round: crate::providers::ROUND_LIMIT };
         let err = read_stream(&rx, started, &opts, false, &mut sink).unwrap_err();
         assert!(err.to_string().contains("stalled"), "{err:#}");
         assert_eq!(sink.text, "On it");
         assert!(started.elapsed() < Duration::from_secs(2));
         drop(tx);
+    }
+
+    #[derive(Default)]
+    struct Cuts(usize);
+
+    impl StreamSink for Cuts {
+        fn text(&mut self, _delta: &str) -> bool {
+            true
+        }
+
+        fn tool_call(&mut self, _call: &ToolCall) -> bool {
+            true
+        }
+
+        fn cut(&mut self) {
+            self.0 += 1;
+        }
+    }
+
+    #[test]
+    fn reasoning_past_its_cap_cuts_the_round_and_counts_what_it_spent() {
+        let (tx, rx) = mpsc::channel();
+        let piece = "x".repeat(4096);
+        for _ in 0..(MAX_REASONING_BYTES / piece.len() + 2) {
+            tx.send(Ok(format!("data: {{\"choices\":[{{\"delta\":{{\"reasoning\":\"{piece}\"}}}}]}}"))).unwrap();
+        }
+        let mut sink = Cuts::default();
+        let meter = crate::usage::Meter::open();
+        let resp = read_stream(&rx, Instant::now(), &opts(Duration::from_secs(5)), true, &mut sink).unwrap();
+        let spent = crate::usage::take();
+        drop(meter);
+        assert_eq!(sink.0, 1);
+        assert!(resp.text.is_empty() && resp.tool_calls.is_empty());
+        assert!(spent.completion as usize > MAX_REASONING_BYTES / 4, "{spent:?}");
+        assert!(rx.try_recv().is_ok(), "the rest of the stream is left unread");
+    }
+
+    #[test]
+    fn a_round_past_its_wall_clock_is_cut_while_the_stream_still_trickles() {
+        let (tx, rx) = mpsc::channel();
+        let feed = std::thread::spawn(move || {
+            for _ in 0..40 {
+                if tx.send(Ok("data: {\"choices\":[{\"delta\":{\"reasoning\":\"hm\"}}]}".to_string())).is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let opts = StreamOpts { first_token: Duration::from_secs(5), stall: Duration::from_secs(5), round: Duration::from_millis(150) };
+        let mut sink = Cuts::default();
+        let started = Instant::now();
+        read_stream(&rx, started, &opts, true, &mut sink).unwrap();
+        assert_eq!(sink.0, 1);
+        assert!(started.elapsed() < Duration::from_millis(600));
+        drop(rx);
+        feed.join().unwrap();
     }
 }

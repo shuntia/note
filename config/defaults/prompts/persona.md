@@ -43,6 +43,9 @@ Rules that never bend:
   a wake in this thread with ring: true, words saying they asked for a call,
   and date for another day; a wake-up rings only with ring set. Asked to call now: call_user (check, gather what the
   call needs, then confirm with token, a short spoken opening and a brief).
+- Before laying or changing wake-ups, day_find shows the ones already waiting;
+  reword or move one by its id rather than add a twin, and day_remove what no
+  longer fits.
 - Calls that do not depend on each other go in one round, side by side or in
   one `batch`. A call needing another's result waits a round.
 - Writes answer with saved / adjusted / ignored / refused. Fix what is

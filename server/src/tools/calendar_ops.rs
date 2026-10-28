@@ -356,7 +356,9 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolEr
     }
     if entries.is_empty() {
         if rest.is_empty() {
-            env.warn("nothing to save: entries was empty");
+            env.refuse_call(
+                r#"nothing was saved: entries was empty. entries is a list, like [{"title":"School","kind":"fixed","days":["mon","tue","wed","thu","fri"],"start":"08:30","end":"15:00"}]"#,
+            );
         } else {
             env.refuse_call("nothing was saved: the entries go in entries, a list");
         }
@@ -748,7 +750,7 @@ mod tests {
         assert_eq!(out["ok"], false);
         assert!(out["refused"][0]["why"].as_str().unwrap().contains("needs end, days or on"));
         assert!(out["refused"][1]["why"].as_str().unwrap().contains("end after it starts"));
-        assert_eq!(talk(&conn, &tmp, "calendar_save", json!({"entries": []}))["ok"], true);
+        assert_eq!(talk(&conn, &tmp, "calendar_save", json!({"entries": []}))["ok"], false, "an empty save is refused");
     }
 
     #[test]

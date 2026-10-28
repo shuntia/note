@@ -497,7 +497,7 @@ struct LiveTurn {
     run: Option<Run>,
     /// The reply streamed since the last tool call.
     said: String,
-    /// The tool calls so far by index, each with its result once it came.
+    /// The tool calls under way, by index; each one's row is written when its result comes.
     steps: std::collections::BTreeMap<usize, LiveStep>,
     stop: StopFlag,
     _permit: crate::TalkPermit,
@@ -506,7 +506,6 @@ struct LiveTurn {
 struct LiveStep {
     name: String,
     args: String,
-    result: Option<(String, bool)>,
 }
 
 struct Run {
@@ -586,14 +585,11 @@ impl LiveTurns {
             _ => {
                 match *event {
                     AgentEvent::ToolCall { index, name, args } => {
-                        let step = LiveStep { name: name.to_string(), args: args.to_string(), result: None };
-                        turn.steps.insert(index, step);
+                        turn.steps.insert(index, LiveStep { name: name.to_string(), args: args.to_string() });
                         turn.said.clear();
                     }
-                    AgentEvent::ToolResult { index, result, is_error, .. } => {
-                        if let Some(step) = turn.steps.get_mut(&index) {
-                            step.result = Some((result.to_string(), is_error));
-                        }
+                    AgentEvent::ToolResult { index, .. } => {
+                        turn.steps.remove(&index);
                     }
                     _ => {}
                 }
@@ -660,8 +656,7 @@ fn let_go(state: &AppState, user_id: i64, stop: &StopFlag) {
         if mine {
             let cut = crate::text::stopped_reply(turn.lang);
             for step in turn.steps.values() {
-                let (result, is_error) = step.result.as_ref().map_or((cut.as_str(), true), |(r, e)| (r.as_str(), *e));
-                append_tool(&conn, turn.conversation_id, &step.name, &step.args, result, is_error, None, now)?;
+                append_tool(&conn, turn.conversation_id, &step.name, &step.args, &cut, true, None, now)?;
             }
             let reply = crate::text::stopped_after(turn.lang, &turn.said);
             append_assistant(&conn, turn.conversation_id, &reply, "", 0, now)?;
@@ -888,10 +883,36 @@ async fn turn(
         let outcome = (|| {
             st.hub.broadcast_changed(user_id);
             let seq = std::cell::Cell::new(0u64);
+            // each call's row is written as its result comes, so a turn that never ends still shows what it did
+            let thought = std::cell::RefCell::new(String::new());
+            let calls = std::cell::RefCell::new(std::collections::HashMap::<usize, (String, Option<String>)>::new());
             let on_event = |ev: AgentEvent| {
                 let n = seq.replace(seq.get() + 1);
                 let frame = crate::channels::ws::agent_frame(Some(conv_id), n, &ev);
-                if st.live_turns.record(user_id, &stop, n, &ev, &frame) {
+                match ev {
+                    AgentEvent::Thinking { text } | AgentEvent::ThinkingDelta { text } => thought.borrow_mut().push_str(text),
+                    AgentEvent::ToolCall { index, args, .. } => {
+                        let taken = std::mem::take(&mut *thought.borrow_mut());
+                        let thinking = Some(taken.trim().to_string()).filter(|t| !t.is_empty());
+                        calls.borrow_mut().insert(index, (args.to_string(), thinking));
+                    }
+                    _ => {}
+                }
+                let live = if let AgentEvent::ToolResult { index, name, result, is_error } = ev {
+                    let conn = st.db();
+                    let live = st.live_turns.record(user_id, &stop, n, &ev, &frame);
+                    if live && owned(&conn, user_id, conv_id).unwrap_or(false) {
+                        let (args, thinking) = calls.borrow_mut().remove(&index).unwrap_or_default();
+                        let written = append_tool(&conn, conv_id, name, &args, result, is_error, thinking.as_deref(), now);
+                        if let Err(e) = written {
+                            let _ = crate::log::record(&conn, Some(user_id), "talk_error", &format!("writing a step: {e:#}"));
+                        }
+                    }
+                    live
+                } else {
+                    st.live_turns.record(user_id, &stop, n, &ev, &frame)
+                };
+                if live {
                     st.hub.send(user_id, &frame);
                 }
             };
@@ -915,7 +936,7 @@ async fn turn(
                     };
                     let undone = if conversation.is_some() {
                         conn.execute(
-                            "DELETE FROM talk_messages WHERE id = ?1 AND conversation_id IN
+                            "DELETE FROM talk_messages WHERE id >= ?1 AND conversation_id IN
                                 (SELECT id FROM conversations WHERE id = ?2 AND user_id = ?3)",
                             (user_row, conv_id, user_id),
                         )
@@ -950,18 +971,6 @@ async fn turn(
                 });
             };
             anyhow::ensure!(owned(&conn, user_id, conv_id)?, "the conversation was deleted mid-turn");
-            for s in &out.steps {
-                append_tool(
-                    &conn,
-                    conv_id,
-                    &s.name,
-                    &s.args,
-                    &s.result,
-                    s.is_error,
-                    s.thinking.as_deref(),
-                    now,
-                )?;
-            }
             append_assistant(&conn, conv_id, &reply, &out.reasoning, out.thought_ms, now)?;
             touch(&conn, conv_id, now)?;
             mark_via(&conn, conv_id, via, now)?;

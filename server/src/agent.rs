@@ -25,8 +25,13 @@ pub const TALK_MAX_TURNS: usize = 40;
 /// Long turns answer the client as pending and finish over the socket, so this
 /// bounds cost, not anyone's wait.
 const TALK_BUDGET: std::time::Duration = std::time::Duration::from_mins(10);
-/// Rounds in a row that write nothing before the session is told to act.
+/// Rounds in a row that change nothing before the session is told to act;
+/// when one of them tried a write, the next round must answer instead.
 const LOOKUP_ROUNDS: usize = 4;
+/// Writes in a row that change nothing before the session is told to stop and fix them.
+const IDLE_WRITES_NOTE: usize = 2;
+/// Completion tokens, reasoning included, a Talk turn may spend before its next round must answer.
+const TALK_COMPLETION_CAP: u64 = 150_000;
 
 use crate::model_text::{self as mt, REPLY_IN_JAPANESE, SPEAK_JAPANESE, VISITOR_JAPANESE};
 use crate::text::Lang;
@@ -95,6 +100,8 @@ struct SessionProfile {
     streams: bool,
     /// How long it may start new rounds; past it, the next round must answer.
     budget: Option<std::time::Duration>,
+    /// Completion tokens it may spend; past them, the next round must answer.
+    completion_cap: Option<u64>,
     /// A share session logs under its own kinds, so it never counts against
     /// the owner's session budget or shows in their activity.
     log_session: &'static str,
@@ -116,6 +123,7 @@ const fn profile(kind: SessionKind) -> SessionProfile {
         background: true,
         streams: false,
         budget: None,
+        completion_cap: None,
         log_session: "agent_session",
         log_max_turns: "agent_max_turns",
     };
@@ -149,6 +157,7 @@ const fn profile(kind: SessionKind) -> SessionProfile {
             background: false,
             streams: true,
             budget: Some(TALK_BUDGET),
+            completion_cap: Some(TALK_COMPLETION_CAP),
             ..base
         },
     }
@@ -607,6 +616,8 @@ fn run_traced(
         heard,
         reads: Default::default(),
         acted: Default::default(),
+        idle_writes: Default::default(),
+        idle: Default::default(),
     };
     let mut lookups = 0;
     let started = std::time::Instant::now();
@@ -617,6 +628,8 @@ fn run_traced(
     let mut asked_for_words = false;
     let mut reasoned = false;
     let mut said = String::new();
+    let replies = profile.max_turns_reply && terminal.is_none();
+    let mut force_reply = false;
     'rounds: while turns < max_turns + usize::from(asked_for_words) {
         if stopped() {
             break;
@@ -633,9 +646,10 @@ fn run_traced(
             &schemas
         };
         let last = asked_for_words
-            || profile.max_turns_reply
-                && terminal.is_none()
-                && (turns + 1 == max_turns || profile.budget.is_some_and(|b| started.elapsed() >= b));
+            || replies
+                && (force_reply
+                    || turns + 1 == max_turns
+                    || profile.budget.is_some_and(|b| started.elapsed() >= b));
         if last && !asked_for_words {
             note_on_last_result(&mut messages, mt::last_round(lang));
         }
@@ -660,7 +674,7 @@ fn run_traced(
         };
         trace.spent(crate::usage::take());
         let round = std::time::Instant::now();
-        let (resp, thinking, streamed) = match chat_round(deps.llm, &req, profile.streams, on_event, stop) {
+        let (resp, thinking, streamed, cut) = match chat_round(deps.llm, &req, profile.streams, on_event, stop) {
             Ok(v) => {
                 trace.round(round.elapsed().as_millis() as u64, crate::usage::take());
                 v
@@ -675,6 +689,11 @@ fn run_traced(
         if streamed && stopped() {
             said = resp.text;
             break;
+        }
+        force_reply |= replies && profile.completion_cap.is_some_and(|cap| trace.completion() >= cap);
+        if cut && replies && !last {
+            force_reply = true;
+            continue;
         }
         let mut thinking = match thinking.trim() {
             "" => None,
@@ -722,6 +741,7 @@ fn run_traced(
         let calls = resp.tool_calls.clone();
         messages.push(Message::Assistant { text: last_text.clone(), tool_calls: resp.tool_calls });
         let acted = env.acted.get();
+        let idle_before = env.idle_writes.get();
         for (i, call) in calls.iter().cloned().enumerate() {
             if stopped() {
                 break 'rounds;
@@ -767,7 +787,13 @@ fn run_traced(
             messages.push(Message::ToolResult { call_id: call.id, content, is_error });
         }
         lookups = if env.acted.get() == acted { lookups + 1 } else { 0 };
-        if lookups > 0 && lookups % LOOKUP_ROUNDS == 0 {
+        let idle = env.idle_writes.get();
+        if idle_before < IDLE_WRITES_NOTE && idle >= IDLE_WRITES_NOTE {
+            note_on_last_result(&mut messages, mt::idle_writes(lang));
+        }
+        if replies && lookups >= LOOKUP_ROUNDS && idle > 0 {
+            force_reply = true;
+        } else if lookups > 0 && lookups % LOOKUP_ROUNDS == 0 {
             note_on_last_result(&mut messages, &mt::lookups_nudge(lang, lookups));
         }
     }
@@ -799,9 +825,11 @@ fn run_traced(
 const LIVE_STREAM: crate::providers::StreamOpts = crate::providers::StreamOpts {
     first_token: std::time::Duration::from_secs(45),
     stall: std::time::Duration::from_secs(20),
+    round: crate::providers::ROUND_LIMIT,
 };
 
-/// One provider round: the reply, its reasoning, and whether it was streamed.
+/// One provider round: the reply, its reasoning, whether it was streamed, and
+/// whether a streaming limit cut it short.
 /// A streamed round hands its reasoning and text to `on_event` piece by piece
 /// and is tried again only while none has gone out.
 fn chat_round(
@@ -810,16 +838,16 @@ fn chat_round(
     stream: bool,
     on_event: &dyn Fn(AgentEvent),
     stop: Option<&AtomicBool>,
-) -> Result<(crate::providers::ChatResponse, String, bool)> {
+) -> Result<(crate::providers::ChatResponse, String, bool, bool)> {
     if !(stream && llm.streams()) {
         let (resp, thinking) = llm.chat_with_reasoning(req)?;
-        return Ok((resp, thinking, false));
+        return Ok((resp, thinking, false, false));
     }
     let mut delays = crate::providers::RETRY_DELAYS_MS.iter();
     loop {
-        let mut sink = LiveSink { on_event, stop, reasoning: String::new(), sent: false };
+        let mut sink = LiveSink { on_event, stop, reasoning: String::new(), sent: false, cut: false };
         match llm.chat_stream(req, &LIVE_STREAM, &mut sink) {
-            Ok(resp) => return Ok((resp, sink.reasoning, true)),
+            Ok(resp) => return Ok((resp, sink.reasoning, true, sink.cut)),
             Err(e) => {
                 let again = !sink.sent && !sink.stopped() && !crate::failure::Reason::of(&e).lasts();
                 match delays.next().filter(|_| again) {
@@ -836,6 +864,7 @@ struct LiveSink<'a> {
     stop: Option<&'a AtomicBool>,
     reasoning: String,
     sent: bool,
+    cut: bool,
 }
 
 impl LiveSink<'_> {
@@ -864,6 +893,10 @@ impl crate::providers::StreamSink for LiveSink<'_> {
 
     fn halted(&self) -> bool {
         self.stopped()
+    }
+
+    fn cut(&mut self) {
+        self.cut = true;
     }
 }
 
@@ -1010,8 +1043,12 @@ struct CallEnv<'a> {
     heard: Vec<String>,
     /// Each read since the last other call, by tool and arguments, with its result.
     reads: std::cell::RefCell<std::collections::HashMap<String, String>>,
-    /// Successful calls so far that were not reads.
+    /// Writes so far that changed something.
     acted: std::cell::Cell<usize>,
+    /// Writes in a row that changed nothing.
+    idle_writes: std::cell::Cell<usize>,
+    /// Each write since the last one that acted that changed nothing, by tool and arguments, with its result.
+    idle: std::cell::RefCell<std::collections::HashMap<String, String>>,
 }
 
 impl CallEnv<'_> {
@@ -1030,9 +1067,15 @@ impl CallEnv<'_> {
     }
 
     fn run_known(&self, name: &str, args: &str) -> (String, bool) {
-        let read = tools::reads(name).then(|| read_key(name, args));
-        if let Some(content) = read.as_ref().and_then(|k| self.reads.borrow().get(k).cloned()) {
-            return (mt::repeated_call(self.lang, &content), false);
+        let key = read_key(name, args);
+        let read = tools::reads(name);
+        let earlier = if read { self.reads.borrow().get(&key).cloned() } else { self.idle.borrow().get(&key).cloned() };
+        if let Some(content) = earlier {
+            if read {
+                return (mt::repeated_call(self.lang, &content), false);
+            }
+            self.idle_writes.set(self.idle_writes.get() + 1);
+            return (mt::repeated_idle_write(self.lang, &content), true);
         }
         let (content, is_error) = if name == "call_user" {
             match self.call_user(args) {
@@ -1042,17 +1085,23 @@ impl CallEnv<'_> {
         } else {
             run_tool(self.deps, self.user_id, self.username, self.kind, name, args, None)
         };
-        match read {
-            Some(key) if !is_error => {
+        if read {
+            if !is_error {
                 self.reads.borrow_mut().insert(key, content.clone());
             }
-            Some(_) => {}
-            None => {
-                self.reads.borrow_mut().clear();
-                if !is_error {
-                    self.acted.set(self.acted.get() + 1);
-                }
-            }
+            return (content, is_error);
+        }
+        let (changed, ok) = if is_error { (false, false) } else { write_effect(&content) };
+        if changed {
+            self.reads.borrow_mut().clear();
+        }
+        if changed && ok {
+            self.idle.borrow_mut().clear();
+            self.acted.set(self.acted.get() + 1);
+            self.idle_writes.set(0);
+        } else {
+            self.idle.borrow_mut().insert(key, content.clone());
+            self.idle_writes.set(self.idle_writes.get() + 1);
         }
         (content, is_error)
     }
@@ -1139,6 +1188,25 @@ impl CallEnv<'_> {
         });
         (content, is_error)
     }
+}
+
+/// Whether a write's result changed anything, and whether it was accepted
+/// whole. A save's answer changed something when it saved an item other than
+/// unchanged or removed one; an answer of another shape counts as a change.
+fn write_effect(content: &str) -> (bool, bool) {
+    let Ok(serde_json::Value::Object(v)) = serde_json::from_str::<serde_json::Value>(content) else {
+        return (true, true);
+    };
+    let ok = v.get("ok") != Some(&serde_json::Value::Bool(false));
+    if !v.contains_key("ok") {
+        return (true, ok);
+    }
+    let listed = |key: &str| v.get(key).and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+    let saved = listed("saved").iter().any(|s| s["op"] != "unchanged");
+    let removed = !listed("removed").is_empty();
+    let envelope = ["saved", "removed", "adjusted", "ignored", "refused", "warnings"];
+    let other = v.keys().any(|k| k != "ok" && !envelope.contains(&k.as_str()));
+    (saved || removed || other, ok)
 }
 
 /// A call's identity regardless of how its arguments were spaced or ordered.
@@ -3083,5 +3151,110 @@ mod tests {
             _ => None,
         }).collect();
         assert!(results[0].contains("call_user must be called on its own"), "{results:?}");
+    }
+
+    fn one_call(id: &str, name: &str, args: &str) -> ChatResponse {
+        ChatResponse { text: String::new(), tool_calls: vec![ToolCall { id: id.into(), name: name.into(), args: args.into() }] }
+    }
+
+    #[test]
+    fn empty_saves_sent_again_and_again_end_in_a_reply_within_five_rounds() {
+        let (db, tmp) = env();
+        let script: Vec<_> =
+            (0..12).map(|n| one_call(&format!("c{n}"), "day_save", r#"{"date":"2026-08-31","carry":false}"#)).collect();
+        let llm = MockLLM::scripted(script);
+        let out = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi").unwrap();
+        let seen = llm.seen();
+        assert_eq!(seen.len(), LOOKUP_ROUNDS + 1);
+        assert_eq!(out.reply, crate::text::max_turns_reply(Lang::En));
+        let first = last_result(&seen[1]);
+        assert!(first.contains(r#""ok":false"#) && first.contains(r#"[{\"wake\""#), "{first}");
+        assert!(last_result(&seen[2]).starts_with(mt::repeated_idle_write(Lang::En, "").trim()));
+        assert!(!last_result(&seen[1]).contains(mt::idle_writes(Lang::En)));
+        assert!(last_result(&seen[2]).contains(mt::idle_writes(Lang::En)));
+        assert_eq!(seen[LOOKUP_ROUNDS].must_call.as_deref(), Some("-"));
+        assert!(last_result(&seen[LOOKUP_ROUNDS]).ends_with(mt::last_round(Lang::En)));
+        assert!(out.steps.iter().all(|s| s.result.contains(r#""ok":false"#) || s.is_error));
+    }
+
+    #[test]
+    fn a_refused_empty_save_fixed_on_the_next_round_saves() {
+        let (db, tmp) = env();
+        let llm = MockLLM::scripted(vec![
+            one_call("a", "day_save", r#"{"carry":false}"#),
+            one_call("b", "day_save", r#"{"items":[{"wake":"check the essay","at":"+20min","cancel_on":"reply"}]}"#),
+            ChatResponse { text: "Set.".into(), tool_calls: vec![] },
+        ]);
+        let out = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi").unwrap();
+        assert_eq!(out.reply, "Set.");
+        assert!(out.steps[0].result.contains(r#""ok":false"#));
+        assert!(out.steps[1].result.contains(r#""ok":true"#) && out.steps[1].result.contains("saved"), "{}", out.steps[1].result);
+        let seen = llm.seen();
+        assert!(seen.iter().all(|r| r.must_call.is_none()));
+    }
+
+    /// Answers `first`, then a reply; with `cuts` its first round is cut mid-reasoning. Each round spends
+    /// `spend` tokens and notes whether it was the forced reply.
+    struct CutsFirstRound {
+        rounds: Mutex<Vec<bool>>,
+        cuts: bool,
+        spend: u64,
+        first: ChatResponse,
+    }
+
+    impl LLMProvider for CutsFirstRound {
+        fn chat(&self, req: &ChatRequest) -> Result<ChatResponse> {
+            let mut rounds = self.rounds.lock().unwrap();
+            rounds.push(matches!(req.must_call, Some(MustCall::Nothing)));
+            crate::usage::record(crate::usage::Usage { calls: 1, completion: self.spend, ..Default::default() });
+            if rounds.len() == 1 {
+                return Ok(self.first.clone());
+            }
+            Ok(ChatResponse { text: "In short: yes.".into(), tool_calls: vec![] })
+        }
+
+        fn streams(&self) -> bool {
+            true
+        }
+
+        fn chat_stream(&self, req: &ChatRequest, _: &crate::providers::StreamOpts, sink: &mut dyn crate::providers::StreamSink) -> Result<ChatResponse> {
+            let resp = self.chat(req)?;
+            if self.cuts && self.rounds.lock().unwrap().len() == 1 {
+                sink.reasoning("a very long thought");
+                sink.cut();
+                return Ok(ChatResponse::default());
+            }
+            sink.text(&resp.text);
+            Ok(resp)
+        }
+    }
+
+    #[test]
+    fn a_round_cut_by_a_stream_limit_is_followed_by_the_reply_round() {
+        let (db, tmp) = env();
+        let llm = CutsFirstRound { rounds: Mutex::default(), cuts: true, spend: 0, first: one_call("a", "task_find", "{}") };
+        let out = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi").unwrap();
+        assert_eq!(out.reply, "In short: yes.");
+        assert!(out.steps.is_empty(), "the cut round's call is not run");
+        assert_eq!(*llm.rounds.lock().unwrap(), [false, true]);
+    }
+
+    #[test]
+    fn a_turn_past_its_completion_tokens_must_answer_next() {
+        let (db, tmp) = env();
+        let llm = CutsFirstRound { rounds: Mutex::default(), cuts: false, spend: TALK_COMPLETION_CAP, first: one_call("a", "task_find", "{}") };
+        let out = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi").unwrap();
+        assert_eq!(out.reply, "In short: yes.");
+        assert_eq!(*llm.rounds.lock().unwrap(), [false, true]);
+    }
+
+    #[test]
+    fn what_a_write_changed_is_read_from_its_answer() {
+        assert_eq!(write_effect(r#"{"ok":true,"saved":[{"op":"created"}]}"#), (true, true));
+        assert_eq!(write_effect(r#"{"ok":true,"saved":[{"op":"unchanged"}]}"#), (false, true));
+        assert_eq!(write_effect(r#"{"ok":true,"warnings":["x"]}"#), (false, true));
+        assert_eq!(write_effect(r#"{"ok":false,"refused":[{"why":"x"}]}"#), (false, false));
+        assert_eq!(write_effect(r#"{"ok":false,"saved":[{"op":"created"}],"refused":[{"why":"x"}]}"#), (true, false));
+        assert_eq!(write_effect(r#"{"rang":true}"#), (true, true));
     }
 }

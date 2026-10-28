@@ -92,19 +92,30 @@ pub trait StreamSink {
     fn halted(&self) -> bool {
         false
     }
+    /// The round ran past `StreamOpts::round` or `MAX_REASONING_BYTES` and was
+    /// ended there; what arrived before is in the response.
+    fn cut(&mut self) {}
 }
+
+/// Reasoning one streamed round may run to before it is cut.
+pub const MAX_REASONING_BYTES: usize = 32 * 1024;
+
+/// How long one streamed round may run before it is cut.
+pub const ROUND_LIMIT: std::time::Duration = std::time::Duration::from_mins(3);
 
 pub struct StreamOpts {
     /// Fails the call if no reasoning, text or tool call has arrived by then.
     pub first_token: std::time::Duration,
     /// Fails the call once nothing has arrived for this long after the first piece.
     pub stall: std::time::Duration,
+    /// Cuts the round once it has run this long.
+    pub round: std::time::Duration,
 }
 
 impl StreamOpts {
     /// A voice call's deadlines, where eight silent seconds mean a dead line.
     pub fn spoken(first_token: std::time::Duration) -> Self {
-        Self { first_token, stall: std::time::Duration::from_secs(8) }
+        Self { first_token, stall: std::time::Duration::from_secs(8), round: ROUND_LIMIT }
     }
 }
 

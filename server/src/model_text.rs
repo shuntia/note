@@ -1036,6 +1036,34 @@ pub fn repeated_call(l: Lang, earlier: &str) -> String {
 }
 
 /// Follows a run of rounds that only looked things up.
+/// The answer to a write sent again exactly as one that saved nothing.
+pub fn repeated_idle_write(l: Lang, earlier: &str) -> String {
+    match l {
+        Lang::En => format!(
+            "You already made this exact call this turn and it saved nothing; it was not run again. \
+             Its result is below. Change the arguments as it says, or stop and tell the user.\n\n{earlier}"
+        ),
+        Lang::Ja => format!(
+            "このターンで同じ呼び出しを既に行い、何も保存されませんでした。再実行はしていません。結果は以下のとおりです。\
+             指摘に従って引数を直すか、やめてユーザーに伝えてください。\n\n{earlier}"
+        ),
+    }
+}
+
+/// Noted once writes have twice in a row saved nothing.
+pub fn idle_writes(l: Lang) -> &'static str {
+    match l {
+        Lang::En => {
+            "(Note to self: my last writes saved nothing. Fix the arguments the way the refusal says, \
+             or stop calling and tell the user what is stuck.)"
+        }
+        Lang::Ja => {
+            "（メモ: 直前の書き込みは何も保存していません。拒否の指摘どおりに引数を直すか、\
+             呼び出しをやめて、何が進まないのかをユーザーに伝えてください。）"
+        }
+    }
+}
+
 pub fn lookups_nudge(l: Lang, rounds: usize) -> String {
     match l {
         Lang::En => format!(

@@ -1131,6 +1131,28 @@ async fn a_stopped_stream_keeps_what_it_did_and_said_and_the_next_turn_proceeds(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn each_step_is_in_the_thread_while_the_turn_still_runs_and_only_once() {
+    let (open, gate) = std::sync::mpsc::channel();
+    let llm = Arc::new(StuckLLM(std::sync::Mutex::new(gate), Default::default()));
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_llm_and_state(llm).await;
+    let sending = {
+        let (app, cookie) = (app.clone(), cookie.clone());
+        tokio::spawn(async move { post_talk(&app, &cookie, serde_json::json!({"message": "look"})).await })
+    };
+    let id = live_conversation(&app, &cookie, Some("tool_result")).await;
+    assert_eq!(thread_rows(&state, id), [row("user", "look"), row("tool", "memory_find")]);
+
+    open.send(()).unwrap();
+    let (status, v) = sending.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["steps"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        thread_rows(&state, id),
+        [row("user", "look"), row("tool", "memory_find"), row("tool", "memory_find"), row("assistant", "Fine.")]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_turn_stuck_past_the_grace_is_let_go_with_what_it_did_and_frees_its_user() {
     let (open, gate) = std::sync::mpsc::channel();
     let llm = Arc::new(StuckLLM(std::sync::Mutex::new(gate), Default::default()));

@@ -1034,7 +1034,9 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> R
     }
     if items.is_empty() {
         if rest.is_empty() {
-            saver.env.warn("nothing to save: tasks was empty");
+            saver.env.refuse_call(
+                r#"nothing was saved: tasks was empty. tasks is a list, like [{"title":"Read chapter 3","minutes":45,"due":"friday"}] or [{"id":12,"state":"done"}]"#,
+            );
         } else {
             saver.env.refuse_call("nothing was saved: the tasks go in tasks, a list");
         }
@@ -1592,7 +1594,7 @@ mod tests {
     }
 
     #[test]
-    fn the_list_is_found_however_it_is_sent_and_an_empty_one_is_no_error() {
+    fn the_list_is_found_however_it_is_sent_and_an_empty_one_is_refused_with_its_shape() {
         let (conn, tmp) = env("UTC");
         let out = talk(&conn, &tmp, "task_save", json!({"title": "bare"}));
         assert_eq!(out["saved"][0]["op"], "created");
@@ -1603,8 +1605,8 @@ mod tests {
         assert_eq!(out["saved"][0]["title"], "lone object");
         for empty in [json!({"tasks": []}), json!({})] {
             let out = talk(&conn, &tmp, "task_save", empty);
-            assert_eq!(out["ok"], true);
-            assert!(out["warnings"][0].as_str().unwrap().starts_with("nothing to save"));
+            assert_eq!(out["ok"], false);
+            assert!(out["refused"][0]["why"].as_str().unwrap().contains(r#"[{"title""#), "{out}");
         }
         let out = call(&conn, &tmp, SessionKind::Talk, "task_save", r#""{\"tasks\":[{\"title\":\"quoted\"}]}""#).unwrap();
         assert_eq!(out["saved"][0]["title"], "quoted");
