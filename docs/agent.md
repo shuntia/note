@@ -52,7 +52,25 @@ pass one and its last 32 text turns are replayed first. The reply carries
 result, error flag, and `thinking`, the reasoning of the round that made it, on
 the round's first call), `reasoning` for the answering round, and `thought_ms`,
 the wall clock from the first provider call to the reply. Progress streams over
-the WebSocket ([delivery.md](delivery.md#websocket)).
+the WebSocket ([delivery.md](delivery.md#websocket)). A turn still running
+after 45 seconds answers `202 {conversation_id, turn, pending: true}` and ends
+with a `talk_done` frame; `GET /api/talk/live` replays the frames of the
+user's turn in flight. Each tool call's row is written as its result comes.
+
+`POST /api/talk/stop {conversation_id?}` stops the user's turn (in that thread
+when given) and answers `204` once it has ended, also when nothing ran. The
+model stream and the tool loop end at once; what the turn did and the reply
+streamed so far are kept, marked stopped. A turn held up past 3 seconds in a
+provider call or a tool is let go: its slot is freed so the next message
+runs, and nothing it does afterwards lands in the thread.
+
+Guards keep a turn from spinning. A write that changed nothing (refused, or
+everything `unchanged`) is not progress, and the same write sent again is
+answered from before; two in a row get a note to fix the arguments, and four
+rounds without progress, one of them such a write, make the next round the
+reply. A round's output is capped at 8192 tokens (16384 with reasoning), a
+streamed round is cut past 32 KiB of reasoning or 3 minutes, and a talk turn
+past 150k completion tokens; each makes the next round the reply.
 
 Conversations: `GET /api/conversations`, `PATCH/DELETE /api/conversations/{id}`,
 and `GET /api/conversations/{id}/messages` (user, assistant and tool rows in
@@ -99,19 +117,21 @@ check-ins on):
   05:00, or at `day_start` (default 08:00) if they have not shown up by then; a
   blank `day_start` turns it off, and nothing is laid at or after
   `close_day_time`. Its session checks the order, sets it if the night left it
-  empty or wrong, and lays 4 to 8 wake-ups with `trigger_set`. An undecided one
+  empty or wrong, and lays 4 to 8 wake-ups with `wake_save`. An undecided one
   is retried once.
-- `trigger_set`, from any session that has it, for any time still ahead on any
-  later day; a far day's plan waits bare (the trigger alone) until that day is
+- `wake_save`, from any session that has it, for any time still ahead on any
+  later day; a far day's plan waits bare (the wake-up alone) until that day is
   generated from the template in force then. These come out of the day's
-  `triggers_per_day` (default 12, 0 to 20); `trigger_budget` raises one day's
-  allowance, to at most twice it, once the user agrees. Triggers laid today
-  within a work session's planned length plus 15 minutes (any time today when
-  it named none) belong to the session and do not count until it holds 8,
-  its own checks included; dropped ones never count. At most 200 of these
-  wait at once across all days. A wake-up that ends in plain text instead of
-  a tool says that text. The context lists today's and tomorrow's pending triggers; later ones
-  only as a count and the next one's moment.
+  `triggers_per_day` (default 12, 0 to 20); `wake_save {extra_wakes: {n,
+  reason}}` raises one day's allowance, to at most twice it, once the user
+  agrees in a chat. One at the same minute and thread as a waiting one is
+  refused, naming it; one within 20 minutes is laid with a warning naming the
+  other. Wake-ups laid today within a work session's planned length plus 15
+  minutes (any time today when it named none) belong to the session and do not
+  count until it holds 8, its own checks included; dropped ones never count. At
+  most 200 wait at once across all days. A wake-up that ends in plain text
+  instead of a tool says that text. The context lists today's and tomorrow's
+  waiting wake-ups; later ones only as a count and the next one's moment.
 - Idle: after `idle_nudge_min` (default 20; 0 is off) minutes without a sign of
   the user on a day they were active, outside a work session, quiet window and
   `close_day_time`, within budget. Each idle check that ends quiet doubles the
@@ -125,7 +145,7 @@ A wake-up tends tasks, the order, the schedule, working notes and memory
 ([tools](#tools)), lays tasks on the plan, reads goals and the calendar, searches
 the web where search is configured, and drops a task the user no longer
 wants, but never deletes a task or writes goals or the calendar.
-Each successful task, note, order, schedule, memory or trigger write logs one
+Each successful task, note, day, memory or wake-up write logs one
 `wake_change` row (`event <id>: <tool> <args>`, args clipped to 300
 characters). It may not edit the task of a running work session, that task's
 parent or its steps.
@@ -133,7 +153,7 @@ parent or its steps.
 A wake-up ends in one of three ways: it messages the user, calls them, or
 stays quiet (`stay_quiet {reason}`). Any session that lays a trigger can leave
 it to call; a chat that is asked "call me at three" lays a
-`trigger_set {ring: true}` whose prompt says a call was asked for.
+`wake_save {ring: true}` whose note says a call was asked for.
 
 `say {text, notes?}` lands in the trigger's thread (or the day's check-in
 thread) and goes down the delivery ladder; `notes` names the working notes it
@@ -214,8 +234,10 @@ carries, in order:
 3. A block rebuilt from the database on every call: the real-time line
    (weekday, local time, timezone and UTC offset, UTC instant, part of day);
    where the day stands against its first and last planned event and the
-   nightly run; today's plan with current and next event marked and statuses
-   counted; Now tasks with their steps and the Later list (at most ten titles,
+   nightly run; today's plan, only what is still pending, snoozed or fired, the
+   current and next waiting item marked and every status counted; today's and
+   tomorrow's waiting wake-ups apart (`18:57 e844 "note" · ring · cancel on
+   reply`); Now tasks with their steps and the Later list (at most ten titles,
    led by the nearest deadline), each line carrying its deadline; how much is
    due inside three days; what was finished today; today's run order (the
    first 12 items); `# Working memory`, below; the latest debrief in
@@ -226,27 +248,30 @@ carries, in order:
    the prompt. The block is held under 6 KiB plus the working memory by
    shortening the Later list, then the debrief, then the activity tail, and
    last night's notes last; the real-time line, Now tasks, plan and working
-   memory are never trimmed.
+   memory are never trimmed. Anything still over is cut at a whole line, closed
+   with how many lines were left out. Ids read as the tools take them: `t1103`
+   for a task, `e844` for a plan item or wake-up.
 
 ## Working memory
 
 Notes are Note's own scratchpad, never shown to the user: one-line memory files
-of category `note` under `data/memory/<user>/note/`, at most 80 characters,
+of category `note` under `data/memory/<user>/note/`, at most 160 characters,
 with an optional `from`/`until` window. Every session that gets the context
 block sees the titles of the notes active now (at most 40, newest first) and
 of those opening within 12 hours, each with its id. Memory search, the memory
-routes and the fact count leave notes out.
+tools and routes, and the fact count leave notes out.
 
-`note_write {op, id?, title?, from?, until?}`: `add` writes one, `update`
-rewords it or moves its window (an empty `from` or `until` clears it), `keep`
-marks it as still mattering, `remove` deletes it. Times are RFC 3339 or a
-local `YYYY-MM-DDTHH:MM` or `YYYY-MM-DD`.
+`note_save {title, from?, until?, id?}` (or a short `items` list) writes one,
+or with `id` rewords it or moves its window (an empty `from` or `until`
+clears it); a new one titled like an open one is that note. `note_remove
+{ids}` deletes. Times are RFC 3339 or a local `YYYY-MM-DDTHH:MM` or
+`YYYY-MM-DD`.
 
 A note is due once past its `until`, or, with none, three days after it was
-last kept, written or opened. The nightly run lists due notes; `note_settle
-{id, outcome, category?, summary?, body?}` turns one into a long-term fact
-(`memory`; episodic for a windowed note, semantic otherwise) or drops it, and
-every due note left afterwards is kept as a fact word for word.
+last kept, written or opened. The nightly run lists due notes; `memory_save`
+with the note's id and a kind turns one into a long-term fact (episodic for a
+windowed note, semantic otherwise), `note_remove` drops it, and every due note
+left afterwards is kept as a fact word for word.
 
 ## Memory
 
@@ -282,57 +307,39 @@ leave partial state.
 
 | Tools | Offered to |
 |---|---|
-| `memory_query`, `memory_read` | talk, nightly, trigger, call, inbox |
-| `memory_write` | talk, nightly, trigger, call, review |
+| `task_find`, `goal_find`, `calendar_find`, `day_find` | talk, nightly, trigger, call, share |
+| `task_save` | talk, nightly, trigger, call |
+| `task_remove`, `goal_save`, `goal_remove`, `calendar_save`, `calendar_remove` | talk, nightly, call |
+| `day_save`, `day_remove`, `wake_find`, `wake_save`, `wake_remove` | talk, nightly, trigger, call |
+| `memory_find` | talk, nightly, trigger, call, inbox |
+| `memory_save` | talk, nightly, trigger, call, review |
+| `memory_remove`, `note_save`, `note_remove` | talk, nightly, trigger, call |
 | `context_edit` | talk, nightly |
-| `task_list`, `task_search`, `task_read` | talk, nightly, trigger, call, share |
-| `task_create`, `task_update`, `task_split` | talk, nightly, trigger, call |
-| `task_delete` | talk, nightly, call |
-| `task_bulk_update` | talk, nightly, trigger, call |
-| `goal_create`, `goal_update` | talk, nightly, call |
-| `goal_list` | talk, nightly, trigger, call, share |
-| `note_write` | talk, nightly, trigger, call |
-| `note_settle` | nightly |
-| `plan_list` | talk, nightly, trigger, call, share |
-| `plan_tasks` | talk, nightly, trigger, call |
-| `plan_carry` | talk, trigger, call |
-| `order_set`, `order_move`, `order_drop` | talk, nightly, trigger, call |
-| `schedule_move`, `schedule_drop` | talk, nightly, trigger, call |
-| `schedule_insert`, `nightly_notes_write` | nightly |
-| `calendar_list` | talk, nightly, trigger, call, share |
-| `calendar_add`, `calendar_update`, `calendar_remove`, `calendar_skip` | talk, nightly, call |
-| `trigger_set` | talk, nightly, trigger, call |
-| `trigger_budget` | talk |
+| `timezone_set` | talk, call |
+| `call_user` | talk, nightly, trigger |
+| `nightly_notes_write` | nightly |
 | `web_search` | talk, nightly, trigger, call (with `[search]`) |
 | `batch` | talk, nightly, trigger |
-| `say`, `stay_quiet` | trigger |
+| `work_end`, `say`, `stay_quiet` | trigger |
 | `cancel_job`, `hang_up` | call |
 | `task_brief` / `inbox_decide` / `summary_write` / `review_write` / `share_note` | import / inbox / summarize / review / share, each ending its session on success |
 
 Details:
 
-- `task_list` filters by state, keyword, age, Now, urgency, `due_before` and
-  `due_after` (`YYYY-MM-DD`, start of that local day) and `overdue`;
-  `sort: "added"` (newest first, default), `"due"` (nearest deadline first,
-  undated last) or by urgency (high, pressing, normal, low). `task_search`
-  matches every word against titles, then the rest of the text. `task_read`
-  shows one task as `GET /api/tasks` renders it, plus `url`, `external_id`,
-  `source` and when it was added.
-- `task_create`/`task_update` take `due_at` as `YYYY-MM-DD` (a whole day),
-  `YYYY-MM-DDTHH:MM` (that local time) or RFC 3339; an empty string clears it.
-- `task_bulk_update` sets a state, moves Now or deletes across up to 50 tasks,
-  all or nothing. `task_delete` matches `DELETE /api/tasks/{id}`.
-- `plan_tasks` lays up to 10 tasks out as consecutive silent blocks on a day's
-  plan, each as long as its duration, refusing rather than reshuffling on
-  overlap.
-- `order_set {task_ids}` replaces the run order, `order_move {task_id,
-  before_task_id?}` places one item (last when `before_task_id` is omitted),
-  `order_drop {task_id}` takes one out. The nightly run acts on the day it is
-  planning, every other session on today. Each change logs `order_changed`.
-- Calendar tools take weekdays as names (`["mon", "tue"]`); `calendar_list
-  {date?, days?}` reads 1 to 14 days as `{days: [{date, occurrences}]}`.
+- Writes answer `{ok, saved, adjusted, ignored, refused, warnings}`; an empty
+  save is refused with an example of the list it takes.
+- `day_*` hold task items, routines and calendar events; a wake-up sent there
+  is refused with a pointer to `wake_*`. `day_find` only counts the wake-ups
+  waiting; `wake_find` lists every one ahead with its id, note, ring and
+  `cancel_on` (`reply`, `task` or `event`).
+- `memory_*` hold long-term facts; a working note sent there is refused with a
+  pointer to `note_*`.
+- `task_save` creates or updates a nested tree; a new task titled like an open
+  one elsewhere is made with a warning naming it, unless `new: true`.
+- Retired names (`task_update`, `trigger_set`, `note_write`, …) answer with the
+  tool that does their work now.
 
-`batch` runs 1 to 10 of those calls in one model round. Each sub-call takes the
+`batch` runs 1 to 25 of those calls in one model round. Each sub-call takes the
 path and transaction it would take alone and appears as its own step, so one
 failure aborts neither the rest nor the round. A sub-call naming `batch` or a
 session-ending tool is refused. The model gets back
