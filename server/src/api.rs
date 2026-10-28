@@ -1472,19 +1472,19 @@ async fn talk_live(user: CurrentUser, State(state): State<AppState>) -> impl Int
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TalkStopReq {
-    conversation_id: i64,
+    #[serde(default)]
+    conversation_id: Option<i64>,
 }
 
+/// Stops the user's turn, in `conversation_id` when given, and answers once it
+/// has ended; with nothing running it answers the same.
 async fn talk_stop(
     user: CurrentUser,
     State(state): State<AppState>,
     Json(req): Json<TalkStopReq>,
 ) -> StatusCode {
-    if state.live_turns.stop(user.id, req.conversation_id) {
-        StatusCode::NO_CONTENT
-    } else {
-        StatusCode::NOT_FOUND
-    }
+    crate::talk::stop_turn(&state, user.id, req.conversation_id).await;
+    StatusCode::NO_CONTENT
 }
 
 /// A turn the assistant could not finish: why, in the reader's language, and

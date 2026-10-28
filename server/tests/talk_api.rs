@@ -945,32 +945,80 @@ async fn a_turn_whose_thread_was_deleted_and_its_id_reused_leaves_the_new_owner_
     }
 }
 
-/// Asks for another tool call every round, each round once `open` is sent to.
-struct LoopingLLM(std::sync::Mutex<std::sync::mpsc::Receiver<()>>);
-impl note_server::providers::LLMProvider for LoopingLLM {
+fn find_call() -> ToolCall {
+    ToolCall { id: "c".into(), name: "memory_find".into(), args: r#"{"query":"x"}"#.into() }
+}
+
+/// Its first round asks for a tool call, its second streams "Half " and then nothing until
+/// the stream is halted; every later round answers "Fine.".
+struct StallingStreamLLM(std::sync::atomic::AtomicUsize);
+impl note_server::providers::LLMProvider for StallingStreamLLM {
     fn chat(
         &self,
         _: &note_server::providers::ChatRequest,
     ) -> anyhow::Result<note_server::providers::ChatResponse> {
-        self.0.lock().unwrap().recv()?;
-        Ok(ChatResponse {
-            text: String::new(),
-            tool_calls: vec![ToolCall {
-                id: "c".into(),
-                name: "memory_find".into(),
-                args: r#"{"query":"x"}"#.into(),
-            }],
-        })
+        Ok(ChatResponse { text: "Fine.".into(), tool_calls: vec![] })
+    }
+
+    fn streams(&self) -> bool {
+        true
+    }
+
+    fn chat_stream(
+        &self,
+        req: &note_server::providers::ChatRequest,
+        _: &note_server::providers::StreamOpts,
+        sink: &mut dyn note_server::providers::StreamSink,
+    ) -> anyhow::Result<ChatResponse> {
+        match self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+            0 => {
+                sink.tool_call(&find_call());
+                Ok(ChatResponse { text: String::new(), tool_calls: vec![find_call()] })
+            }
+            1 => {
+                sink.text("Half ");
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while !sink.halted() {
+                    anyhow::ensure!(std::time::Instant::now() < until, "never halted");
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Ok(ChatResponse { text: "Half ".into(), tool_calls: vec![] })
+            }
+            _ => {
+                let resp = self.chat(req)?;
+                sink.text(&resp.text);
+                Ok(resp)
+            }
+        }
     }
 }
 
-async fn stop_status(app: &axum::Router, cookie: &str, conversation_id: i64) -> StatusCode {
+/// Its first round asks for a tool call, its second waits for `open` and asks for another;
+/// every later round answers "Fine.".
+struct StuckLLM(std::sync::Mutex<std::sync::mpsc::Receiver<()>>, std::sync::atomic::AtomicUsize);
+impl note_server::providers::LLMProvider for StuckLLM {
+    fn chat(
+        &self,
+        _: &note_server::providers::ChatRequest,
+    ) -> anyhow::Result<note_server::providers::ChatResponse> {
+        match self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+            0 => {}
+            1 => {
+                self.0.lock().unwrap().recv()?;
+            }
+            _ => return Ok(ChatResponse { text: "Fine.".into(), tool_calls: vec![] }),
+        }
+        Ok(ChatResponse { text: String::new(), tool_calls: vec![find_call()] })
+    }
+}
+
+async fn stop_status(app: &axum::Router, cookie: &str, body: serde_json::Value) -> StatusCode {
     app.clone()
         .oneshot(
             Request::post("/api/talk/stop")
                 .header(header::COOKIE, cookie)
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(serde_json::json!({ "conversation_id": conversation_id }).to_string()))
+                .body(Body::from(body.to_string()))
                 .unwrap(),
         )
         .await
@@ -978,55 +1026,167 @@ async fn stop_status(app: &axum::Router, cookie: &str, conversation_id: i64) -> 
         .status()
 }
 
+async fn post_talk(app: &axum::Router, cookie: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post("/api/talk")
+                .header(header::COOKIE, cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = res.status();
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null))
+}
+
+/// The thread of the user's live turn once it has sent a frame of `kind`, or any frame for `None`.
+async fn live_conversation(app: &axum::Router, cookie: &str, kind: Option<&str>) -> i64 {
+    for _ in 0..400 {
+        let live = get_json(app, cookie, "/api/talk/live").await;
+        let frames = live["frames"].as_array().cloned().unwrap_or_default();
+        let seen = kind.is_none_or(|k| frames.iter().any(|f| f["event"]["kind"] == k));
+        if let Some(id) = live["conversation_id"].as_i64().filter(|_| seen) {
+            return id;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("the turn never went live");
+}
+
+fn thread_rows(state: &note_server::AppState, id: i64) -> Vec<(String, String)> {
+    state
+        .db
+        .lock()
+        .unwrap()
+        .prepare("SELECT role, coalesce(tool_name, content) FROM talk_messages WHERE conversation_id = ?1 ORDER BY id")
+        .unwrap()
+        .query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// Each Talk trace's outcome, the tool calls it counted, and whether its detail names `memory_find`.
+fn talk_traces(state: &note_server::AppState) -> Vec<(String, i64, bool)> {
+    state
+        .db
+        .lock()
+        .unwrap()
+        .prepare("SELECT outcome, tool_calls, detail FROM agent_traces WHERE kind = 'Talk' ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, String>(2)?.contains("memory_find"))))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+fn row(role: &str, text: &str) -> (String, String) {
+    (role.to_string(), text.to_string())
+}
+
+#[tokio::test]
+async fn a_stop_with_nothing_running_is_a_no_op() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    assert_eq!(stop_status(&app, &cookie, serde_json::json!({})).await, StatusCode::NO_CONTENT);
+    assert_eq!(stop_status(&app, &cookie, serde_json::json!({"conversation_id": 7})).await, StatusCode::NO_CONTENT);
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn a_looping_turn_stops_when_its_user_asks_and_keeps_the_thread() {
-    let (open, gate) = std::sync::mpsc::channel();
-    let llm = Arc::new(LoopingLLM(std::sync::Mutex::new(gate)));
+async fn a_stopped_stream_keeps_what_it_did_and_said_and_the_next_turn_proceeds() {
+    let llm = Arc::new(StallingStreamLLM(Default::default()));
     let (app, cookie, state, _cfg) = common::app_with_logged_in_user_llm_and_state(llm).await;
+    let sending = {
+        let (app, cookie) = (app.clone(), cookie.clone());
+        tokio::spawn(async move { post_talk(&app, &cookie, serde_json::json!({"message": "go"})).await })
+    };
+    let id = live_conversation(&app, &cookie, Some("reply_delta")).await;
+
+    let stopping = tokio::time::timeout(std::time::Duration::from_secs(2), stop_status(&app, &cookie, serde_json::json!({})));
+    assert_eq!(stopping.await.expect("the stream ends at once"), StatusCode::NO_CONTENT);
+    assert_eq!(get_json(&app, &cookie, "/api/talk/live").await, serde_json::Value::Null);
+    let (status, v) = sending.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["reply"], "Half\n\n(Stopped)");
+    assert_eq!(v["steps"][0]["name"], "memory_find");
+    assert_eq!(stop_status(&app, &cookie, serde_json::json!({"conversation_id": id})).await, StatusCode::NO_CONTENT);
+
+    let (status, v) = post_talk(&app, &cookie, serde_json::json!({"message": "again", "conversation_id": id})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["reply"], "Fine.");
+    assert_eq!(
+        thread_rows(&state, id),
+        [
+            row("user", "go"),
+            row("tool", "memory_find"),
+            row("assistant", "Half\n\n(Stopped)"),
+            row("user", "again"),
+            row("assistant", "Fine."),
+        ]
+    );
+    assert_eq!(talk_traces(&state), [("stopped".to_string(), 1, true), ("ok".to_string(), 0, false)]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_stuck_past_the_grace_is_let_go_with_what_it_did_and_frees_its_user() {
+    let (open, gate) = std::sync::mpsc::channel();
+    let llm = Arc::new(StuckLLM(std::sync::Mutex::new(gate), Default::default()));
+    let (app, cookie, state, _cfg) = common::app_with_stop_grace(llm, std::time::Duration::from_millis(200)).await;
     {
         let conn = state.db.lock().unwrap();
         note_server::auth::create_user(&conn, "bo", "pw", false).unwrap();
     }
     let bo = common::login(&app, "bo", "pw").await;
+    let (_, mut frames) = state.hub.register(1).unwrap();
     let sending = {
         let (app, cookie) = (app.clone(), cookie.clone());
-        tokio::spawn(async move {
-            app.oneshot(
-                Request::post("/api/talk")
-                    .header(header::COOKIE, &cookie)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"message":"loop"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap()
-        })
+        tokio::spawn(async move { post_talk(&app, &cookie, serde_json::json!({"message": "loop"})).await })
     };
-    let mut live = serde_json::Value::Null;
-    for _ in 0..200 {
-        live = get_json(&app, &cookie, "/api/talk/live").await;
-        if !live.is_null() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    let id = live["conversation_id"].as_i64().expect("the turn is live");
-    open.send(()).unwrap();
-    assert_eq!(stop_status(&app, &bo, id).await, StatusCode::NOT_FOUND);
-    assert_eq!(stop_status(&app, &cookie, id + 1).await, StatusCode::NOT_FOUND);
-    assert_eq!(stop_status(&app, &cookie, id).await, StatusCode::NO_CONTENT);
-    open.send(()).unwrap();
+    let id = live_conversation(&app, &cookie, Some("tool_result")).await;
 
-    let res = sending.await.unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let body = res.into_body().collect().await.unwrap().to_bytes();
-    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(stop_status(&app, &bo, serde_json::json!({})).await, StatusCode::NO_CONTENT);
+    assert_eq!(stop_status(&app, &cookie, serde_json::json!({"conversation_id": id + 1})).await, StatusCode::NO_CONTENT);
+    assert_eq!(live_conversation(&app, &cookie, None).await, id, "another user's stop, or another thread's, leaves the turn alone");
+
+    assert_eq!(stop_status(&app, &cookie, serde_json::json!({"conversation_id": id})).await, StatusCode::NO_CONTENT);
+    assert_eq!(get_json(&app, &cookie, "/api/talk/live").await, serde_json::Value::Null);
+    let done = loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), frames.recv())
+            .await
+            .expect("talk_done arrives")
+            .unwrap();
+        let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        if frame["type"] == "talk_done" {
+            break frame;
+        }
+    };
+    assert_eq!(done["conversation_id"], id);
+    assert!(done.get("failure").is_none(), "{done}");
+
+    let (status, v) = post_talk(&app, &cookie, serde_json::json!({"message": "again", "conversation_id": id})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["reply"], "Fine.");
+
+    open.send(()).unwrap();
+    let (status, v) = sending.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(v["reply"], "(Stopped)");
-    assert_eq!(stop_status(&app, &cookie, id).await, StatusCode::NOT_FOUND);
-    let rows = get_json(&app, &cookie, &format!("/api/conversations/{id}/messages")).await;
-    let roles: Vec<_> = rows.as_array().unwrap().iter().map(|r| r["role"].clone()).collect();
-    assert_eq!(roles.first().unwrap(), "user");
-    assert_eq!(roles.last().unwrap(), "assistant");
+    assert_eq!(
+        thread_rows(&state, id),
+        [
+            row("user", "loop"),
+            row("tool", "memory_find"),
+            row("assistant", "(Stopped)"),
+            row("user", "again"),
+            row("assistant", "Fine."),
+        ],
+        "the session let go keeps what it did before and nothing after"
+    );
+    let traces = talk_traces(&state);
+    assert!(traces.contains(&("stopped".to_string(), 1, true)), "{traces:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

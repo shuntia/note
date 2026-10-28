@@ -254,6 +254,10 @@
 .compose-button svg { grid-area: 1 / 1; transition: opacity 150ms ease, transform 150ms ease; }
 .compose-button[data-face='send'] .face-call { opacity: 0; transform: rotate(-60deg) scale(0.6); }
 .compose-button[data-face='call'] .face-send { opacity: 0; transform: rotate(60deg) scale(0.6); }
+.compose-button:not([data-face='stop']) .face-stop,
+.compose-button[data-face='stop'] :is(.face-send, .face-call) { opacity: 0; transform: scale(0.6); }
+.compose-button .face-stop rect { fill: currentColor; stroke: none; }
+.chat .tellnote .compose-button[data-face='stop'] { background: var(--ink); color: var(--ivory); }
 .chat .tellnote textarea::placeholder { transition: opacity 300ms ease; }
 .chat .tellnote textarea.flying::placeholder { opacity: 0; }
 

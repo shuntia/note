@@ -107,3 +107,15 @@ test('the end of another turn in the same thread is not this one', async () => {
   release()
   expect((await reply).reply).toBe('new')
 })
+
+test('a stop while the turn is pending rejects at once', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => json({ conversation_id: 7, turn: 3, pending: true }, 202)),
+  )
+  const ctl = new AbortController()
+  const turn = talkTurn('a long job', undefined, undefined, ctl.signal)
+  await new Promise((r) => setTimeout(r, 0))
+  ctl.abort()
+  await expect(turn).rejects.toThrow()
+})

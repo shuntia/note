@@ -175,6 +175,18 @@ pub async fn app_with_talk_hold(
     (app, cookie, state, cfg)
 }
 
+#[allow(dead_code)] // only the talk suite shortens how long a stopped turn has to end
+pub async fn app_with_stop_grace(
+    llm: Arc<dyn LLMProvider>,
+    grace: std::time::Duration,
+) -> (axum::Router, String, AppState, TempDir) {
+    let (_, _, mut state, cfg) = build(Some(llm)).await;
+    state.talk_stop_grace = grace;
+    let app = api::router(state.clone());
+    let cookie = login(&app, "aki", "pw").await;
+    (app, cookie, state, cfg)
+}
+
 #[allow(dead_code)] // every test binary compiles this module; only the talk suite reaches into the state
 pub async fn app_with_logged_in_user_and_state() -> (axum::Router, String, AppState, TempDir) {
     build(None).await

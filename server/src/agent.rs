@@ -616,6 +616,7 @@ fn run_traced(
     let mut deciding = false;
     let mut asked_for_words = false;
     let mut reasoned = false;
+    let mut said = String::new();
     'rounds: while turns < max_turns + usize::from(asked_for_words) {
         if stopped() {
             break;
@@ -672,6 +673,7 @@ fn run_traced(
         };
         turns += 1;
         if streamed && stopped() {
+            said = resp.text;
             break;
         }
         let mut thinking = match thinking.trim() {
@@ -770,7 +772,7 @@ fn run_traced(
         }
     }
     if stopped() {
-        last_text = crate::text::stopped_reply(lang);
+        last_text = crate::text::stopped_after(lang, &said);
         on_event(AgentEvent::Reply { text: &last_text });
         trace.stopped(&last_text);
         finish(deps, user_id, kind, turns, tool_calls, profile.log_session)?;
@@ -858,6 +860,10 @@ impl crate::providers::StreamSink for LiveSink<'_> {
 
     fn tool_call(&mut self, _call: &crate::providers::ToolCall) -> bool {
         !self.stopped()
+    }
+
+    fn halted(&self) -> bool {
+        self.stopped()
     }
 }
 
@@ -1500,7 +1506,7 @@ mod tests {
         };
         let out = run_session_stoppable(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi", &on_event, Some(&stop))
             .unwrap();
-        let stopped = crate::text::stopped_reply(Lang::En);
+        let stopped = "Half\n\n(Stopped)";
         assert_eq!(seen.into_inner(), vec!["thinking~hm".to_string(), "reply~Half ".into(), format!("reply:{stopped}")]);
         assert_eq!(out.reply, stopped);
     }

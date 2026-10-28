@@ -614,7 +614,15 @@ pub fn unwritten_reply(l: Lang, changed: bool) -> String {
 }
 
 pub fn stopped_reply(l: Lang) -> String {
-    l.pick("(Stopped)", "停止しました。")
+    l.pick("(Stopped)", "中止しました。")
+}
+
+/// What a stopped turn keeps: the reply streamed so far, then the stop.
+pub fn stopped_after(l: Lang, said: &str) -> String {
+    match said.trim_end() {
+        "" => stopped_reply(l),
+        said => format!("{said}\n\n{}", stopped_reply(l)),
+    }
 }
 
 pub fn call_title(l: Lang) -> String {

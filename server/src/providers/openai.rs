@@ -386,20 +386,18 @@ fn read_stream(
     let mut heard = false;
     let mut done = false;
     loop {
-        let line = if heard {
-            match lines.recv_timeout(opts.stall) {
-                Ok(line) => line,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    return Err(ProviderError::new(Reason::ProviderDown, format!("openai stream stalled for {:?}", opts.stall)).into());
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        let wait = if heard { opts.stall } else { opts.first_token.saturating_sub(started.elapsed()) };
+        let line = match next_line(lines, wait, &*sink) {
+            Next::Line(line) => line,
+            Next::Ended => break,
+            Next::Halted => {
+                crate::usage::record(crate::usage::Usage::openai_call(&usage));
+                return Ok(resp);
             }
-        } else {
-            match lines.recv_timeout(opts.first_token.saturating_sub(started.elapsed())) {
-                Ok(line) => line,
-                Err(mpsc::RecvTimeoutError::Timeout) => return Err(FirstTokenTimeout(opts.first_token).into()),
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Next::Timeout if heard => {
+                return Err(ProviderError::new(Reason::ProviderDown, format!("openai stream stalled for {:?}", opts.stall)).into());
             }
+            Next::Timeout => return Err(FirstTokenTimeout(opts.first_token).into()),
         };
         let line = line.map_err(|e| ProviderError::new(Reason::ProviderDown, format!("reading the openai stream: {e}")))?;
         let Some(data) = line.strip_prefix("data:").map(str::trim) else { continue };
@@ -466,6 +464,32 @@ fn read_stream(
     }
     crate::usage::record(crate::usage::Usage::openai_call(&usage));
     Ok(resp)
+}
+
+const HALT_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+enum Next {
+    Line(std::io::Result<String>),
+    Ended,
+    Halted,
+    Timeout,
+}
+
+/// The stream's next line within `wait`, looking in on `sink.halted()` while it waits.
+fn next_line(lines: &mpsc::Receiver<std::io::Result<String>>, wait: std::time::Duration, sink: &dyn StreamSink) -> Next {
+    let until = Instant::now() + wait;
+    loop {
+        if sink.halted() {
+            return Next::Halted;
+        }
+        let left = until.saturating_duration_since(Instant::now());
+        match lines.recv_timeout(left.min(HALT_POLL)) {
+            Ok(line) => return Next::Line(line),
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Next::Ended,
+            Err(mpsc::RecvTimeoutError::Timeout) if left <= HALT_POLL => return Next::Timeout,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
 }
 
 /// Reads the body's lines on a thread of their own, so the first-token

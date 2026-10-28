@@ -8,8 +8,14 @@ import { onAgentFrame, type TalkDoneFrame } from './ws'
 const POLL_MS = 10_000
 
 // One Talk turn. A turn the server stopped waiting on is followed to its end on the
-// socket, so a long job reads the same as a short one: a reply, or an ApiError.
-export async function talkTurn(message: string, conversationId?: number, opensWith?: ModelPick): Promise<TalkReply> {
+// socket, so a long job reads the same as a short one: a reply, or an ApiError. An aborted
+// `signal` rejects at once, waiting or not.
+export async function talkTurn(
+  message: string,
+  conversationId?: number,
+  opensWith?: ModelPick,
+  signal?: AbortSignal,
+): Promise<TalkReply> {
   const ended = new Map<number, TalkDoneFrame>()
   let heard: (() => void) | null = null
   const off = onAgentFrame((frame) => {
@@ -17,11 +23,14 @@ export async function talkTurn(message: string, conversationId?: number, opensWi
     ended.set(frame.turn, frame)
     heard?.()
   })
+  const wake = () => heard?.()
+  signal?.addEventListener('abort', wake)
   try {
-    const answer = await api.talk(message, conversationId, opensWith)
+    const answer = await api.talk(message, conversationId, opensWith, signal)
     if (!('pending' in answer)) return answer
     const { conversation_id: id, turn } = answer
     for (;;) {
+      signal?.throwIfAborted()
       const done = ended.get(turn)
       if (done?.failure) throw new ApiError(502, done.failure.error, done.failure.reason)
       if (done) break
@@ -30,6 +39,7 @@ export async function talkTurn(message: string, conversationId?: number, opensWi
         setTimeout(resolve, POLL_MS)
       })
       heard = null
+      signal?.throwIfAborted()
       if (!ended.has(turn)) {
         const live = await api.talkLive().catch(() => undefined)
         if (live === null || (live && live.conversation_id !== id)) break
@@ -37,6 +47,7 @@ export async function talkTurn(message: string, conversationId?: number, opensWi
     }
     return replyOf(id, turn, await api.conversationMessages(id))
   } finally {
+    signal?.removeEventListener('abort', wake)
     off()
   }
 }

@@ -295,15 +295,17 @@ export const api = {
     request<void>(`/api/conversations/${id}`, { method: 'DELETE' }),
   conversationMessages: (id: number) => request<TalkMessage[]>(`/api/conversations/${id}/messages`),
   talkLive: () => request<LiveTurn | null>('/api/talk/live'),
-  stopTalk: (conversationId: number) =>
+  // Settles once the turn has ended; without an id it stops whichever turn the user has running.
+  stopTalk: (conversationId?: number) =>
     request<void>('/api/talk/stop', {
       method: 'POST',
-      body: JSON.stringify({ conversation_id: conversationId }),
+      body: JSON.stringify(conversationId === undefined ? {} : { conversation_id: conversationId }),
     }),
   // A new thread opens with `opensWith`; an existing one keeps its own pick.
-  talk: (message: string, conversationId?: number, opensWith?: ModelPick) =>
+  talk: (message: string, conversationId?: number, opensWith?: ModelPick, signal?: AbortSignal) =>
     request<TalkReply | TalkPending>('/api/talk', {
       method: 'POST',
+      signal,
       body: JSON.stringify(
         conversationId === undefined
           ? { message, ...opensWith }

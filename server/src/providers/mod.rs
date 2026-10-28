@@ -88,6 +88,10 @@ pub trait StreamSink {
     fn reasoning(&mut self, _delta: &str) -> bool {
         true
     }
+    /// True once the stream should end even while nothing arrives.
+    fn halted(&self) -> bool {
+        false
+    }
 }
 
 pub struct StreamOpts {

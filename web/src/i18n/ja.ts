@@ -853,7 +853,7 @@ export const ja: Dict = {
   "call.unmute": "ミュート解除",
   "call.answer": "応答",
   "talk.steps": "Note の手順",
-  "talk.stop": "停止",
+  "talk.stop": "中止",
   "talk.tellNote": "Note に伝える",
   "talk.thinking": "Note 思考中…",
   "talk.thinkingWith": "Note 思考中… · {step}",

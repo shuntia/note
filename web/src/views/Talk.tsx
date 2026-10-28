@@ -523,6 +523,9 @@ export function Talk({
   const doneEarly = useRef(false)
   // set while a sent bubble is on its way, so nothing else moves the pane
   const flight = useRef(false)
+  const stopper = useRef<AbortController | null>(null)
+  // a stopped turn the server has yet to end; no new send until it has
+  const [settling, setSettling] = useState(false)
 
   const loadList = useCallback(async (quiet = false) => {
     if (!quiet) setListState('loading')
@@ -782,7 +785,7 @@ export function Talk({
   const send = async () => {
     const text = draft.trim()
     // a send while history is still loading would be wiped by the load's setItems
-    if (!text || busy || onTriggers || msgState === 'loading') return
+    if (!text || busy || settling || onTriggers || msgState === 'loading') return
     const mine: Item = { kind: 'user', key: nextKey(), text }
     const sentIn = era.current
     stick.current = true
@@ -840,8 +843,10 @@ export function Talk({
       setItems((prev) => [...prev, mine])
     }
 
+    const ctl = new AbortController()
+    stopper.current = ctl
     try {
-      const reply = await talkTurn(text, current ?? undefined, current === null ? fresh : undefined)
+      const reply = await talkTurn(text, current ?? undefined, current === null ? fresh : undefined, ctl.signal)
       void loadList(true)
       if (era.current !== sentIn) return
       setItems((prev) => [
@@ -874,10 +879,60 @@ export function Talk({
       setDraft(text)
       input.current?.focus()
     } finally {
+      if (stopper.current === ctl) stopper.current = null
       if (inFlight.current === sent) inFlight.current = null
       setPending((p) => (p === sentIn ? null : p))
     }
   }
+
+  // The pane goes idle at once, keeping what had streamed; the thread is read again
+  // once the server has ended the turn and kept it as stopped.
+  const halt = () => {
+    if (!busy) return
+    const id = liveId
+    const said = live
+    stopper.current?.abort()
+    stopper.current = null
+    era.current++
+    const stoppedIn = era.current
+    inFlight.current = null
+    unwatch()
+    setPending(null)
+    setLive(EMPTY_LIVE)
+    if (said.text || said.steps.length)
+      setItems((prev) => [
+        ...prev,
+        {
+          kind: 'assistant',
+          key: `seen-${nextKey()}`,
+          text: said.text,
+          reasoning: said.reasoning,
+          thoughtMs: null,
+          steps: said.steps.map((s) => ({ ...s, running: false })),
+        },
+      ])
+    setSettling(true)
+    void (async () => {
+      const at = id ?? (await api.talkLive().catch(() => null))?.conversation_id
+      await api.stopTalk(at ?? undefined).catch(() => undefined)
+      setSettling(false)
+      void loadList(true)
+      if (era.current !== stoppedIn || at == null) return
+      setCurrent(at)
+      void loadMessages(at, true)
+    })()
+  }
+  const haltRef = useRef(halt)
+  haltRef.current = halt
+
+  useEffect(() => {
+    if (!busy || sideOpen || renaming) return
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === 'Escape' && !e.defaultPrevented) haltRef.current()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [busy, sideOpen, renaming])
 
   const onSubmit = (e: FormEvent) => {
     e.preventDefault()
@@ -939,15 +994,6 @@ export function Talk({
         if (wasOpen) show(c.id)
       },
     })
-  }
-
-  const stop = async (id: number) => {
-    setSideNotice(null)
-    try {
-      await api.stopTalk(id)
-    } catch (err) {
-      if (!(err instanceof ApiError && err.status === 404)) setSideNotice(errorText(err))
-    }
   }
 
   const toggleList = () => {
@@ -1087,7 +1133,7 @@ export function Talk({
                     row=".chat-row"
                     label={t('talk.moreFor', { title: c.title })}
                     items={[
-                      ...(c.id === liveId ? [{ label: t('talk.stop'), run: () => void stop(c.id) }] : []),
+                      ...(c.id === liveId ? [{ label: t('talk.stop'), run: halt }] : []),
                       {
                         label: t('talk.rename'),
                         run: () => setRenaming({ id: c.id, value: c.title, at: 'list' }),
@@ -1237,9 +1283,10 @@ export function Talk({
               />
               <ComposeButton
                 draft={draft}
-                busy={busy || onTriggers}
+                busy={busy || settling || onTriggers}
                 micBlocked={micBlocked}
                 onCall={onTriggers ? undefined : onCall && (() => onCall(current))}
+                onStop={busy && !onTriggers ? halt : undefined}
               />
             </form>
           </div>

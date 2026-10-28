@@ -35,6 +35,16 @@ test('the mic waits while a reply is still coming', () => {
   expect(html).toContain('disabled=""')
 })
 
+test('a reply on its way turns the button into a stop that can always be pressed', () => {
+  const html = renderToStaticMarkup(
+    <ComposeButton draft="next" busy micBlocked={false} onCall={call} onStop={() => {}} />,
+  )
+  expect(html).toContain('data-face="stop"')
+  expect(html).toContain('type="button"')
+  expect(html).toContain('aria-label="Stop"')
+  expect(html).not.toContain('disabled=""')
+})
+
 test('a call takes focus off the field before the call view opens', () => {
   const order: string[] = []
   pressCall({ focus: () => order.push('focus') }, () => order.push('call'))

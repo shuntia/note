@@ -480,17 +480,33 @@ pub fn generate_title(state: &AppState, user_id: i64, username: &str, conversati
     }
 }
 
+type StopFlag = std::sync::Arc<std::sync::atomic::AtomicBool>;
+
 /// Each user's turn in flight: its thread and every agent frame sent so far, so a
-/// client that opens the thread mid-turn can catch up.
+/// client that opens the thread mid-turn can catch up. The entry holds the turn's
+/// talk slot; taking it out frees the slot.
 #[derive(Default)]
 pub struct LiveTurns(std::sync::Mutex<std::collections::HashMap<i64, LiveTurn>>);
 
 struct LiveTurn {
     conversation_id: i64,
+    turn: i64,
+    lang: Lang,
     frames: Vec<String>,
     /// The run of streamed pieces since the last other frame, kept as one.
     run: Option<Run>,
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The reply streamed since the last tool call.
+    said: String,
+    /// The tool calls so far by index, each with its result once it came.
+    steps: std::collections::BTreeMap<usize, LiveStep>,
+    stop: StopFlag,
+    _permit: crate::TalkPermit,
+}
+
+struct LiveStep {
+    name: String,
+    args: String,
+    result: Option<(String, bool)>,
 }
 
 struct Run {
@@ -515,33 +531,75 @@ impl LiveTurn {
 }
 
 impl LiveTurns {
-    fn begin(&self, user_id: i64, conversation_id: i64, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
-        self.lock().insert(user_id, LiveTurn { conversation_id, frames: Vec::new(), run: None, stop });
+    fn begin(&self, user_id: i64, conversation_id: i64, turn: i64, lang: Lang, stop: StopFlag, permit: crate::TalkPermit) {
+        let entry = LiveTurn {
+            conversation_id,
+            turn,
+            lang,
+            frames: Vec::new(),
+            run: None,
+            said: String::new(),
+            steps: Default::default(),
+            stop,
+            _permit: permit,
+        };
+        let replaced = self.lock().insert(user_id, entry);
+        drop(replaced);
     }
 
-    /// Asks the user's turn in `conversation_id` to stop; false when no turn runs there.
-    pub fn stop(&self, user_id: i64, conversation_id: i64) -> bool {
-        match self.lock().get(&user_id) {
-            Some(turn) if turn.conversation_id == conversation_id => {
-                turn.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-                true
-            }
-            _ => false,
+    /// Asks the user's turn to stop, in `conversation_id` when given; `None`
+    /// when no such turn runs.
+    fn stop(&self, user_id: i64, conversation_id: Option<i64>) -> Option<StopFlag> {
+        let turns = self.lock();
+        let turn = turns.get(&user_id).filter(|t| conversation_id.is_none_or(|id| id == t.conversation_id))?;
+        turn.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        Some(turn.stop.clone())
+    }
+
+    fn owns(&self, user_id: i64, stop: &StopFlag) -> bool {
+        self.lock().get(&user_id).is_some_and(|t| std::sync::Arc::ptr_eq(&t.stop, stop))
+    }
+
+    /// Takes the user's entry out while it is still the one `stop` belongs to.
+    fn take(&self, user_id: i64, stop: &StopFlag) -> Option<LiveTurn> {
+        let mut turns = self.lock();
+        if !turns.get(&user_id).is_some_and(|t| std::sync::Arc::ptr_eq(&t.stop, stop)) {
+            return None;
         }
+        turns.remove(&user_id)
     }
 
     /// Keeps `event` for a client that opens the thread later; a streamed piece
-    /// joins the run before it, up to what one frame carries.
-    fn record(&self, user_id: i64, seq: u64, event: &AgentEvent, frame: &str) {
+    /// joins the run before it, up to what one frame carries. False once the
+    /// turn is no longer the live one.
+    fn record(&self, user_id: i64, stop: &StopFlag, seq: u64, event: &AgentEvent, frame: &str) -> bool {
         let mut turns = self.lock();
-        let Some(turn) = turns.get_mut(&user_id) else { return };
+        let Some(turn) = turns.get_mut(&user_id).filter(|t| std::sync::Arc::ptr_eq(&t.stop, stop)) else {
+            return false;
+        };
         let (thinking, text) = match *event {
             AgentEvent::ThinkingDelta { text } => (true, text),
-            AgentEvent::ReplyDelta { text } => (false, text),
+            AgentEvent::ReplyDelta { text } => {
+                turn.said.push_str(text);
+                (false, text)
+            }
             _ => {
+                match *event {
+                    AgentEvent::ToolCall { index, name, args } => {
+                        let step = LiveStep { name: name.to_string(), args: args.to_string(), result: None };
+                        turn.steps.insert(index, step);
+                        turn.said.clear();
+                    }
+                    AgentEvent::ToolResult { index, result, is_error, .. } => {
+                        if let Some(step) = turn.steps.get_mut(&index) {
+                            step.result = Some((result.to_string(), is_error));
+                        }
+                    }
+                    _ => {}
+                }
                 turn.close_run();
                 turn.frames.push(frame.to_string());
-                return;
+                return true;
             }
         };
         let joins = turn.run.as_ref().is_some_and(|r| {
@@ -553,10 +611,7 @@ impl LiveTurns {
         let run = turn.run.get_or_insert_with(|| Run { thinking, text: String::new(), seq });
         run.text.push_str(text);
         run.seq = seq;
-    }
-
-    fn end(&self, user_id: i64) {
-        self.lock().remove(&user_id);
+        true
     }
 
     /// `{"conversation_id": …, "frames": [...]}` for the user's turn in flight, or `null`.
@@ -579,26 +634,77 @@ impl LiveTurns {
     }
 }
 
+/// Stops the user's turn, in `conversation_id` when given, and returns once it
+/// has ended. A turn still held up after `talk_stop_grace`, in a provider call
+/// or a tool, is let go: its tool calls and the reply streamed so far are kept
+/// as stopped, its slot is freed, and nothing the session does after that is
+/// kept in the thread; its trace is still written once the session returns.
+pub async fn stop_turn(state: &AppState, user_id: i64, conversation_id: Option<i64>) {
+    let Some(stop) = state.live_turns.stop(user_id, conversation_id) else { return };
+    let until = tokio::time::Instant::now() + state.talk_stop_grace;
+    while state.live_turns.owns(user_id, &stop) {
+        if tokio::time::Instant::now() >= until {
+            let st = state.clone();
+            let _ = tokio::task::spawn_blocking(move || let_go(&st, user_id, &stop)).await;
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+fn let_go(state: &AppState, user_id: i64, stop: &StopFlag) {
+    let conn = state.db();
+    let Some(turn) = state.live_turns.take(user_id, stop) else { return };
+    let now = jiff::Timestamp::now();
+    let kept = owned(&conn, user_id, turn.conversation_id).and_then(|mine| {
+        if mine {
+            let cut = crate::text::stopped_reply(turn.lang);
+            for step in turn.steps.values() {
+                let (result, is_error) = step.result.as_ref().map_or((cut.as_str(), true), |(r, e)| (r.as_str(), *e));
+                append_tool(&conn, turn.conversation_id, &step.name, &step.args, result, is_error, None, now)?;
+            }
+            let reply = crate::text::stopped_after(turn.lang, &turn.said);
+            append_assistant(&conn, turn.conversation_id, &reply, "", 0, now)?;
+            touch(&conn, turn.conversation_id, now)?;
+        }
+        Ok(())
+    });
+    if let Err(e) = kept {
+        let _ = crate::log::record(&conn, Some(user_id), "talk_error", &format!("keeping a stopped turn: {e:#}"));
+    }
+    drop(conn);
+    let done = serde_json::json!({"type": "talk_done", "conversation_id": turn.conversation_id, "turn": turn.turn});
+    drop(turn);
+    state.hub.send(user_id, &done.to_string());
+}
+
 /// Ends the live turn when the turn's work is over, however it ended, and tells
-/// the user's clients to read the thread again, or why the turn failed.
+/// the user's clients to read the thread again, or why the turn failed. A turn
+/// a stop already let go says nothing more.
 struct LiveGuard<'a> {
     state: &'a AppState,
     user_id: i64,
     conversation_id: i64,
     turn: i64,
     lang: Lang,
+    stop: StopFlag,
+    let_go: &'a std::cell::Cell<bool>,
     /// Why the turn failed, for a client no longer waiting on its request.
     failure: Option<crate::failure::Reason>,
 }
 
 impl Drop for LiveGuard<'_> {
     fn drop(&mut self) {
-        self.state.live_turns.end(self.user_id);
+        let ended = self.state.live_turns.take(self.user_id, &self.stop);
+        if self.let_go.get() {
+            return;
+        }
         let mut done =
             serde_json::json!({"type": "talk_done", "conversation_id": self.conversation_id, "turn": self.turn});
         if let Some(reason) = self.failure {
             done["failure"] = serde_json::json!({"reason": reason, "error": crate::text::failure_reason(self.lang, reason)});
         }
+        drop(ended);
         self.state.hub.send(self.user_id, &done.to_string());
     }
 }
@@ -715,9 +821,6 @@ async fn turn(
     let session_user = username.to_string();
     let said = message.clone();
     let result = tokio::task::spawn_blocking(move || {
-        // held here, not in the caller's future, so a cancelled request still
-        // holds the slot until the session it orphaned actually finishes
-        let _permit = permit;
         let mut deps = SessionDeps {
             db: &st.db,
             config_dir: &st.config_dir,
@@ -763,11 +866,22 @@ async fn turn(
             (past, conv_id, user_row)
         };
         deps.conversation_id = Some(conv_id);
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        st.live_turns.begin(user_id, conv_id, stop.clone());
+        let stop = StopFlag::default();
         let lang = Lang::for_user(&st.config_dir, &session_user);
-        let mut live =
-            LiveGuard { state: &st, user_id, conversation_id: conv_id, turn: user_row, lang, failure: None };
+        // the slot goes with the live turn, not the caller's future, so a cancelled
+        // request still holds it until the session it orphaned finishes or is let go
+        st.live_turns.begin(user_id, conv_id, user_row, lang, stop.clone(), permit);
+        let let_go = std::cell::Cell::new(false);
+        let mut live = LiveGuard {
+            state: &st,
+            user_id,
+            conversation_id: conv_id,
+            turn: user_row,
+            lang,
+            stop: stop.clone(),
+            let_go: &let_go,
+            failure: None,
+        };
         if let Some(started) = started {
             let _ = started.send(Started { conversation_id: conv_id, turn: user_row });
         }
@@ -777,8 +891,9 @@ async fn turn(
             let on_event = |ev: AgentEvent| {
                 let n = seq.replace(seq.get() + 1);
                 let frame = crate::channels::ws::agent_frame(Some(conv_id), n, &ev);
-                st.live_turns.record(user_id, n, &ev, &frame);
-                st.hub.send(user_id, &frame);
+                if st.live_turns.record(user_id, &stop, n, &ev, &frame) {
+                    st.hub.send(user_id, &frame);
+                }
             };
             let out = match crate::agent::run_session_stoppable(
                 &deps,
@@ -794,6 +909,10 @@ async fn turn(
                 Ok(out) => out,
                 Err(e) => {
                     let conn = st.db();
+                    let Some(_held) = st.live_turns.take(user_id, &stop) else {
+                        let_go.set(true);
+                        return Err(e);
+                    };
                     let undone = if conversation.is_some() {
                         conn.execute(
                             "DELETE FROM talk_messages WHERE id = ?1 AND conversation_id IN
@@ -820,6 +939,16 @@ async fn turn(
                 out.reply.clone()
             };
             let conn = st.db();
+            let Some(_held) = st.live_turns.take(user_id, &stop) else {
+                let_go.set(true);
+                return Ok(Turn {
+                    conversation_id: conv_id,
+                    reply,
+                    steps: out.steps,
+                    reasoning: out.reasoning,
+                    thought_ms: out.thought_ms,
+                });
+            };
             anyhow::ensure!(owned(&conn, user_id, conv_id)?, "the conversation was deleted mid-turn");
             for s in &out.steps {
                 append_tool(
@@ -896,10 +1025,12 @@ mod tests {
     #[test]
     fn streamed_pieces_are_kept_as_runs() {
         let live = LiveTurns::default();
-        live.begin(1, 9, std::sync::Arc::default());
+        let stop = StopFlag::default();
+        let permit = std::sync::Arc::new(crate::TalkGate::new()).try_enter(1).unwrap();
+        live.begin(1, 9, 3, Lang::En, stop.clone(), permit);
         let mut seq = 0;
         let mut record = |ev: AgentEvent| {
-            live.record(1, seq, &ev, &crate::channels::ws::agent_frame(Some(9), seq, &ev));
+            live.record(1, &stop, seq, &ev, &crate::channels::ws::agent_frame(Some(9), seq, &ev));
             seq += 1;
         };
         record(AgentEvent::ThinkingDelta { text: "a " });
