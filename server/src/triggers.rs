@@ -487,6 +487,10 @@ pub struct Waiting {
     pub date: String,
     pub at: String,
     pub prompt: String,
+    pub ring: bool,
+    /// As stored: `replied`, `task_done` or `event_decided`.
+    pub cancel_if: Option<String>,
+    pub conversation_id: Option<i64>,
 }
 
 /// Up to `limit` pending triggers dated `from` through `to`, soonest first, and
@@ -500,7 +504,8 @@ pub fn waiting(
 ) -> rusqlite::Result<(Vec<Waiting>, usize)> {
     let to = to.map_or_else(|| "9999-12-31".to_string(), |d| d.to_string());
     let mut stmt = conn.prepare_cached(
-        "SELECT e.id, p.date, e.wall_time, COALESCE(e.prompt, '') FROM events e JOIN plans p ON p.id = e.plan_id
+        "SELECT e.id, p.date, e.wall_time, COALESCE(e.prompt, ''), e.channel, e.cancel_if, e.conversation_id
+         FROM events e JOIN plans p ON p.id = e.plan_id
          WHERE p.user_id = ?1 AND e.kind = ?2 AND e.status IN ('pending', 'snoozed')
            AND p.date BETWEEN ?3 AND ?4
          ORDER BY p.date, e.wall_time, e.id",
@@ -508,7 +513,15 @@ pub fn waiting(
     let mut shown = Vec::new();
     let mut more = 0;
     let rows = stmt.query_map((user_id, KIND, from.to_string(), to), |r| {
-        Ok(Waiting { event_id: r.get(0)?, date: r.get(1)?, at: r.get(2)?, prompt: r.get(3)? })
+        Ok(Waiting {
+            event_id: r.get(0)?,
+            date: r.get(1)?,
+            at: r.get(2)?,
+            prompt: r.get(3)?,
+            ring: r.get::<_, String>(4)? == crate::channels::RING_CHANNEL,
+            cancel_if: r.get(5)?,
+            conversation_id: r.get(6)?,
+        })
     })?;
     for row in rows {
         let row = row?;

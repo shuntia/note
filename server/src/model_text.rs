@@ -248,14 +248,58 @@ pub fn status_counts(l: Lang, n: [usize; 5]) -> String {
     }
 }
 
+pub fn wakes_today(l: Lang) -> &'static str {
+    l.of(
+        "Wake-ups waiting today (wake_save changes one by id):\n",
+        "今日待機中の目覚め（wake_save で id を指定して変更）:\n",
+    )
+}
+
+pub fn wake_up_named(l: Lang, id: i64) -> String {
+    match l {
+        Lang::En => format!("wake-up e{id}"),
+        Lang::Ja => format!("目覚め e{id}"),
+    }
+}
+
 pub fn triggers_tomorrow(l: Lang) -> &'static str {
-    l.of("Triggers tomorrow:\n", "明日のトリガー:\n")
+    l.of("Wake-ups tomorrow:\n", "明日の目覚め:\n")
+}
+
+/// What follows a wake-up's note: whether it rings, what calls it off, and
+/// the thread it speaks in when it names one.
+pub fn wake_marks(l: Lang, ring: bool, cancel_if: Option<&str>, thread: Option<i64>) -> String {
+    let mut s = String::new();
+    if ring {
+        s.push_str(l.of(" · ring", " · 着信"));
+    }
+    match cancel_if {
+        Some("replied") => s.push_str(l.of(" · cancel on reply", " · 返信で取消")),
+        Some("task_done") => s.push_str(l.of(" · cancel on task done", " · タスク完了で取消")),
+        Some("event_decided") => s.push_str(l.of(" · cancel on event settled", " · 予定確定で取消")),
+        _ => {}
+    }
+    if let Some(t) = thread {
+        let _ = match l {
+            Lang::En => write!(s, " · thread {t}"),
+            Lang::Ja => write!(s, " · スレッド{t}"),
+        };
+    }
+    s
+}
+
+/// Closes a block cut short at a line, with how many lines did not fit.
+pub fn clipped(l: Lang, lines: usize) -> String {
+    match l {
+        Lang::En => format!("…and {lines} more lines"),
+        Lang::Ja => format!("……ほか{lines}行"),
+    }
 }
 
 pub fn triggers_later(l: Lang, n: usize, date: &str, at: &str) -> String {
     match l {
-        Lang::En => format!("Later triggers: {n}, the next on {date} at {at}"),
-        Lang::Ja => format!("それ以降のトリガー: {n}件、次は{date} {at}"),
+        Lang::En => format!("Later wake-ups: {n}, the next on {date} at {at}"),
+        Lang::Ja => format!("それ以降の目覚め: {n}件、次は{date} {at}"),
     }
 }
 

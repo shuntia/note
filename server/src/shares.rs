@@ -938,7 +938,7 @@ fn task_line(l: crate::text::Lang, t: &TaskRow, scope: &ShareScope) -> String {
     if let Some(d) = t.description.as_deref().filter(|d| !d.trim().is_empty()) {
         let _ = write!(s, " — {}", d.trim().chars().take(200).collect::<String>());
     }
-    let _ = writeln!(s, " (task_id {})", t.id);
+    let _ = writeln!(s, " (t{})", t.id);
     s
 }
 

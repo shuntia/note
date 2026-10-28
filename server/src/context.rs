@@ -17,7 +17,7 @@ pub const MAX_DYNAMIC_BYTES: usize = 6 * 1024;
 const ORDER_SHOWN: usize = 12;
 const ORDER_TITLE_CHARS: usize = 80;
 const TRIGGERS_LISTED: usize = 8;
-const TRIGGER_PROMPT_CHARS: usize = 100;
+const WAKE_NOTE_CHARS: usize = 60;
 
 #[derive(Debug, Error)]
 pub enum EditError {
@@ -281,7 +281,7 @@ pub fn assemble_from(
         l,
         &events, &calendar, now_min, tomorrow, crate::plan::exists(conn, user_id, tomorrow)?,
     );
-    plan_s.push_str(&triggers_ahead(l, conn, user_id, tomorrow)?);
+    plan_s.push_str(&wakes_ahead(l, conn, user_id, today, tomorrow)?);
     let settings_s = mt::settings(
         l,
         &ucfg.display_name,
@@ -313,11 +313,7 @@ pub fn assemble_from(
         block = render(caps);
     }
     if block.len() > budget {
-        let mut cut = budget;
-        while !block.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        block.truncate(cut);
+        block = clip_lines(l, &block, budget);
     }
     block.push_str(&now_s);
     let strategy = strategy
@@ -366,9 +362,10 @@ fn now_section(
             );
         }
     }
-    if let Some(next) = events.iter().find(|e| crate::templates::wall_minutes(&e.wall_time) > now_min) {
+    if let Some(next) = events.iter().find(|e| waiting(e) && crate::templates::wall_minutes(&e.wall_time) > now_min) {
         let after = mt::in_words(l, crate::templates::wall_minutes(&next.wall_time) - now_min);
-        let _ = writeln!(s, "{}", mt::next_in(l, &next.wall_time, &next.kind, &after));
+        let what = if next.kind == crate::triggers::KIND { mt::wake_up_named(l, next.id) } else { next.kind.clone() };
+        let _ = writeln!(s, "{}", mt::next_in(l, &next.wall_time, &what, &after));
     }
     if let Some(at) = nightly_time {
         let until = (crate::templates::wall_minutes(at) - now_min).rem_euclid(24 * 60);
@@ -400,22 +397,31 @@ fn calendar_lines(l: Lang, calendar: &[crate::calendar::Occurrence]) -> String {
     s
 }
 
-/// Tomorrow's pending triggers one by one; any later only as a count and the
-/// next one's moment, however many are laid.
-fn triggers_ahead(l: Lang, conn: &Connection, user_id: i64, tomorrow: jiff::civil::Date) -> Result<String> {
-    let (listed, more_tomorrow) =
-        crate::triggers::waiting(conn, user_id, tomorrow, Some(tomorrow), TRIGGERS_LISTED)?;
-    let (next, more_later) = crate::triggers::waiting(conn, user_id, tomorrow.tomorrow()?, None, 1)?;
+/// One waiting wake-up as the tools name it: its time, e id, note, and what
+/// sets it apart.
+fn wake_line(l: Lang, w: &crate::triggers::Waiting) -> String {
+    let marks = mt::wake_marks(l, w.ring, w.cancel_if.as_deref(), w.conversation_id);
+    format!("- {} e{} \"{}\"{marks}", w.at, w.event_id, excerpt(&w.prompt, WAKE_NOTE_CHARS))
+}
+
+/// Today's and tomorrow's waiting wake-ups one by one; any later only as a
+/// count and the next one's moment, however many are laid.
+fn wakes_ahead(l: Lang, conn: &Connection, user_id: i64, today: jiff::civil::Date, tomorrow: jiff::civil::Date) -> Result<String> {
     let mut s = String::new();
-    if !listed.is_empty() {
-        s.push_str(mt::triggers_tomorrow(l));
-        for w in &listed {
-            let _ = writeln!(s, "- {} (event_id {}) {}", w.at, w.event_id, excerpt(&w.prompt, TRIGGER_PROMPT_CHARS));
+    for (day, heading) in [(today, mt::wakes_today(l)), (tomorrow, mt::triggers_tomorrow(l))] {
+        let (listed, more) = crate::triggers::waiting(conn, user_id, day, Some(day), TRIGGERS_LISTED)?;
+        if listed.is_empty() {
+            continue;
         }
-        if more_tomorrow > 0 {
-            let _ = writeln!(s, "{}", mt::and_more(l, more_tomorrow));
+        s.push_str(heading);
+        for w in &listed {
+            let _ = writeln!(s, "{}", wake_line(l, w));
+        }
+        if more > 0 {
+            let _ = writeln!(s, "{}", mt::and_more(l, more));
         }
     }
+    let (next, more_later) = crate::triggers::waiting(conn, user_id, tomorrow.tomorrow()?, None, 1)?;
     if let Some(first) = next.first() {
         let _ = writeln!(s, "{}", mt::triggers_later(l, 1 + more_later, &first.date, &first.at));
     }
@@ -425,9 +431,22 @@ fn triggers_ahead(l: Lang, conn: &Connection, user_id: i64, tomorrow: jiff::civi
     Ok(s)
 }
 
-/// A trigger that has fired or been decided only adds to the count line.
-fn settled_trigger(e: &crate::plan::PlanEvent) -> bool {
-    e.kind == crate::triggers::KIND && !matches!(e.status.as_str(), "pending" | "snoozed")
+/// Still to come: pending, or snoozed to later.
+fn waiting(e: &crate::plan::PlanEvent) -> bool {
+    matches!(e.status.as_str(), "pending" | "snoozed")
+}
+
+/// The block cut at the last whole line within `budget`, closed with how many
+/// lines were left out.
+fn clip_lines(l: Lang, block: &str, budget: usize) -> String {
+    let reserve = mt::clipped(l, block.lines().count()).len() + 2;
+    let mut cut = budget.saturating_sub(reserve).min(block.len());
+    while !block.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let kept = block[..cut].rfind('\n').map_or("", |end| &block[..=end]);
+    let dropped = block[kept.len()..].lines().filter(|line| !line.trim().is_empty()).count();
+    format!("{kept}{}\n", mt::clipped(l, dropped))
 }
 
 fn plan_section(
@@ -444,11 +463,14 @@ fn plan_section(
         s.push_str(mt::no_plan_today(l));
     }
     let start_of = |e: &crate::plan::PlanEvent| crate::templates::wall_minutes(&e.wall_time);
-    let shown: Vec<&crate::plan::PlanEvent> = events.iter().filter(|e| !settled_trigger(e)).collect();
+    let shown: Vec<&crate::plan::PlanEvent> = events
+        .iter()
+        .filter(|e| e.kind != crate::triggers::KIND && (waiting(e) || e.status == "fired"))
+        .collect();
     let current = shown
         .iter()
-        .position(|e| start_of(e) <= now_min && now_min < crate::templates::wall_minutes(end_of(e)));
-    let next = shown.iter().position(|e| start_of(e) > now_min);
+        .position(|e| waiting(e) && start_of(e) <= now_min && now_min < crate::templates::wall_minutes(end_of(e)));
+    let next = shown.iter().position(|e| waiting(e) && start_of(e) > now_min);
     for (i, e) in shown.iter().enumerate() {
         let mark = if Some(i) == current {
             mt::mark_now(l).into()
@@ -460,7 +482,7 @@ fn plan_section(
         if e.entry == "block" {
             let _ = writeln!(
                 s,
-                "- {}-{} {} [{}] {} (event_id {}){mark}",
+                "- {}-{} {} [{}] {} (e{}){mark}",
                 e.wall_time,
                 end_of(e),
                 e.kind,
@@ -471,7 +493,7 @@ fn plan_section(
         } else {
             let _ = writeln!(
                 s,
-                "- {}-{} {} [{}] {}{} (event_id {}){mark}",
+                "- {}-{} {} [{}] {}{} (e{}){mark}",
                 e.wall_time,
                 end_of(e),
                 e.kind,
@@ -601,7 +623,7 @@ fn tasks_section(
         for n in now_tasks {
             let _ = writeln!(
                 s,
-                "- {} [{}]{}{}{} (task_id {})",
+                "- {} [{}]{}{}{} (t{})",
                 n.task.title,
                 n.task.state,
                 duration(l, n.task.duration_min),
@@ -628,7 +650,7 @@ fn tasks_section(
             }
             let _ = writeln!(
                 s,
-                "- {}{}{}{}{tail} (task_id {})",
+                "- {}{}{}{}{tail} (t{})",
                 t.task.title,
                 duration(l, t.task.duration_min),
                 progress(l, &t.task),
@@ -655,7 +677,7 @@ fn open_parts(s: &mut String, l: Lang, n: &crate::tasks::TaskNode, level: usize)
         let mark = if c.task.state == "in_progress" { '~' } else { ' ' };
         let _ = writeln!(
             s,
-            "{}- [{mark}] {}{}{} (task_id {})",
+            "{}- [{mark}] {}{}{} (t{})",
             "  ".repeat(level),
             c.task.title,
             duration(l, c.task.duration_min),
@@ -677,7 +699,7 @@ fn order_section(l: Lang, items: &[crate::order::Item]) -> String {
             Some(parent) => format!("{parent} · {}", item.title),
             None => item.title.clone(),
         };
-        let _ = writeln!(s, "{}. {} (task_id {})", n + 1, excerpt(&title, ORDER_TITLE_CHARS), item.task_id);
+        let _ = writeln!(s, "{}. {} (t{})", n + 1, excerpt(&title, ORDER_TITLE_CHARS), item.task_id);
     }
     if items.len() > ORDER_SHOWN {
         let _ = writeln!(s, "{}", mt::and_more(l, items.len() - ORDER_SHOWN));
@@ -1224,7 +1246,7 @@ mod tests {
             .query_row("SELECT id FROM events WHERE kind = 'Work time'", [], |r| r.get(0))
             .unwrap();
         assert!(
-            out.contains(&format!("- 09:30-12:30 Work time [pending] block (event_id {block})")),
+            out.contains(&format!("- 09:30-12:30 Work time [pending] block (e{block})")),
             "{out}"
         );
         assert!(out.contains("- 08:00-08:15 meds [pending] routine via push, silent"), "{out}");
@@ -1294,14 +1316,14 @@ mod tests {
         };
         assert!(
             out.contains(&format!(
-                "- 20:30-22:00 Work time [pending] block (event_id {}) <- now",
+                "- 20:30-22:00 Work time [pending] block (e{}) <- now",
                 id("Work time")
             )),
             "{out}"
         );
         assert!(
             out.contains(&format!(
-                "- 21:30-21:45 wind down [pending] routine via push (event_id {}) <- next",
+                "- 21:30-21:45 wind down [pending] routine via push (e{}) <- next",
                 id("wind down")
             )),
             "{out}"
@@ -1322,26 +1344,40 @@ mod tests {
         }
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(out.contains("1 pending, 1 fired, 1 done, 1 dropped, 1 snoozed"), "{out}");
-        assert!(out.contains("- 07:00-07:15 a [done] routine via push"), "{out}");
-        assert!(out.contains("- 08:00-08:15 b [dropped] routine via push"), "{out}");
+        assert!(!out.contains("- 07:00-07:15 a") && !out.contains("- 08:00-08:15 b"), "done and dropped only count: {out}");
+        assert!(out.contains("- 09:00-09:15 c [snoozed]") && out.contains("- 10:00-10:15 d [fired] routine via push"), "{out}");
     }
 
     #[test]
-    fn only_waiting_triggers_are_listed_and_the_rest_are_counted() {
+    fn wake_ups_have_their_own_list_and_only_waiting_ones_show() {
         let tmp = cfg_dir();
         let (conn, uid) = user();
-        plan_today(&conn, uid, vec![
-            routine("trigger", "07:00"), routine("trigger", "08:00"), routine("trigger", "22:00"),
-            routine("meds", "06:00"),
-        ]);
-        conn.execute("UPDATE events SET status = 'done' WHERE wall_time IN ('07:00', '06:00')", []).unwrap();
-        conn.execute("UPDATE events SET status = 'dropped' WHERE wall_time = '08:00'", []).unwrap();
+        plan_today(&conn, uid, vec![routine("meds", "06:00"), routine("checkin", "23:00")]);
+        let plan: i64 = conn.query_row("SELECT id FROM plans LIMIT 1", [], |r| r.get(0)).unwrap();
+        let thread = crate::talk::create(&conn, uid, "essay", now_ts()).unwrap();
+        let lay = |at: &str, prompt: &str, cancel: Option<crate::triggers::Cancel>, thread: Option<i64>| {
+            crate::triggers::insert(&conn, plan, at, prompt, "agent", cancel, thread, None, now_ts()).unwrap()
+        };
+        let done = lay("07:00", "old check", None, None);
+        let dropped = lay("08:00", "dropped check", None, None);
+        let essay = lay("22:00", &format!("Essay check: is the draft past the intro yet{}", " and more".repeat(10)), Some(crate::triggers::Cancel::Replied), Some(thread));
+        let plain = lay("22:30", "lights out?", None, None);
+        crate::triggers::set_ring(&conn, essay).unwrap();
+        conn.execute("UPDATE events SET status = 'done' WHERE id = ?1 OR wall_time = '06:00'", [done]).unwrap();
+        conn.execute("UPDATE events SET status = 'dropped' WHERE id = ?1", [dropped]).unwrap();
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
-        assert!(!out.contains("- 07:00-07:15 trigger"), "{out}");
-        assert!(!out.contains("- 08:00-08:15 trigger"), "{out}");
-        assert!(out.contains("- 22:00-22:15 trigger [pending]"), "{out}");
-        assert!(out.contains("- 06:00-06:15 meds [done]"), "{out}");
-        assert!(out.contains("1 pending, 0 fired, 2 done, 1 dropped, 0 snoozed"), "{out}");
+        let list = &out[out.find("Wake-ups waiting today").expect(&out)..];
+        let line = list.lines().nth(1).unwrap();
+        assert!(
+            line.starts_with(&format!("- 22:00 e{essay} \"Essay check: is the draft past the intro yet and more and")) &&
+                line.ends_with(&format!("\" · ring · cancel on reply · thread {thread}")),
+            "{line}"
+        );
+        assert_eq!(list.lines().nth(2).unwrap(), format!("- 22:30 e{plain} \"lights out?\""));
+        assert!(!out.contains("old check") && !out.contains("dropped check"), "{out}");
+        assert!(!out.contains("trigger ["), "a wake-up is no block or routine: {out}");
+        assert!(!out.contains("meds [done]") && out.contains("checkin [pending]"), "{out}");
+        assert!(out.contains("3 pending, 0 fired, 2 done, 1 dropped, 0 snoozed"), "{out}");
     }
 
     #[test]
@@ -1359,10 +1395,10 @@ mod tests {
         lay("2027-02-01", "09:00", "passport");
         lay("2026-12-24", "18:30", "gifts");
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
-        assert!(out.contains("Triggers tomorrow:\n- 10:00 (event_id 1) tomorrow 0"), "{out}");
+        assert!(out.contains("Wake-ups tomorrow:\n- 10:00 e1 \"tomorrow 0\""), "{out}");
         assert!(out.contains("tomorrow 7") && !out.contains("tomorrow 8"), "{out}");
         assert!(out.contains("- ... and 2 more"), "{out}");
-        assert!(out.contains("Later triggers: 2, the next on 2026-12-24 at 18:30"), "{out}");
+        assert!(out.contains("Later wake-ups: 2, the next on 2026-12-24 at 18:30"), "{out}");
         assert!(!out.contains("passport") && !out.contains("gifts"), "{out}");
     }
 
@@ -1407,7 +1443,7 @@ mod tests {
     fn without_task_ids(out: &str) -> String {
         let mut rest = out;
         let mut plain = String::new();
-        while let Some(i) = rest.find(" (task_id ") {
+        while let Some(i) = rest.find(" (t").filter(|i| rest[i + 3..].starts_with(|c: char| c.is_ascii_digit())) {
             plain.push_str(&rest[..i]);
             rest = &rest[i..];
             rest = &rest[rest.find(')').unwrap() + 1..];
@@ -1475,8 +1511,8 @@ mod tests {
         let now = task(&conn, uid, "essay", "open", None, true, None, NOW);
         let later = task(&conn, uid, "loose", "open", None, false, None, NOW);
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
-        assert!(out.contains(&format!("- essay [open] (task_id {now})\n")), "{out}");
-        assert!(out.contains(&format!("- loose (task_id {later})\n")), "{out}");
+        assert!(out.contains(&format!("- essay [open] (t{now})\n")), "{out}");
+        assert!(out.contains(&format!("- loose (t{later})\n")), "{out}");
     }
 
     #[test]
@@ -1767,6 +1803,25 @@ mod tests {
     }
 
     #[test]
+    fn a_block_over_its_budget_is_cut_at_a_whole_line_and_says_how_much_is_left() {
+        let tmp = cfg_dir();
+        let (conn, uid) = user();
+        for i in 0..80 {
+            let parent = task(&conn, uid, &format!("now-{i:02} {}", "p".repeat(50)), "open", Some(30), true, None, NOW);
+            task(&conn, uid, &format!("part-{i:02} {}", "q".repeat(50)), "open", Some(15), false, Some(parent), NOW);
+        }
+        let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
+        let block = dynamic(&out);
+        assert!(block.len() <= MAX_DYNAMIC_BYTES, "{} bytes", block.len());
+        let before_now = &block[..block.find("\n# Now").expect(block)];
+        let last = before_now.trim_end().lines().last().unwrap();
+        assert!(last.starts_with("…and ") && last.ends_with(" more lines"), "{last}");
+        let kept = before_now.trim_end().lines().rev().nth(1).unwrap();
+        assert!(kept.ends_with(')'), "the line before is whole: {kept}");
+        assert_eq!(clip_lines(Lang::Ja, "one\ntwo\nthree\nfour\n", 30), "one\ntwo\n……ほか2行\n");
+    }
+
+    #[test]
     fn last_nights_notes_outlive_the_later_list_and_the_debrief() {
         let tmp = cfg_dir();
         let (conn, uid) = user();
@@ -1821,7 +1876,7 @@ mod tests {
         crate::order::set(&conn, uid, "2026-08-31".parse().unwrap(), &[outline, laundry]).unwrap();
         let out = assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now_ts()).unwrap();
         assert!(
-            out.contains(&format!("1. essay · outline (task_id {outline})\n2. laundry (task_id {laundry})")),
+            out.contains(&format!("1. essay · outline (t{outline})\n2. laundry (t{laundry})")),
             "{out}"
         );
     }
