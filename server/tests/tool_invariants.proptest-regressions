@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc a9e1fa9e6501007f3f7ee2e9e76db3f9bc0a34b98a9cf3257f7858a288f7610e # shrinks to ops = [Reshape(4, "23:00", "00:00"), Slide(4, 59)]
+cc 9fa4b719b62f088e7ae9487bbebaad0afc2462c3e14c1f87698e0abcc0f58bed # shrinks to ops = [TaskCreate("a"), TaskSplit(1), TaskDuration(3, 0), TaskSetState(2, "dropped")]

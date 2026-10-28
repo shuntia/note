@@ -773,7 +773,7 @@ fn share(left: u32, ways: u32) -> u32 {
     (((left / ways) + 2) / DURATION_STEP_MIN * DURATION_STEP_MIN).max(DURATION_STEP_MIN)
 }
 
-/// A parent's size is the sum of its live children's once any of them has one;
+/// A parent's size is the sum of its live children's while any of them has one;
 /// until then it keeps its own. The parent that turns derived hands what is left
 /// of its own size to the children that have none. Progress follows the same way.
 fn rederive(conn: &Connection, id: i64, actor: Actor, adjusted: &mut Vec<Adjusted>) -> rusqlite::Result<()> {
@@ -790,16 +790,17 @@ fn rederive(conn: &Connection, id: i64, actor: Actor, adjusted: &mut Vec<Adjuste
         .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;
     drop(stmt);
-    if kids.is_empty() {
+    let sized: u32 = kids.iter().filter_map(|k| k.2).sum();
+    let bare: Vec<&(i64, String, Option<u32>)> = kids.iter().filter(|k| k.2.is_none()).collect();
+    if bare.len() == kids.len() {
         if source == "derived" {
             let to = if own.is_some() { actor.as_str() } else { "none" };
             conn.execute("UPDATE tasks SET duration_source = ?1 WHERE id = ?2", (to, id))?;
         }
-        return Ok(());
-    }
-    let sized: u32 = kids.iter().filter_map(|k| k.2).sum();
-    let bare: Vec<&(i64, String, Option<u32>)> = kids.iter().filter(|k| k.2.is_none()).collect();
-    if bare.len() < kids.len() {
+        if kids.is_empty() {
+            return Ok(());
+        }
+    } else {
         let mut total = sized;
         if let (Some(own), false, false) = (own, source == "derived", bare.is_empty()) {
             let each = share(own.saturating_sub(sized), bare.len() as u32);
@@ -2884,6 +2885,20 @@ mod tests {
         assert_eq!((parent.duration_min, parent.duration_source.as_str()), (Some(90), "derived"));
         let late = sized(&conn, uid, "proof", Some(essay), None);
         assert_eq!(get(&conn, uid, late).unwrap().unwrap().duration_min, None, "a derived parent has nothing left to share");
+    }
+
+    #[test]
+    fn a_parent_whose_live_parts_lose_their_sizes_is_no_longer_their_sum() {
+        let (conn, uid) = db_with_user();
+        let lab = sized(&conn, uid, "lab", None, None);
+        let a = sized(&conn, uid, "a", Some(lab), Some(5));
+        let b = sized(&conn, uid, "b", Some(lab), Some(10));
+        assert_eq!(get(&conn, uid, lab).unwrap().unwrap().duration_min, Some(15));
+        update(&conn, uid, b, &TaskPatch { duration_min: Some(None), ..Default::default() }).unwrap().unwrap();
+        update(&conn, uid, a, &TaskPatch { state: Some("dropped".into()), ..Default::default() }).unwrap().unwrap();
+        let parent = get(&conn, uid, lab).unwrap().unwrap();
+        assert_ne!(parent.duration_source, "derived", "no live part has a size to sum");
+        assert_eq!(parent.duration_min, Some(5), "it keeps the size it had as its own");
     }
 
     #[test]
