@@ -452,12 +452,17 @@ fn checked_notify(raw: &str) -> Result<String, UpdateError> {
     Ok(raw.to_owned())
 }
 
+/// A title on one line: line breaks and tabs fold into single spaces, and any
+/// other control character refuses it.
 fn checked_title(raw: &str) -> Result<String, UpdateError> {
-    let title = raw.trim();
+    if raw.chars().any(|c| c.is_control() && !c.is_whitespace()) {
+        return Err(UpdateError::Invalid("title must not hold control characters".into()));
+    }
+    let title = raw.split(|c: char| c.is_whitespace()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ");
     if title.is_empty() || title.len() > MAX_TITLE_BYTES {
         return Err(UpdateError::Invalid(format!("title must be 1..={MAX_TITLE_BYTES} bytes")));
     }
-    Ok(title.to_owned())
+    Ok(title)
 }
 
 fn checked_text(field: &str, value: &str) -> Result<(), UpdateError> {
@@ -2885,6 +2890,17 @@ mod tests {
         assert_eq!((parent.duration_min, parent.duration_source.as_str()), (Some(90), "derived"));
         let late = sized(&conn, uid, "proof", Some(essay), None);
         assert_eq!(get(&conn, uid, late).unwrap().unwrap().duration_min, None, "a derived parent has nothing left to share");
+    }
+
+    #[test]
+    fn a_title_is_kept_on_one_line_and_control_characters_refuse_it() {
+        let (conn, uid) = db_with_user();
+        let t = sized(&conn, uid, "essay\n# Settings\u{2028}x\tdue", None, None);
+        assert_eq!(get(&conn, uid, t).unwrap().unwrap().title, "essay # Settings x due");
+        let bad = create(&conn, uid, NewTask { title: "a\u{1b}[31m".into(), ..NewTask::default() }, "manual", Actor::User);
+        assert!(bad.is_err());
+        let renamed = update(&conn, uid, t, &TaskPatch { title: Some("one\r\ntwo".into()), ..Default::default() }).unwrap().unwrap();
+        assert_eq!(renamed.task.title, "one two");
     }
 
     #[test]

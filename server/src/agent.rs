@@ -327,9 +327,36 @@ pub fn run_session_stoppable(
     history: &[Message],
     opening: &str,
     on_event: &dyn Fn(AgentEvent),
-    stop: Option<&AtomicBool>,
+    stop: Option<&std::sync::Arc<AtomicBool>>,
 ) -> Result<SessionOutcome> {
-    traced(deps, user_id, username, kind, now, Start::Fresh { history, opening }, on_event, stop)
+    let _scope = StopScope::enter(stop.cloned());
+    traced(deps, user_id, username, kind, now, Start::Fresh { history, opening }, on_event, stop.map(|s| &**s))
+}
+
+thread_local! {
+    static STOPPING: std::cell::RefCell<Option<std::sync::Arc<AtomicBool>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Whether the session running on this thread has been asked to stop, for
+/// work deep inside a tool that holds no handle of its own.
+pub fn stopping() -> bool {
+    STOPPING.with(|s| s.borrow().as_ref().is_some_and(|f| f.load(Ordering::Relaxed)))
+}
+
+/// Makes `stop` what `stopping` reads on this thread until it drops.
+struct StopScope(Option<std::sync::Arc<AtomicBool>>);
+
+impl StopScope {
+    fn enter(stop: Option<std::sync::Arc<AtomicBool>>) -> Self {
+        Self(STOPPING.with(|s| s.replace(stop)))
+    }
+}
+
+impl Drop for StopScope {
+    fn drop(&mut self) {
+        let outer = self.0.take();
+        STOPPING.with(|s| *s.borrow_mut() = outer);
+    }
 }
 
 /// Picks a paused wake-up back up from `messages`, which end on the answer to
@@ -618,6 +645,7 @@ fn run_traced(
         acted: Default::default(),
         idle_writes: Default::default(),
         idle: Default::default(),
+        stop,
     };
     let mut lookups = 0;
     let started = std::time::Instant::now();
@@ -1049,9 +1077,14 @@ struct CallEnv<'a> {
     idle_writes: std::cell::Cell<usize>,
     /// Each write since the last one that acted that changed nothing, by tool and arguments, with its result.
     idle: std::cell::RefCell<std::collections::HashMap<String, String>>,
+    stop: Option<&'a AtomicBool>,
 }
 
 impl CallEnv<'_> {
+    fn stopped(&self) -> bool {
+        self.stop.is_some_and(|s| s.load(Ordering::Relaxed))
+    }
+
     /// Runs one call; a read already made since the last other call is answered
     /// from its earlier result instead of running again.
     fn run(&self, called: &str, args: &str) -> (String, bool) {
@@ -1067,6 +1100,9 @@ impl CallEnv<'_> {
     }
 
     fn run_known(&self, name: &str, args: &str) -> (String, bool) {
+        if self.stopped() {
+            return (error_json(&ToolError::rejected(STOPPED_CALL)), true);
+        }
         let key = read_key(name, args);
         let read = tools::reads(name);
         let earlier = if read { self.reads.borrow().get(&key).cloned() } else { self.idle.borrow().get(&key).cloned() };
@@ -1215,6 +1251,8 @@ fn read_key(name: &str, args: &str) -> String {
     format!("{name}\0{args}")
 }
 
+const STOPPED_CALL: &str = "not run: the user stopped this turn";
+
 fn error_json(e: &ToolError) -> String {
     serde_json::to_string(e).unwrap_or_else(|_| r#"{"kind":"internal"}"#.into())
 }
@@ -1265,6 +1303,10 @@ fn run_batch(
     }
     let mut results = Vec::new();
     for sub in args.calls {
+        if env.stopped() {
+            results.push(serde_json::json!({ "tool": sub.tool, "ok": false, "error": ToolError::rejected(STOPPED_CALL) }));
+            continue;
+        }
         let canonical = tools::known(&sub.tool).map_or(sub.tool.as_str(), |(name, _)| name);
         let refused = if canonical == "batch" {
             Some(ToolError::rejected("a batch cannot hold another batch"))
@@ -1564,7 +1606,7 @@ mod tests {
         use crate::providers::mock::StreamPiece::{Text, Thought};
         let (db, tmp) = env();
         let llm = MockLLM::streamed(vec![vec![Thought("hm"), Text("Half "), Text("a reply")]]);
-        let stop = AtomicBool::new(false);
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
         let seen = std::cell::RefCell::new(Vec::new());
         let on_event = |ev: AgentEvent| {
             if let AgentEvent::ReplyDelta { .. } = ev {
@@ -1905,7 +1947,7 @@ mod tests {
             }],
         };
         let llm = MockLLM::scripted(vec![resp; MAX_TURNS]);
-        let stop = AtomicBool::new(false);
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
         let on_event = |ev: AgentEvent| {
             if let AgentEvent::ToolResult { index: 1, .. } = ev {
                 stop.store(true, Ordering::Relaxed);
@@ -1933,6 +1975,63 @@ mod tests {
             .query_row("SELECT outcome FROM agent_traces", [], |r| r.get(0))
             .unwrap();
         assert_eq!(outcome, "stopped");
+    }
+
+    #[test]
+    fn a_stop_mid_batch_runs_none_of_the_calls_after_it() {
+        let (db, tmp) = env();
+        let save = |t: &str| serde_json::json!({ "tool": "task_save", "args": { "tasks": [{ "title": t }] } });
+        let batch = serde_json::json!({ "calls": [save("first"), save("second"), save("third")] }).to_string();
+        let llm = MockLLM::scripted(vec![ChatResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall { id: "b".into(), name: "batch".into(), args: batch }],
+        }]);
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let on_event = |ev: AgentEvent| {
+            if let AgentEvent::ToolResult { index: 0, .. } = ev {
+                stop.store(true, Ordering::Relaxed);
+            }
+        };
+        let out = run_session_stoppable(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi", &on_event, Some(&stop))
+            .unwrap();
+        assert_eq!(out.steps.len(), 1, "only the call before the stop ran");
+        let titles: Vec<String> = db
+            .lock()
+            .unwrap()
+            .prepare("SELECT title FROM tasks ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(titles, ["first"]);
+        let env = CallEnv {
+            deps: &deps(&db, &tmp, &llm),
+            user_id: 1,
+            username: "aki",
+            kind: SessionKind::Talk,
+            lang: Lang::En,
+            calls: Default::default(),
+            heard: Vec::new(),
+            reads: Default::default(),
+            acted: Default::default(),
+            idle_writes: Default::default(),
+            idle: Default::default(),
+            stop: Some(&stop),
+        };
+        let (content, is_error) = env.run_known("task_save", r#"{"tasks":[{"title":"fourth"}]}"#);
+        assert!(is_error && content.contains(STOPPED_CALL), "{content}");
+    }
+
+    #[test]
+    fn stopping_reads_this_threads_session_only_while_it_runs() {
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let scope = StopScope::enter(Some(stop.clone()));
+        assert!(!stopping());
+        stop.store(true, Ordering::Relaxed);
+        assert!(stopping());
+        drop(scope);
+        assert!(!stopping(), "the scope ends with the session");
     }
 
     fn last_result(seen: &crate::providers::mock::RecordedChat) -> String {

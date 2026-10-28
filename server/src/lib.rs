@@ -82,15 +82,30 @@ pub struct TalkGate {
     freed: tokio::sync::Notify,
 }
 
+/// A turn's place in the gate: its user's one slot and one of the global
+/// ones, each freed when its part drops.
 pub struct TalkPermit {
     gate: Arc<TalkGate>,
     user_id: i64,
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    holds_user: bool,
+}
+
+impl TalkPermit {
+    /// Splits the user's slot off into a permit of its own, leaving this one
+    /// the global slot alone, so each can be freed on its own.
+    #[must_use]
+    pub fn split_user(&mut self) -> TalkPermit {
+        let holds_user = std::mem::replace(&mut self.holds_user, false);
+        TalkPermit { gate: self.gate.clone(), user_id: self.user_id, permit: None, holds_user }
+    }
 }
 
 impl Drop for TalkPermit {
     fn drop(&mut self) {
-        self.gate.active.lock().unwrap().remove(&self.user_id);
+        if self.holds_user {
+            self.gate.active.lock().unwrap().remove(&self.user_id);
+        }
         drop(self.permit.take());
         self.gate.freed.notify_waiters();
     }
@@ -119,10 +134,15 @@ impl TalkGate {
         if !self.active.lock().unwrap().insert(user_id) {
             return Err(TalkBusy::UserBusy);
         }
-        if let Ok(permit) = self.semaphore.clone().try_acquire_owned() { Ok(TalkPermit { gate: self.clone(), user_id, permit: Some(permit) }) } else {
+        if let Ok(permit) = self.semaphore.clone().try_acquire_owned() { Ok(TalkPermit { gate: self.clone(), user_id, permit: Some(permit), holds_user: true }) } else {
             self.active.lock().unwrap().remove(&user_id);
             Err(TalkBusy::Full)
         }
+    }
+
+    /// Global slots free now.
+    pub fn available(&self) -> usize {
+        self.semaphore.available_permits()
     }
 
     /// `try_enter` that waits its turn instead of refusing.

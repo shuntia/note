@@ -917,7 +917,7 @@ fn day_of(timestamp: &str) -> &str {
 
 fn task_line(l: crate::text::Lang, t: &TaskRow, scope: &ShareScope) -> String {
     use crate::model_text as mt;
-    let mut s = format!("- {}", t.title);
+    let mut s = format!("- {}", crate::context::flat(&t.title));
     if t.urgency == "high" {
         s.push_str(mt::share_mark_urgent(l));
     } else if t.pressing {
@@ -930,13 +930,13 @@ fn task_line(l: crate::text::Lang, t: &TaskRow, scope: &ShareScope) -> String {
         s.push_str(&mt::share_parts(l, t.done_steps, t.steps));
     }
     if scope.categories.len() != 1 && !t.category.is_empty() {
-        let _ = write!(s, " ({})", t.category);
+        let _ = write!(s, " ({})", crate::context::flat(&t.category));
     }
     if let Some(g) = &t.goal_title {
-        s.push_str(&mt::share_goal_of(l, g));
+        s.push_str(&mt::share_goal_of(l, &crate::context::flat(g)));
     }
     if let Some(d) = t.description.as_deref().filter(|d| !d.trim().is_empty()) {
-        let _ = write!(s, " — {}", d.trim().chars().take(200).collect::<String>());
+        let _ = write!(s, " — {}", crate::context::flat(d).chars().take(200).collect::<String>());
     }
     let _ = writeln!(s, " (t{})", t.id);
     s

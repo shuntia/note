@@ -483,8 +483,8 @@ pub fn generate_title(state: &AppState, user_id: i64, username: &str, conversati
 type StopFlag = std::sync::Arc<std::sync::atomic::AtomicBool>;
 
 /// Each user's turn in flight: its thread and every agent frame sent so far, so a
-/// client that opens the thread mid-turn can catch up. The entry holds the turn's
-/// talk slot; taking it out frees the slot.
+/// client that opens the thread mid-turn can catch up. The entry holds the user's
+/// talk slot; taking it out frees it.
 #[derive(Default)]
 pub struct LiveTurns(std::sync::Mutex<std::collections::HashMap<i64, LiveTurn>>);
 
@@ -654,9 +654,9 @@ fn let_go(state: &AppState, user_id: i64, stop: &StopFlag) {
     let now = jiff::Timestamp::now();
     let kept = owned(&conn, user_id, turn.conversation_id).and_then(|mine| {
         if mine {
-            let cut = crate::text::stopped_reply(turn.lang);
+            let cut = crate::text::step_stopped(turn.lang);
             for step in turn.steps.values() {
-                append_tool(&conn, turn.conversation_id, &step.name, &step.args, &cut, true, None, now)?;
+                append_tool(&conn, turn.conversation_id, &step.name, &step.args, &cut, false, None, now)?;
             }
             let reply = crate::text::stopped_after(turn.lang, &turn.said);
             append_assistant(&conn, turn.conversation_id, &reply, "", 0, now)?;
@@ -724,6 +724,8 @@ pub enum TurnError {
     NotFound,
     DailyCap,
     Busy(crate::TalkBusy),
+    /// A stop let the turn go; what it did is in its thread already.
+    Stopped,
     /// The session did not finish; nothing it began stays persisted.
     Unavailable(crate::failure::Failure),
     Internal,
@@ -863,9 +865,10 @@ async fn turn(
         deps.conversation_id = Some(conv_id);
         let stop = StopFlag::default();
         let lang = Lang::for_user(&st.config_dir, &session_user);
-        // the slot goes with the live turn, not the caller's future, so a cancelled
-        // request still holds it until the session it orphaned finishes or is let go
-        st.live_turns.begin(user_id, conv_id, user_row, lang, stop.clone(), permit);
+        // the user's slot goes with the live turn, freed when it ends or is let go;
+        // the global one stays with this session until it returns
+        let mut slot = permit;
+        st.live_turns.begin(user_id, conv_id, user_row, lang, stop.clone(), slot.split_user());
         let let_go = std::cell::Cell::new(false);
         let mut live = LiveGuard {
             state: &st,
@@ -886,6 +889,7 @@ async fn turn(
             // each call's row is written as its result comes, so a turn that never ends still shows what it did
             let thought = std::cell::RefCell::new(String::new());
             let calls = std::cell::RefCell::new(std::collections::HashMap::<usize, (String, Option<String>)>::new());
+            let written = std::cell::RefCell::new(Vec::<i64>::new());
             let on_event = |ev: AgentEvent| {
                 let n = seq.replace(seq.get() + 1);
                 let frame = crate::channels::ws::agent_frame(Some(conv_id), n, &ev);
@@ -903,9 +907,11 @@ async fn turn(
                     let live = st.live_turns.record(user_id, &stop, n, &ev, &frame);
                     if live && owned(&conn, user_id, conv_id).unwrap_or(false) {
                         let (args, thinking) = calls.borrow_mut().remove(&index).unwrap_or_default();
-                        let written = append_tool(&conn, conv_id, name, &args, result, is_error, thinking.as_deref(), now);
-                        if let Err(e) = written {
-                            let _ = crate::log::record(&conn, Some(user_id), "talk_error", &format!("writing a step: {e:#}"));
+                        match append_tool(&conn, conv_id, name, &args, result, is_error, thinking.as_deref(), now) {
+                            Ok(()) => written.borrow_mut().push(conn.last_insert_rowid()),
+                            Err(e) => {
+                                let _ = crate::log::record(&conn, Some(user_id), "talk_error", &format!("writing a step: {e:#}"));
+                            }
                         }
                     }
                     live
@@ -932,16 +938,19 @@ async fn turn(
                     let conn = st.db();
                     let Some(_held) = st.live_turns.take(user_id, &stop) else {
                         let_go.set(true);
-                        return Err(e);
+                        return Ok(None);
                     };
                     let undone = if conversation.is_some() {
-                        conn.execute(
-                            "DELETE FROM talk_messages WHERE id >= ?1 AND conversation_id IN
-                                (SELECT id FROM conversations WHERE id = ?2 AND user_id = ?3)",
-                            (user_row, conv_id, user_id),
-                        )
+                        std::iter::once(user_row).chain(written.borrow().iter().copied()).try_for_each(|row| {
+                            conn.execute(
+                                "DELETE FROM talk_messages WHERE id = ?1 AND conversation_id IN
+                                    (SELECT id FROM conversations WHERE id = ?2 AND user_id = ?3)",
+                                (row, conv_id, user_id),
+                            )
+                            .map(drop)
+                        })
                     } else {
-                        conn.execute("DELETE FROM conversations WHERE id = ?1 AND user_id = ?2", (conv_id, user_id))
+                        conn.execute("DELETE FROM conversations WHERE id = ?1 AND user_id = ?2", (conv_id, user_id)).map(drop)
                     };
                     if let Err(undo) = undone {
                         let _ = crate::log::record(&conn, Some(user_id), "talk_error", &format!("undoing the turn: {undo:#}"));
@@ -962,25 +971,19 @@ async fn turn(
             let conn = st.db();
             let Some(_held) = st.live_turns.take(user_id, &stop) else {
                 let_go.set(true);
-                return Ok(Turn {
-                    conversation_id: conv_id,
-                    reply,
-                    steps: out.steps,
-                    reasoning: out.reasoning,
-                    thought_ms: out.thought_ms,
-                });
+                return Ok(None);
             };
             anyhow::ensure!(owned(&conn, user_id, conv_id)?, "the conversation was deleted mid-turn");
             append_assistant(&conn, conv_id, &reply, &out.reasoning, out.thought_ms, now)?;
             touch(&conn, conv_id, now)?;
             mark_via(&conn, conv_id, via, now)?;
-            Ok::<_, anyhow::Error>(Turn {
+            Ok::<_, anyhow::Error>(Some(Turn {
                 conversation_id: conv_id,
                 reply,
                 steps: out.steps,
                 reasoning: out.reasoning,
                 thought_ms: out.thought_ms,
-            })
+            }))
         })();
         if let Err(e) = &outcome {
             live.failure = Some(crate::failure::Failure::of(e).reason);
@@ -989,7 +992,8 @@ async fn turn(
     })
     .await;
     match result {
-        Ok(Ok(turn)) => {
+        Ok(Ok(None)) => Err(TurnError::Stopped),
+        Ok(Ok(Some(turn))) => {
             let st = state.clone();
             let titled_user = username.to_string();
             let conv_id = turn.conversation_id;
@@ -1029,6 +1033,25 @@ mod tests {
 
     fn now() -> jiff::Timestamp {
         jiff::Timestamp::now()
+    }
+
+    #[test]
+    fn a_call_under_way_when_its_turn_is_let_go_is_kept_as_maybe_done() {
+        let conn = conn_with_conversation();
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(conn, tmp.path().to_path_buf(), tmp.path().to_path_buf());
+        let stop = StopFlag::default();
+        let permit = state.talk_gate.try_enter(1).unwrap();
+        state.live_turns.begin(1, 1, 1, Lang::En, stop.clone(), permit);
+        let call = AgentEvent::ToolCall { index: 0, name: "task_save", args: "{}" };
+        state.live_turns.record(1, &stop, 0, &call, "{}");
+        let_go(&state, 1, &stop);
+        let (content, is_error): (String, bool) = state
+            .db()
+            .query_row("SELECT content, is_error FROM talk_messages WHERE role = 'tool'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!((content, is_error), (crate::text::step_stopped(Lang::En), false));
+        assert!(state.talk_gate.try_enter(1).is_ok(), "the user's slot is free again");
     }
 
     #[test]

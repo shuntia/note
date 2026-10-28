@@ -114,7 +114,8 @@ pub fn run_tool(
         let l = crate::text::Lang::for_user(deps.config_dir, username);
         return Ok(serde_json::json!({ "summary": mt::no_results(l), "sources": [] }));
     }
-    if let Some(summary) = summarize(deps, username, background, &args, &hits) {
+    let summary = if crate::agent::stopping() { None } else { summarize(deps, username, background, &args, &hits) };
+    if let Some(summary) = summary {
         log(deps, user_id, hits.len(), "ok");
         Ok(serde_json::json!({ "summary": summary, "sources": sources(&hits) }))
     } else {

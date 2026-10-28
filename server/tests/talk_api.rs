@@ -1130,6 +1130,47 @@ async fn a_stopped_stream_keeps_what_it_did_and_said_and_the_next_turn_proceeds(
     assert_eq!(talk_traces(&state), [("stopped".to_string(), 1, true), ("ok".to_string(), 0, false)]);
 }
 
+/// Asks for a tool call, then fails once `open` is sent to.
+struct FailsAfterAStep(std::sync::Mutex<std::sync::mpsc::Receiver<()>>, std::sync::atomic::AtomicUsize);
+impl note_server::providers::LLMProvider for FailsAfterAStep {
+    fn chat(
+        &self,
+        _: &note_server::providers::ChatRequest,
+    ) -> anyhow::Result<note_server::providers::ChatResponse> {
+        if self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            return Ok(ChatResponse { text: String::new(), tool_calls: vec![find_call()] });
+        }
+        self.0.lock().unwrap().recv()?;
+        anyhow::bail!("provider down")
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_turn_takes_back_only_the_rows_it_wrote() {
+    let (open, gate) = std::sync::mpsc::channel();
+    let llm = Arc::new(FailsAfterAStep(std::sync::Mutex::new(gate), Default::default()));
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_llm_and_state(llm).await;
+    let id = {
+        let conn = state.db.lock().unwrap();
+        let id = note_server::talk::create(&conn, 1, "chat", jiff::Timestamp::now()).unwrap();
+        note_server::talk::append_text(&conn, id, "user", "hi", jiff::Timestamp::now()).unwrap();
+        id
+    };
+    let sending = {
+        let (app, cookie) = (app.clone(), cookie.clone());
+        tokio::spawn(async move { post_talk(&app, &cookie, serde_json::json!({"message": "go", "conversation_id": id})).await })
+    };
+    live_conversation(&app, &cookie, Some("tool_result")).await;
+    {
+        let conn = state.db.lock().unwrap();
+        note_server::talk::append_text(&conn, id, "assistant", "a session ran long", jiff::Timestamp::now()).unwrap();
+    }
+    open.send(()).unwrap();
+    let (status, _) = sending.await.unwrap();
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(thread_rows(&state, id), [row("user", "hi"), row("assistant", "a session ran long")]);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn each_step_is_in_the_thread_while_the_turn_still_runs_and_only_once() {
     let (open, gate) = std::sync::mpsc::channel();
@@ -1191,11 +1232,16 @@ async fn a_turn_stuck_past_the_grace_is_let_go_with_what_it_did_and_frees_its_us
     let (status, v) = post_talk(&app, &cookie, serde_json::json!({"message": "again", "conversation_id": id})).await;
     assert_eq!(status, StatusCode::OK, "{v}");
     assert_eq!(v["reply"], "Fine.");
+    assert_eq!(
+        state.talk_gate.available(),
+        note_server::MAX_CONCURRENT_TALKS - 1,
+        "the session let go still holds its global slot while it runs"
+    );
 
     open.send(()).unwrap();
     let (status, v) = sending.await.unwrap();
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(v["reply"], "(Stopped)");
+    assert_eq!((status, v["reason"].as_str()), (StatusCode::CONFLICT, Some("stopped")), "{v}");
+    assert_eq!(state.talk_gate.available(), note_server::MAX_CONCURRENT_TALKS);
     assert_eq!(
         thread_rows(&state, id),
         [

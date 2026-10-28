@@ -617,6 +617,11 @@ pub fn stopped_reply(l: Lang) -> String {
     l.pick("(Stopped)", "中止しました。")
 }
 
+/// The result kept for a call still running when its turn was let go.
+pub fn step_stopped(l: Lang) -> String {
+    l.pick("stopped; may have completed, check before doing it again", "中止。完了している可能性あり。やり直す前に確認")
+}
+
 /// What a stopped turn keeps: the reply streamed so far, then the stop.
 pub fn stopped_after(l: Lang, said: &str) -> String {
     match said.trim_end() {

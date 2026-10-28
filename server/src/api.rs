@@ -1458,6 +1458,11 @@ async fn talk(
             .into_response(),
         Err(E::Busy(busy)) => session_busy_response(busy, lang),
         Err(E::Unavailable(failure)) => failed_turn(lang, user.admin, &failure),
+        Err(E::Stopped) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": text::stopped_reply(lang), "reason": "stopped" })),
+        )
+            .into_response(),
         Err(E::Internal) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

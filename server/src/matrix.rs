@@ -190,7 +190,7 @@ async fn answer(
     match done {
         Ok(turn) => say(state, room_id, user_id, &turn.reply).await,
         Err(TurnError::DailyCap) => say(state, room_id, user_id, &crate::text::matrix_capped(lang)).await,
-        Err(TurnError::Blank) => {}
+        Err(TurnError::Blank | TurnError::Stopped) => {}
         Err(TurnError::Unavailable(failure)) => {
             say(state, room_id, user_id, &crate::text::failure_reason(lang, failure.reason)).await;
         }
