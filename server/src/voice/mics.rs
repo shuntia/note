@@ -5,6 +5,10 @@ use serde::Serialize;
 /// Element X and other Matrix calls; their level is reliable, so they start at unity with auto off.
 pub const ELEMENT: &str = "element";
 pub const MAX_GAIN_DB: f32 = 24.0;
+/// A browser or desktop device starts here, and so does a web call until its device is known.
+pub const WEB_START: MicGain = MicGain { gain_db: 0.0, auto: true };
+/// Devices kept per user; the least recently used beyond this are forgotten.
+pub const MAX_DEVICES: usize = 32;
 const MAX_LABEL: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -37,7 +41,11 @@ pub fn device_client(client: &str, key: &str) -> Option<String> {
 }
 
 fn default_gain(client: &str) -> MicGain {
-    MicGain { gain_db: 0.0, auto: client != ELEMENT }
+    if client == ELEMENT {
+        MicGain { gain_db: 0.0, auto: false }
+    } else {
+        WEB_START
+    }
 }
 
 fn row(conn: &Connection, user_id: i64, client: &str) -> rusqlite::Result<Option<(String, MicGain)>> {
@@ -58,10 +66,10 @@ pub fn gain(conn: &Connection, user_id: i64, client: &str) -> MicGain {
 pub fn list(conn: &Connection, user_id: i64) -> rusqlite::Result<Vec<MicRow>> {
     let mut stmt = conn.prepare(
         "SELECT client, label, gain_db, auto FROM mic_gains WHERE user_id = ?1 AND client != ?2
-         ORDER BY updated_at DESC, client",
+         ORDER BY updated_at DESC, client LIMIT ?3",
     )?;
     let devices = stmt
-        .query_map((user_id, ELEMENT), |r| {
+        .query_map((user_id, ELEMENT, MAX_DEVICES as i64), |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, f64>(2)?, r.get::<_, bool>(3)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -83,6 +91,12 @@ pub fn seen(conn: &Connection, user_id: i64, client: &str, label: &str, now: jif
         "INSERT INTO mic_gains (user_id, client, label, gain_db, auto, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT (user_id, client) DO UPDATE SET label = excluded.label, updated_at = excluded.updated_at",
         (user_id, client, &label, f64::from(start.gain_db), start.auto, now.to_string()),
+    )?;
+    conn.execute(
+        "DELETE FROM mic_gains WHERE user_id = ?1 AND client != ?2 AND client NOT IN (
+             SELECT client FROM mic_gains WHERE user_id = ?1 AND client != ?2
+             ORDER BY updated_at DESC, client LIMIT ?3)",
+        (user_id, ELEMENT, MAX_DEVICES as i64),
     )?;
     Ok(gain(conn, user_id, client))
 }
@@ -226,6 +240,23 @@ mod tests {
         call(&conn, "c2", 1, ELEMENT);
         learned(&conn, "c2", MicGain { gain_db: 5.0, auto: true }).unwrap();
         assert_eq!(gain(&conn, 1, ELEMENT), MicGain { gain_db: 5.0, auto: true });
+    }
+
+    #[test]
+    fn only_the_newest_devices_are_kept() {
+        let conn = db();
+        set(&conn, 1, ELEMENT, MicPatch { gain_db: Some(3.0), auto: None }, now()).unwrap().unwrap();
+        let t0 = jiff::Timestamp::from_second(1_800_000_000).unwrap();
+        for i in 0..MAX_DEVICES + 5 {
+            seen(&conn, 1, &format!("web:{i:x}"), "", t0 + jiff::SignedDuration::from_secs(i as i64)).unwrap();
+        }
+        let rows = list(&conn, 1).unwrap();
+        assert_eq!(rows.len(), MAX_DEVICES + 1);
+        assert_eq!(rows[0].gain_db, 3.0, "Element X is never pruned");
+        assert_eq!(rows[1].client, format!("web:{:x}", MAX_DEVICES + 4));
+        assert!(rows.iter().all(|r| r.client != "web:0" && r.client != "web:4"));
+        let stored: i64 = conn.query_row("SELECT COUNT(*) FROM mic_gains WHERE user_id = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(stored as usize, MAX_DEVICES + 1);
     }
 
     #[test]

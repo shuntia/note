@@ -39,7 +39,7 @@ pub struct Agc {
 
 impl Agc {
     pub fn new(mic: MicGain) -> Self {
-        let gain_db = mic.gain_db.clamp(0.0, MAX_GAIN_DB);
+        let gain_db = sane(mic.gain_db);
         Agc { gain_db, auto: mic.auto, level_db: None, floor_db: -70.0, applied: lin(gain_db) }
     }
 
@@ -49,7 +49,7 @@ impl Agc {
 
     /// A manual gain holds still; turning auto back on adapts from it.
     pub fn set(&mut self, mic: MicGain) {
-        self.gain_db = mic.gain_db.clamp(0.0, MAX_GAIN_DB);
+        self.gain_db = sane(mic.gain_db);
         self.auto = mic.auto;
     }
 
@@ -90,6 +90,10 @@ impl Agc {
         }
         self.applied = target;
     }
+}
+
+fn sane(gain_db: f32) -> f32 {
+    if gain_db.is_finite() { gain_db.clamp(0.0, MAX_GAIN_DB) } else { 0.0 }
 }
 
 fn soft_limit(x: f32) -> f32 {
@@ -222,6 +226,19 @@ mod tests {
         agc.set(MicGain { gain_db: 6.0, auto: true });
         run(&mut agc, speech(1.0, -40.0, 1, 1), true);
         assert!(agc.gain_db > 6.0 && agc.gain_db <= 6.0 + RISE_DB_PER_S + 0.01, "{}", agc.gain_db);
+    }
+
+    #[test]
+    fn a_gain_that_is_not_a_number_is_unity() {
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(Agc::new(MicGain { gain_db: bad, auto: true }).settings().gain_db, 0.0);
+            let mut agc = Agc::new(MicGain { gain_db: 6.0, auto: false });
+            agc.set(MicGain { gain_db: bad, auto: false });
+            let mut f = vec![0.1; FRAME];
+            agc.process(&mut f, true);
+            assert!(f.iter().all(|s| s.is_finite()));
+            assert_eq!(agc.settings().gain_db, 0.0);
+        }
     }
 
     #[test]

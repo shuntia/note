@@ -262,6 +262,29 @@ async fn a_web_calls_device_starts_from_its_learned_gain_and_keeps_the_new_one()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn repeated_or_flooded_device_reports_reach_the_voice_side_at_most_once_each_and_eight_in_all() {
+    let r = rig().await;
+    let mut ws = open(r.addr, &r.cookie, "").await;
+    frame(&mut ws, "open").await;
+    let id = started(&r, 1).await;
+    let mic = |key: &str| Message::Text(format!(r#"{{"type":"mic","client":"web","key":"{key}"}}"#).into());
+    for _ in 0..3 {
+        ws.send(mic("a1")).await.unwrap();
+    }
+    for i in 0..20 {
+        ws.send(mic(&format!("b{i:x}"))).await.unwrap();
+    }
+    let cap = note_server::voice::web::MAX_MIC_CHANGES as usize;
+    eventually("the capped reports", || mics(&r, &id).len() >= cap).await;
+    ws.send(Message::Binary(pcm_bytes(1, 320).into())).await.unwrap();
+    eventually("audio after the reports", || !audio_in(&r, &id).is_empty()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(mics(&r, &id).len(), cap);
+    let devices: i64 = r.state.db().query_row("SELECT COUNT(*) FROM mic_gains WHERE client LIKE 'web:%'", [], |x| x.get(0)).unwrap();
+    assert_eq!(devices, i64::from(note_server::voice::web::MAX_MIC_CHANGES));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn muted_audio_reaches_the_voice_side_as_silence() {
     let r = rig().await;
     let mut ws = open(r.addr, &r.cookie, "").await;

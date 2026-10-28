@@ -1,4 +1,4 @@
-import type { MicTrack } from '../mic'
+import { realDevice, type MicTrack } from '../mic'
 import captureUrl from './capture.worklet.ts?worker&url'
 import playbackUrl from './playback.worklet.ts?worker&url'
 import { rms16 } from './pcm'
@@ -81,14 +81,20 @@ export function webAudio(): AudioIo {
       source.connect(analyser)
       const track = stream.getAudioTracks()[0]
       if (!track || !onDevice) return
-      const seen = (): MicTrack => ({ deviceId: track.getSettings().deviceId, label: track.label })
-      let last = seen()
+      const seen = async (): Promise<MicTrack> => {
+        const { deviceId, groupId } = track.getSettings()
+        const inputs = (await navigator.mediaDevices.enumerateDevices().catch(() => [])).filter((d) => d.kind === 'audioinput')
+        return realDevice({ deviceId, groupId, label: track.label }, inputs)
+      }
+      let last = await seen()
+      ensureOpen()
       onDevice(last)
       watchDevice = () => {
-        const now = seen()
-        if (now.deviceId === last.deviceId && now.label === last.label) return
-        last = now
-        onDevice(now)
+        void seen().then((now) => {
+          if (closed || (now.deviceId === last.deviceId && now.label === last.label)) return
+          last = now
+          onDevice(now)
+        })
       }
       navigator.mediaDevices.addEventListener?.('devicechange', watchDevice)
     },

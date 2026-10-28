@@ -366,6 +366,9 @@ in
         CPUWeight = 10000;
         IOWeight = 10000;
         Nice = -10;
+        # Ceilings: 400% throttles a CPU-fallback recognizer to a quarter of its speed; peak RSS is ~2 GB.
+        CPUQuota = "800%";
+        MemoryMax = "4G";
         UMask = "0077";
         NoNewPrivileges = true;
         PrivateTmp = true;

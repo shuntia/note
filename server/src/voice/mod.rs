@@ -329,7 +329,7 @@ impl Voice {
         for old in replaced {
             self.hang_up(&old);
         }
-        let voice = VoiceProfile { mic: note_voice_proto::MicGain { gain_db: 0.0, auto: true }, ..self.handler.profile(user_id) };
+        let voice = VoiceProfile { mic: mics::WEB_START, ..self.handler.profile(user_id) };
         let title = crate::text::call_title(crate::text::Lang::from_setting(&voice.language).unwrap_or_default());
         let sent = self.peer.send_call(
             &id,
@@ -367,18 +367,24 @@ impl Voice {
     /// The browser or desktop app's input device for the web call: noted for the user, and its gain
     /// handed to the voice side.
     pub fn web_mic(&self, call_id: &str, user_id: i64, client: &str, key: &str, label: &str) {
+        use rusqlite::OptionalExtension;
         let Some(client) = mics::device_client(client, key) else { return };
         let mic = {
             let conn = crate::db_guard(&self.db);
-            let ours = conn
-                .execute(
-                    "UPDATE voice_calls SET mic_client = ?3 WHERE id = ?1 AND user_id = ?2 AND state != 'ended'",
-                    (call_id, user_id, &client),
+            let was: Option<Option<String>> = conn
+                .query_row(
+                    "SELECT mic_client FROM voice_calls WHERE id = ?1 AND user_id = ?2 AND state != 'ended'",
+                    (call_id, user_id),
+                    |r| r.get(0),
                 )
-                .unwrap_or(0)
-                > 0;
-            if !ours {
+                .optional()
+                .unwrap_or(None);
+            let Some(was) = was else { return };
+            if was.as_deref() == Some(client.as_str()) {
                 return;
+            }
+            if let Err(e) = conn.execute("UPDATE voice_calls SET mic_client = ?2 WHERE id = ?1", (call_id, &client)) {
+                return eprintln!("voice: noting the call's microphone failed: {e}");
             }
             match mics::seen(&conn, user_id, &client, label, jiff::Timestamp::now()) {
                 Ok(mic) => mic,

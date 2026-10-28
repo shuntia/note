@@ -277,6 +277,8 @@ pub const SILENCE_LIMIT: Duration = Duration::from_secs(5);
 pub const LINK_LIMIT: Duration = Duration::from_secs(10);
 /// 100 ms of 16 kHz s16; anything larger is not a capture frame.
 pub(crate) const MAX_IN_BYTES: usize = 3200;
+/// Device changes a call socket may report; more are ignored.
+pub const MAX_MIC_CHANGES: u32 = 8;
 /// A browser that takes longer than this to accept a frame is taken to be gone.
 const SEND_LIMIT: Duration = Duration::from_secs(5);
 
@@ -339,6 +341,8 @@ async fn relay(mut socket: WebSocket, voice: &Voice, call: WebCall, user_id: i64
         return voice.hang_up(&call_id);
     }
     let (mut muted, mut hung_up) = (false, false);
+    let mut mic: Option<(String, String)> = None;
+    let mut mic_changes = 0;
     let mut heard = tokio::time::Instant::now();
     let mut down_since: Option<tokio::time::Instant> = None;
     let mut watch = tokio::time::interval(Duration::from_millis(500));
@@ -369,8 +373,14 @@ async fn relay(mut socket: WebSocket, voice: &Voice, call: WebCall, user_id: i64
                         hung_up = true;
                         voice.hang_up(&call_id);
                     }
-                    Ok(Control::Mic { client, key, label }) if !hung_up => {
+                    Ok(Control::Mic { client, key, label })
+                        if !hung_up
+                            && mic_changes < MAX_MIC_CHANGES
+                            && mic.as_ref() != Some(&(client.clone(), key.clone())) =>
+                    {
+                        mic_changes += 1;
                         voice.web_mic(&call_id, user_id, &client, &key, &label);
+                        mic = Some((client, key));
                     }
                     _ => {}
                 },

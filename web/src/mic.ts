@@ -2,7 +2,21 @@ export type MicClient = 'web' | 'desktop'
 export type MicKind = 'element' | MicClient
 export type Mic = { client: string; kind: MicKind; label: string; gain_db: number; auto: boolean }
 export type MicPatch = { gain_db?: number; auto?: boolean }
-export type MicTrack = { deviceId?: string; label: string }
+export type MicTrack = { deviceId?: string; groupId?: string; label: string }
+
+// Chrome names whichever input is the default "default" or "communications", the same on every machine.
+const ALIASES = new Set(['', 'default', 'communications'])
+
+// The physical device behind a capture track, which may only know itself by an alias.
+export function realDevice(track: MicTrack, inputs: MicTrack[]): MicTrack {
+  if (!ALIASES.has(track.deviceId ?? '')) return track
+  const real = inputs.filter((d) => !ALIASES.has(d.deviceId ?? ''))
+  const same =
+    real.find((d) => track.groupId && d.groupId === track.groupId) ??
+    real.find((d) => track.label && (d.label === track.label || track.label.endsWith(d.label)))
+  if (same) return { deviceId: same.deviceId, groupId: same.groupId, label: same.label }
+  return { deviceId: track.groupId || undefined, groupId: track.groupId, label: track.label }
+}
 
 export const GAIN_MAX_DB = 24
 const KEY_HEX = 16
