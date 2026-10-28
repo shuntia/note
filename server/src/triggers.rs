@@ -334,38 +334,45 @@ pub struct Near {
     pub date: String,
     pub at: String,
     pub prompt: String,
+    pub conversation_id: Option<i64>,
+    /// Minutes between it and the moment asked about.
+    pub apart: i64,
 }
 
-/// The pending trigger of this user nearest `target`, when one sits within
-/// `NEAR_MIN` minutes of it.
+/// The pending trigger of this user nearest `target`, other than `except`,
+/// when one sits within `NEAR_MIN` minutes of it; of two as near, the one in
+/// `thread`.
 pub fn near(
     conn: &Connection,
     user_id: i64,
     tz: &jiff::tz::TimeZone,
     target: jiff::Timestamp,
+    thread: Option<i64>,
+    except: Option<i64>,
 ) -> rusqlite::Result<Option<Near>> {
     let day = target.to_zoned(tz.clone()).date();
     let around = |d: i64| day.checked_add(jiff::Span::new().days(d)).unwrap_or(day).to_string();
     let mut stmt = conn.prepare(
-        "SELECT e.id, p.date, e.wall_time, e.prompt FROM events e JOIN plans p ON p.id = e.plan_id
+        "SELECT e.id, p.date, e.wall_time, e.prompt, e.conversation_id FROM events e JOIN plans p ON p.id = e.plan_id
          WHERE p.user_id = ?1 AND e.kind = ?2 AND e.status IN ('pending', 'snoozed')
-           AND p.date BETWEEN ?3 AND ?4",
+           AND p.date BETWEEN ?3 AND ?4 AND e.id != ?5",
     )?;
-    let rows = stmt.query_map((user_id, KIND, around(-1), around(1)), |r| {
-        Ok(Near { event_id: r.get(0)?, date: r.get(1)?, at: r.get(2)?, prompt: r.get(3)? })
+    let rows = stmt.query_map((user_id, KIND, around(-1), around(1), except.unwrap_or(0)), |r| {
+        Ok(Near { event_id: r.get(0)?, date: r.get(1)?, at: r.get(2)?, prompt: r.get(3)?, conversation_id: r.get(4)?, apart: 0 })
     })?;
-    let mut best: Option<(i64, Near)> = None;
+    let mut best: Option<Near> = None;
     for row in rows {
-        let row = row?;
+        let mut row = row?;
         let Some(at) = row.date.parse().ok().and_then(|d| crate::zone::instant(tz, d, &row.at)) else {
             continue;
         };
-        let apart = (at - target).get_seconds().abs() / 60;
-        if apart <= NEAR_MIN && best.as_ref().is_none_or(|(b, _)| apart < *b) {
-            best = Some((apart, row));
+        row.apart = (at - target).get_seconds().abs() / 60;
+        let rank = |n: &Near| (n.apart, n.conversation_id != thread);
+        if row.apart <= NEAR_MIN && best.as_ref().is_none_or(|b| rank(&row) < rank(b)) {
+            best = Some(row);
         }
     }
-    Ok(best.map(|(_, n)| n))
+    Ok(best)
 }
 
 /// Lays one trigger point, refusing on the day's budget and on a time already
@@ -401,7 +408,7 @@ pub fn lay(conn: &Connection, lay: &Lay) -> Result<Laid, Refusal> {
     if lay.work_session_id.is_none() && !lay.system && session.is_none() {
         if pending_laid(conn, lay.user_id, local.date()).map_err(internal)? >= MAX_PENDING {
             return Err(Refusal::Rejected(format!(
-                "{MAX_PENDING} triggers already wait; take some off with day_remove, or reword one by its id, before adding more"
+                "{MAX_PENDING} triggers already wait; take some off with wake_remove, or reword one by its id, before adding more"
             )));
         }
         if let Some(allowance) = allowance(conn, lay.config_dir, lay.username, lay.user_id, date)
@@ -1258,7 +1265,7 @@ fn not_about(context: &str, event_id: i64) -> String {
 /// wait would only double.
 fn laid_a_wake(out: &crate::agent::SessionOutcome) -> bool {
     out.steps.iter().any(|s| {
-        !s.is_error && s.name == "day_save" && s.result.contains("\"id\":\"e")
+        !s.is_error && s.name == "wake_save" && s.result.contains("\"id\":\"e")
     })
 }
 
@@ -1789,7 +1796,7 @@ mod tests {
         let eleven = lay(&conn, &lay_at(&tmp, uid, "11:00")).unwrap().event_id;
         let noon = lay(&conn, &lay_at(&tmp, uid, "11:40")).unwrap().event_id;
         let utc = jiff::tz::TimeZone::UTC;
-        let found = |ts: &str| near(&conn, uid, &utc, at(ts)).unwrap().map(|n| n.event_id);
+        let found = |ts: &str| near(&conn, uid, &utc, at(ts), None, None).unwrap().map(|n| n.event_id);
         assert_eq!(found("2026-09-17T11:15:00Z"), Some(eleven));
         assert_eq!(found("2026-09-17T11:25:00Z"), Some(noon));
         assert_eq!(found("2026-09-17T12:01:00Z"), None);

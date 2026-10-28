@@ -402,7 +402,7 @@ pub fn notes_heading(l: Lang, stale: bool, date: &str, ago: &str) -> String {
 }
 
 pub fn working_memory_heading(l: Lang) -> &'static str {
-    l.of("# Working memory\n\n", "# 作業メモ\n\n")
+    l.of("# Working memory (note_save, note_remove)\n\n", "# 作業メモ (note_save、note_remove)\n\n")
 }
 
 pub fn coming_up(l: Lang) -> &'static str {
@@ -427,11 +427,11 @@ pub fn settings(l: Lang, name: &str, factor: Option<(f64, i64)>, budget: Option<
     let budget = budget.map(|(spent, allowance)| match l {
         Lang::En => format!(
             "Wake-ups you may lay today: {spent} of {allowance} used; to exceed it, ask the user and \
-             pass extra_wakes with day_save only after they agree\n"
+             pass extra_wakes with wake_save only after they agree\n"
         ),
         Lang::Ja => format!(
             "今日置ける目覚め: {allowance}件中{spent}件使用済み。超えるなら先にユーザーに聞き、\
-             同意を得てから day_save に extra_wakes を付ける\n"
+             同意を得てから wake_save に extra_wakes を付ける\n"
         ),
     });
     let budget = budget.unwrap_or_default();
@@ -489,8 +489,8 @@ pub fn title_assistant(l: Lang) -> &'static str {
 
 pub fn notes_to_settle(l: Lang) -> &'static str {
     l.of(
-        "\n\nWorking notes due to settle tonight, each with memory_save or memory_remove (id: title):\n",
-        "\n\n今夜 memory_save か memory_remove で一つずつ片付ける作業メモ（id: 内容）:\n",
+        "\n\nWorking notes due to settle tonight, each with memory_save (by id, with a kind) or note_remove (id: title):\n",
+        "\n\n今夜 memory_save（id と kind 付き）か note_remove で一つずつ片付ける作業メモ（id: 内容）:\n",
     )
 }
 
@@ -748,11 +748,11 @@ pub fn also_due(l: Lang, prompts: &[String]) -> String {
 pub fn lay_day_prompt(l: Lang) -> &'static str {
     l.of(
         "The user's day has begun. Lay the day: check today's order and set it if the night left \
-         it empty or wrong, then lay 4 to 8 wake-ups as day_save wake items, each tied to a moment — \
+         it empty or wrong, then lay 4 to 8 wake-ups with wake_save, each tied to a moment — \
          just after a work session's planned end, before and after calendar events, midday, late \
          afternoon. Then stay quiet unless something needs the user now.",
         "ユーザーの一日が始まりました。一日を組んでください: 今日の順番を確かめ、夜のうちに空か\
-         ずれていれば決め、day_save の wake で目覚めを4〜8個、それぞれある瞬間に結びつけて置く — \
+         ずれていれば決め、wake_save で目覚めを4〜8個、それぞれある瞬間に結びつけて置く — \
          作業セッションの予定の終わりの直後、カレンダーの予定の前後、昼、夕方。そのあと、今\
          ユーザーに必要なことがなければ黙る。",
     )

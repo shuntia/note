@@ -1,5 +1,6 @@
 //! `memory_find`, `memory_save` and `memory_remove`: the user's long-term
-//! memory and Note's working notes, which are memory files of kind `note`.
+//! memory; `note_save` and `note_remove`: Note's working notes, which are
+//! memory files of kind `note`.
 
 use super::loose::{self, Envelope, Obj, Ref};
 use super::{ToolCtx, ToolError};
@@ -31,6 +32,10 @@ const TITLE: &[&str] = &["title", "summary", "name", "text"];
 const BODY: &[&str] = &["body", "content", "details", "description"];
 const KIND: &[&str] = &["kind", "category", "type"];
 const WHEN_FORMS: &str = "a note's from and until are YYYY-MM-DDTHH:MM, HH:MM or a day";
+const NOTES_IN_CONTEXT: &str = "working notes are in your context already; note_save and note_remove change them";
+const NOTE_SHAPE: &str = r#"{"title":"Ask how the interview went","until":"2026-11-02"}"#;
+const LONG_NOTE: &str = "a note is one line of at most 160 characters; memory_save keeps longer text";
+const NOTE_BODY: &str = "a note is one line, its title; memory_save keeps longer text";
 
 fn internal(e: impl std::fmt::Display) -> ToolError {
     ToolError::internal(e.to_string())
@@ -44,17 +49,6 @@ fn kind_of(v: &Value) -> Option<&'static str> {
 enum Found {
     Note(notes::Note),
     Fact(MemoryFile),
-}
-
-fn note_row(n: &notes::Note) -> Value {
-    let mut row = json!({ "id": notes::short(&n.id), "kind": NOTE, "title": n.title });
-    if let Some(f) = &n.from {
-        row["from"] = f.clone().into();
-    }
-    if let Some(u) = &n.until {
-        row["until"] = u.clone().into();
-    }
-    row
 }
 
 fn fact_row(f: &MemoryFile) -> Value {
@@ -71,12 +65,6 @@ fn fact_row(f: &MemoryFile) -> Value {
     row
 }
 
-fn found_row(f: &Found) -> Value {
-    match f {
-        Found::Note(n) => note_row(n),
-        Found::Fact(f) => fact_row(f),
-    }
-}
 
 /// The memory or note `raw` names: a whole id, a note's short id, or an exact
 /// title; or why there is none.
@@ -137,12 +125,7 @@ fn resolve(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Result<Found, 
     })
 }
 
-fn words_match(title: &str, query: &str) -> bool {
-    let have = loose::fold(title);
-    query.split_whitespace().map(str::to_lowercase).any(|w| have.contains(&w))
-}
-
-/// `memory_find`: memories and notes by id, ranked by a query, or the newest.
+/// `memory_find`: memories by id, ranked by a query, or the newest.
 pub fn find(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolError> {
     let mut o = Obj::new(loose::args(raw)?);
     let mut warnings: Vec<String> = Vec::new();
@@ -171,13 +154,10 @@ pub fn find(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolEr
     }
     let mut out = if ids.is_empty() {
         let items: Vec<Value> = match (kind, &query) {
-            (Some(NOTE), q) => notes::all(conn, ctx.data_dir, ctx.username)
-                .map_err(internal)?
-                .iter()
-                .filter(|n| q.as_deref().is_none_or(|q| words_match(&n.title, q)))
-                .take(limit as usize)
-                .map(note_row)
-                .collect(),
+            (Some(NOTE), _) => {
+                warnings.push(NOTES_IN_CONTEXT.into());
+                Vec::new()
+            }
             (_, Some(q)) => {
                 let take = if kind.is_some() { 50 } else { limit };
                 memory::query(conn, ctx.username, q, take, ctx.vectors.query.as_deref())
@@ -194,11 +174,8 @@ pub fn find(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolEr
                 .map(|h| json!({ "id": h.id, "kind": h.category, "title": h.summary }))
                 .collect(),
         };
-        if items.is_empty() {
-            warnings.push(match kind {
-                Some(NOTE) => "no note matched".to_string(),
-                _ => "nothing matched; working notes are found with kind note".to_string(),
-            });
+        if items.is_empty() && kind != Some(NOTE) {
+            warnings.push("nothing matched".to_string());
         }
         json!({ "total": items.len(), "items": items })
     } else {
@@ -209,7 +186,8 @@ pub fn find(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolEr
                 continue;
             };
             match resolve(conn, ctx, &s)? {
-                Ok(found) => items.push(found_row(&found)),
+                Ok(Found::Note(n)) => warnings.push(format!("{} is a working note; {NOTES_IN_CONTEXT}", notes::short(&n.id))),
+                Ok(Found::Fact(f)) => items.push(fact_row(&f)),
                 Err(why) => warnings.push(why),
             }
         }
@@ -406,29 +384,26 @@ impl Writer<'_> {
                 }
                 Ok(Found::Note(n)) => match item.kind {
                     Some(k) if k != NOTE => self.settle(r, &n, k, item),
-                    _ => self.change_note(r, &n, item),
+                    _ => {
+                        self.env.refused(r, format!("{} is a working note; note_save changes it", notes::short(&n.id)));
+                        Ok(())
+                    }
                 },
                 Ok(Found::Fact(f)) => self.change_fact(r, &f, item, vector),
             };
         }
-        let kind = match item.kind {
-            None if item.from.is_some() => {
-                self.env.adjusted(Some(r), "kind", NOTE.into(), "from belongs to working notes");
-                NOTE
+        match item.kind {
+            Some(NOTE) => {
+                self.env.refused(r, format!("working notes go in note_save, like {NOTE_SHAPE}"));
+                Ok(())
             }
-            None => "semantic",
-            Some(k) => k,
-        };
-        if kind == NOTE {
-            self.add_note(r, item, vector.as_deref())
-        } else {
-            self.add_fact(r, kind, item, vector.as_deref())
+            kind => self.add_fact(r, kind.unwrap_or("semantic"), item, vector.as_deref()),
         }
     }
 
     fn add_fact(&mut self, r: &Ref, kind: &str, item: Item, vector: Option<&[f32]>) -> Result<(), ToolError> {
         if item.from.is_some() {
-            self.env.ignored(Some(r), "from", "from belongs to working notes");
+            self.env.ignored(Some(r), "from", "from belongs to working notes, saved with note_save");
         }
         let title = match (item.title, &item.body) {
             (Some(t), _) => t,
@@ -451,16 +426,17 @@ impl Writer<'_> {
         Ok(())
     }
 
-    fn add_note(&mut self, r: &Ref, item: Item, vector: Option<&[f32]>) -> Result<(), ToolError> {
+    fn add_note(&mut self, r: &Ref, item: Item) -> Result<(), ToolError> {
         let Some(title) = item.title.clone() else {
             self.env.refused(r, "a note needs a title: one short line");
             return Ok(());
         };
-        let long = title.chars().count() > notes::MAX_TITLE_CHARS;
-        if long || item.body.as_ref().is_some_and(|b| !b.trim().is_empty()) {
-            let why = if long { "a note is at most 160 characters, so it was kept as a memory" } else { "a note is one line, so one with a body was kept as a memory" };
-            self.env.adjusted(Some(r), "kind", "semantic".into(), why);
-            return self.add_fact(r, "semantic", Item { from: None, ..item }, vector);
+        if title.chars().count() > notes::MAX_TITLE_CHARS {
+            self.env.refused(r, LONG_NOTE);
+            return Ok(());
+        }
+        if item.body.as_ref().is_some_and(|b| !b.trim().is_empty()) {
+            self.env.ignored(Some(r), "body", NOTE_BODY);
         }
         if self.ctx.task_scope.is_some() {
             self.env.refused(r, "this session reaches its own task alone");
@@ -505,10 +481,10 @@ impl Writer<'_> {
 
     fn change_note(&mut self, r: &Ref, n: &notes::Note, item: Item) -> Result<(), ToolError> {
         if item.body.as_ref().is_some_and(|b| !b.trim().is_empty()) {
-            self.env.ignored(Some(r), "body", "a note is one line; give kind semantic to keep it as a memory");
+            self.env.ignored(Some(r), "body", NOTE_BODY);
         }
         if item.title.as_ref().is_some_and(|t| t.chars().count() > notes::MAX_TITLE_CHARS) {
-            self.env.refused(r, "a note is at most 160 characters; give kind semantic to keep the whole text as a memory");
+            self.env.refused(r, LONG_NOTE);
             return Ok(());
         }
         let until = self.note_until(r, item.until.as_deref(), &item.there);
@@ -525,7 +501,7 @@ impl Writer<'_> {
 
     fn settle(&mut self, r: &Ref, n: &notes::Note, kind: &str, item: Item) -> Result<(), ToolError> {
         if item.from.is_some() {
-            self.env.ignored(Some(r), "from", "from belongs to working notes");
+            self.env.ignored(Some(r), "from", "from belongs to working notes, saved with note_save");
         }
         let (title, body) = match item.title {
             Some(t) => {
@@ -559,7 +535,7 @@ impl Writer<'_> {
             self.env.ignored(Some(r), "kind", "a memory keeps its kind; to move it, save a new one with supersedes");
         }
         if item.from.is_some() {
-            self.env.ignored(Some(r), "from", "from belongs to working notes");
+            self.env.ignored(Some(r), "from", "from belongs to working notes, saved with note_save");
         }
         let until = self.fact_until(r, item.until.as_deref());
         let (title, body) = match item.title {
@@ -696,16 +672,88 @@ pub fn remove(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, Tool
         };
         match resolve(conn, ctx, &named)? {
             Err(why) => env.refused(&r, why),
-            Ok(Found::Note(n)) => match notes::remove(conn, ctx.data_dir, ctx.username, &n.id) {
-                Ok(()) => env.removed.push(json!({ "id": notes::short(&n.id), "title": n.title, "kind": NOTE })),
-                Err(NoteError::Other(e)) => return Err(internal(e)),
-                Err(e) => env.refused(&r, e.to_string()),
-            },
+            Ok(Found::Note(n)) => env.refused(&r, format!("{} is a working note; note_remove deletes it", notes::short(&n.id))),
             Ok(Found::Fact(f)) if f.archived => env.warn(format!("memory {} was already archived", f.id)),
             Ok(Found::Fact(f)) => {
                 memory::archive(conn, ctx.data_dir, ctx.username, &f.id).map_err(internal)?;
                 env.removed.push(json!({ "id": f.id, "title": f.summary, "kind": f.category }));
             }
+        }
+    }
+    Ok(env.into_value())
+}
+
+/// `note_save`: working notes made or changed, from the call's own fields or a
+/// short `items` list.
+pub fn note_save(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolError> {
+    let mut o = Obj::new(loose::args(raw)?);
+    let mut w = Writer { conn, ctx, env: Envelope::default(), tz: super::task_ops::user_tz(ctx) };
+    let items = if o.has(&["items", "notes", "list"]) {
+        let (items, warning) = loose::items(&mut o, ITEMS, &["notes", "list"], &["title", "id", "from", "until"]);
+        if let Some(warning) = warning {
+            w.env.warn(warning);
+        }
+        for field in o.rest() {
+            w.env.ignored(None, &field, "with items, each note's fields go in its item");
+        }
+        items
+    } else {
+        let rest = o.into_map();
+        if rest.is_empty() { Vec::new() } else { vec![Value::Object(rest)] }
+    };
+    if items.is_empty() {
+        w.env.refuse_call(format!("nothing was saved: a note is a title, like {NOTE_SHAPE}; to change one, give its id"));
+        return Ok(w.env.into_value());
+    }
+    for (i, v) in items.into_iter().enumerate() {
+        let r = Ref::top(i);
+        let Some(mut item) = w.read(&r, v) else { continue };
+        if item.kind.is_some_and(|k| k != NOTE) {
+            w.env.ignored(Some(&r), "kind", "a note has no kind; memory_save keeps memories");
+        }
+        item.kind = Some(NOTE);
+        if item.supersedes.take().is_some() {
+            w.env.ignored(Some(&r), "supersedes", "a note is changed by its id");
+        }
+        let Some(id) = item.id.clone() else {
+            w.add_note(&r, item)?;
+            continue;
+        };
+        match resolve(conn, ctx, &id)? {
+            Ok(Found::Note(n)) => w.change_note(&r, &n, item)?,
+            Ok(Found::Fact(f)) => w.env.refused(&r, format!("{} is a memory, not a note; memory_save changes it", f.id)),
+            Err(why) => w.env.refused(&r, why),
+        }
+    }
+    Ok(w.env.into_value())
+}
+
+/// `note_remove`: working notes deleted by id.
+pub fn note_remove(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolError> {
+    let mut obj = Obj::new(loose::args(raw)?);
+    let mut env = Envelope::default();
+    let ids = loose::ids(&mut obj, &["ids", "id", "note_ids", "note_id", "items"], &mut env);
+    for field in obj.rest() {
+        env.ignored(None, &field, "not a note_remove field");
+    }
+    if ids.is_empty() {
+        loose::nothing_removed(&mut env);
+        return Ok(env.into_value());
+    }
+    for (i, value) in ids.into_iter().enumerate() {
+        let r = Ref::top(i);
+        let Some(named) = loose::text(&value).or_else(|| value.get("id").and_then(loose::text)) else {
+            env.refused(&r, "an id is a note's short id or its exact title");
+            continue;
+        };
+        match resolve(conn, ctx, &named)? {
+            Err(why) => env.refused(&r, why),
+            Ok(Found::Fact(f)) => env.refused(&r, format!("{} is a memory, not a note; memory_remove archives it", f.id)),
+            Ok(Found::Note(n)) => match notes::remove(conn, ctx.data_dir, ctx.username, &n.id) {
+                Ok(()) => env.removed.push(json!({ "id": notes::short(&n.id), "title": n.title })),
+                Err(NoteError::Other(e)) => return Err(internal(e)),
+                Err(e) => env.refused(&r, e.to_string()),
+            },
         }
     }
     Ok(env.into_value())
@@ -788,46 +836,57 @@ mod tests {
     #[test]
     fn a_note_is_added_kept_reworded_and_removed() {
         let (conn, tmp) = env();
-        let out = talk(&conn, &tmp, "memory_save", json!({"items": [{"kind": "note", "title": "  call the bank\nbefore five ", "until": "2026-10-07T17:00"}]}));
+        let out = talk(&conn, &tmp, "note_save", json!({"title": "  call the bank\nbefore five ", "until": "2026-10-07T17:00"}));
         let note = id(&out, 0);
         assert_eq!(note.len(), crate::notes::SHORT_ID);
         assert_eq!(notes(&conn, &tmp)[0].title, "call the bank before five");
         assert_eq!(notes(&conn, &tmp)[0].until.as_deref(), Some("2026-10-07T17:00:00+09:00"));
-        let out = talk(&conn, &tmp, "memory_save", json!({"items": [{"id": note}]}));
+        let out = talk(&conn, &tmp, "note_save", json!({"id": note}));
         assert_eq!(out["saved"][0]["op"], "kept");
-        talk(&conn, &tmp, "memory_save", json!({"items": [{"id": note, "title": "call the bank", "until": ""}]}));
+        talk(&conn, &tmp, "note_save", json!({"items": [{"id": note, "title": "call the bank", "until": ""}]}));
         assert_eq!((notes(&conn, &tmp)[0].title.as_str(), notes(&conn, &tmp)[0].until.clone()), ("call the bank", None));
         let found = talk(&conn, &tmp, "memory_find", json!({"kind": "note"}));
-        assert_eq!(found["items"][0]["id"], note.as_str());
+        assert!(found["warnings"][0].as_str().unwrap().contains("in your context"), "{found}");
         assert_eq!(talk(&conn, &tmp, "memory_find", json!({"query": "bank"}))["total"], 0, "notes stay out of a plain search");
-        let out = talk(&conn, &tmp, "memory_remove", json!({"ids": [note]}));
-        assert_eq!(out["removed"][0]["kind"], "note");
+        let refused = talk(&conn, &tmp, "memory_remove", json!({"ids": [note]}));
+        assert!(refused["refused"][0]["why"].as_str().unwrap().contains("note_remove"), "{refused}");
+        let out = talk(&conn, &tmp, "note_remove", json!({"ids": [note]}));
+        assert_eq!(out["removed"][0]["title"], "call the bank");
         assert!(notes(&conn, &tmp).is_empty());
     }
 
     #[test]
     fn a_note_added_again_by_title_is_the_same_note() {
         let (conn, tmp) = env();
-        let first = id(&talk(&conn, &tmp, "memory_save", json!({"items": [{"kind": "note", "title": "Call the bank"}]})), 0);
-        let out = talk(&conn, &tmp, "memory_save", json!({"items": [{"kind": "note", "title": "call the bank."}]}));
+        let first = id(&talk(&conn, &tmp, "note_save", json!({"title": "Call the bank"})), 0);
+        let out = talk(&conn, &tmp, "note_save", json!({"title": "call the bank."}));
         assert_eq!((id(&out, 0), out["saved"][0]["matched"].as_str(), out["saved"][0]["op"].as_str()), (first, Some("title"), Some("kept")));
-        talk(&conn, &tmp, "memory_save", json!({"items": [{"kind": "note", "title": "call the bank", "new": true}]}));
+        talk(&conn, &tmp, "note_save", json!({"title": "call the bank", "new": true}));
         assert_eq!(notes(&conn, &tmp).len(), 2);
     }
 
     #[test]
-    fn a_note_too_long_or_with_a_body_is_kept_as_a_memory() {
+    fn notes_and_memories_each_keep_to_their_own_tools() {
         let (conn, tmp) = env();
-        let out = talk(&conn, &tmp, "memory_save", json!({"items": [{"kind": "note", "title": "x ".repeat(100)}, {"kind": "note", "title": "pin", "body": "4321"}]}));
-        assert_eq!(out["adjusted"].as_array().unwrap().iter().filter(|a| a["field"] == "kind").count(), 2, "{out}");
-        assert!(notes(&conn, &tmp).is_empty());
-        assert_eq!(out["saved"][1]["kind"], "semantic");
+        let out = talk(&conn, &tmp, "note_save", json!({"items": [{"title": "x ".repeat(100)}, {"title": "pin", "body": "4321"}]}));
+        assert!(out["refused"][0]["why"].as_str().unwrap().contains("memory_save"), "{out}");
+        assert_eq!((out["ignored"][0]["field"].as_str(), out["saved"][0]["title"].as_str()), (Some("body"), Some("pin")), "{out}");
+        let sent = talk(&conn, &tmp, "memory_save", json!({"items": [{"kind": "note", "title": "milk"}]}));
+        assert!(sent["refused"][0]["why"].as_str().unwrap().contains("note_save"), "{sent}");
+        let pin = id(&out, 0);
+        let changed = talk(&conn, &tmp, "memory_save", json!({"items": [{"id": pin, "title": "pin 1234"}]}));
+        assert!(changed["refused"][0]["why"].as_str().unwrap().contains("note_save"), "{changed}");
+        let fact = id(&talk(&conn, &tmp, "memory_save", json!({"items": [{"title": "likes tea"}]})), 0);
+        let wrong = talk(&conn, &tmp, "note_save", json!({"id": fact, "title": "likes coffee"}));
+        assert!(wrong["refused"][0]["why"].as_str().unwrap().contains("memory_save"), "{wrong}");
+        assert!(talk(&conn, &tmp, "note_remove", json!({"ids": [fact]}))["refused"][0]["why"].as_str().unwrap().contains("memory_remove"));
+        assert_eq!(talk(&conn, &tmp, "note_save", json!({}))["ok"], false);
     }
 
     #[test]
     fn a_note_given_a_long_term_kind_settles_into_that_memory() {
         let (conn, tmp) = env();
-        let note = id(&talk(&conn, &tmp, "memory_save", json!({"items": [{"kind": "note", "title": "prefers short check-ins"}]})), 0);
+        let note = id(&talk(&conn, &tmp, "note_save", json!({"title": "prefers short check-ins"})), 0);
         let out = run(&conn, &tmp, SessionKind::Nightly, "memory_save", json!({"items": [{"id": note, "kind": "procedural"}]}));
         assert_eq!(out["saved"][0]["settled"], note.as_str());
         let f = crate::memory::read(tmp.path(), USER, &id(&out, 0)).unwrap().unwrap();
@@ -842,7 +901,8 @@ mod tests {
         let out = talk(&conn, &tmp, "memory_remove", json!({"ids": ["mira lives next door"]}));
         assert_eq!(out["removed"][0]["id"], fact.as_str());
         assert!(crate::memory::read(tmp.path(), USER, &fact).unwrap().unwrap().archived);
-        talk(&conn, &tmp, "memory_save", json!({"items": [{"title": "Essay"}, {"kind": "note", "title": "essay"}]}));
+        talk(&conn, &tmp, "memory_save", json!({"items": [{"title": "Essay"}]}));
+        talk(&conn, &tmp, "note_save", json!({"title": "essay"}));
         let out = talk(&conn, &tmp, "memory_remove", json!({"ids": ["Essay"]}));
         let why = out["refused"][0]["why"].as_str().unwrap();
         assert!(why.contains("note ") && why.contains("semantic "), "candidates name their kind: {why}");
@@ -858,13 +918,13 @@ mod tests {
         let out = talk(&conn, &tmp, "memory_save", json!({"items": [{"title": "likes coffee", "body": "black", "supersedes": tea}]}));
         assert_eq!(out["saved"][0]["supersedes"], tea.as_str());
         assert_eq!(talk(&conn, &tmp, "memory_find", json!({"query": "coffee"}))["items"][0]["title"], "likes coffee");
-        let note = id(&talk(&conn, &tmp, "memory_save", json!({"items": [{"kind": "note", "title": "flight home", "until": "2026-10-07T17:00", "tz": "America/New_York"}]})), 0);
+        let note = id(&talk(&conn, &tmp, "note_save", json!({"title": "flight home", "until": "2026-10-07T17:00", "tz": "America/New_York"})), 0);
         assert_eq!(notes(&conn, &tmp)[0].until.as_deref(), Some("2026-10-08T06:00:00+09:00"));
-        assert_eq!(talk(&conn, &tmp, "memory_save", json!({"items": [{"id": note}]}))["saved"][0]["op"], "kept");
+        assert_eq!(talk(&conn, &tmp, "note_save", json!({"id": note}))["saved"][0]["op"], "kept");
         let out = run(&conn, &tmp, SessionKind::Nightly, "memory_save", json!({"items": [{"id": note, "kind": "episodic"}]}));
         assert_eq!(out["saved"][0]["kind"], "episodic", "{out}");
-        let other = id(&talk(&conn, &tmp, "memory_save", json!({"items": [{"kind": "note", "title": "milk"}]})), 0);
-        assert_eq!(talk(&conn, &tmp, "memory_remove", json!({"ids": [other]}))["removed"][0]["title"], "milk");
+        let other = id(&talk(&conn, &tmp, "note_save", json!({"title": "milk"})), 0);
+        assert_eq!(talk(&conn, &tmp, "note_remove", json!({"ids": [other]}))["removed"][0]["title"], "milk");
     }
 
     #[test]

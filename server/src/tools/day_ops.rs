@@ -1,6 +1,6 @@
 //! `day_find`, `day_save` and `day_remove`: the day as one list of task items,
-//! wake-ups, routines and calendar events, and the old plan, order, schedule
-//! and trigger tools read as calls of them.
+//! routines and calendar events; `wake_find`, `wake_save` and `wake_remove`:
+//! the wake-ups laid on it and the days ahead.
 
 use super::loose::{self, Envelope, Obj, Ref, Target, When};
 use super::{SessionKind, ToolCtx, ToolError};
@@ -15,7 +15,7 @@ const MAX_DAYS_AHEAD: i64 = 14;
 const DEFAULT_BLOCK_MIN: i64 = 25;
 const MAX_FIND_DAYS: i64 = 7;
 const LISTED_WAKES: usize = 20;
-const LATER_WAKE_DAYS: i64 = 5;
+const MAX_WAKES_FOUND: usize = 100;
 const MAX_KIND_CHARS: usize = 60;
 const MAX_ROUTINE_CHARS: usize = 100;
 const MAX_WINDOW_MIN: i64 = 720;
@@ -31,6 +31,10 @@ const ELSEWHERE: &[(&str, &str)] = &[
     ("days", "calendar_save"),
     ("until", "calendar_save"),
     ("quiet", "calendar_save"),
+    ("ring", "wake_save"),
+    ("cancel_on", "wake_save"),
+    ("note", "wake_save"),
+    ("session_check", "wake_save"),
 ];
 
 const ITEM_FIELDS: &[&str] = &["task", "task_id", "wake", "prompt", "routine", "at", "time", "before", "snooze_min"];
@@ -207,13 +211,6 @@ pub fn find(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> R
             out["quiet_now"] = json!({ "title": q.title, "until": q.end });
         }
     }
-    if ctx.share.is_none() {
-        let last = date.checked_add(jiff::Span::new().days(days - 1)).map_err(internal)?;
-        let later = later_wake_days(conn, ctx.user_id, last).map_err(internal)?;
-        if !later.is_empty() {
-            out["later_wake_days"] = later.into();
-        }
-    }
     if !warnings.is_empty() {
         out["warnings"] = warnings.into();
     }
@@ -245,13 +242,16 @@ struct Rendered {
 }
 
 impl Rendered {
+    /// The day without its wake-ups, which only count here; `wake_find` lists them.
     fn into_value(self) -> Value {
-        let mut v = json!({ "total": self.items.len(), "items": self.items });
+        let (wakes, items): (Vec<Value>, Vec<Value>) = self.items.into_iter().partition(|i| i["kind"] == "wake");
+        let mut v = json!({ "total": items.len(), "items": items });
         if !self.free.is_empty() {
             v["free"] = self.free.into();
         }
-        if self.wakes_not_shown > 0 {
-            v["wakes_not_shown"] = self.wakes_not_shown.into();
+        let waiting = wakes.iter().filter(|w| matches!(w["status"].as_str(), Some("pending" | "snoozed"))).count() + self.wakes_not_shown;
+        if waiting > 0 {
+            v["wakes_waiting"] = waiting.into();
         }
         v
     }
@@ -362,13 +362,7 @@ fn render(conn: &Connection, ctx: &ToolCtx, date: Date) -> Result<Rendered, Tool
                 v["ring"] = true.into();
             }
             if let Some(c) = cancel_if {
-                v["cancel_on"] = match c.as_str() {
-                    "replied" => "reply",
-                    "task_done" => "task",
-                    "event_decided" => "event",
-                    other => other,
-                }
-                .into();
+                v["cancel_on"] = cancel_label(&c).into();
             }
             if session.is_some() {
                 v["session_check"] = true.into();
@@ -410,21 +404,6 @@ fn render(conn: &Connection, ctx: &ToolCtx, date: Date) -> Result<Rendered, Tool
         .map(|w| json!({ "at": w.start_wall(), "end": w.end_wall() }))
         .collect();
     Ok(Rendered { items: keyed.into_iter().map(|(_, v)| v).collect(), free, wakes_not_shown })
-}
-
-/// The next few days past `date` that hold a pending wake-up, with how many.
-fn later_wake_days(conn: &Connection, user_id: i64, date: Date) -> rusqlite::Result<Vec<Value>> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT p.date, COUNT(*) FROM events e JOIN plans p ON p.id = e.plan_id
-         WHERE p.user_id = ?1 AND e.kind = ?2 AND e.status IN ('pending', 'snoozed') AND p.date > ?3
-         GROUP BY p.date ORDER BY p.date LIMIT ?4",
-    )?;
-    let days = stmt
-        .query_map((user_id, triggers::KIND, date.to_string(), LATER_WAKE_DAYS), |r| {
-            Ok(json!({ "date": r.get::<_, String>(0)?, "wakes": r.get::<_, i64>(1)? }))
-        })?
-        .collect();
-    days
 }
 
 // --- day_save ---
@@ -974,9 +953,13 @@ impl<'a> Day<'a> {
             now: self.now,
         };
         let near = match triggers::aimed_at(&lay) {
-            Ok(target) => triggers::near(self.conn, self.ctx.user_id, &self.tz, target).map_err(internal)?,
+            Ok(target) => triggers::near(self.conn, self.ctx.user_id, &self.tz, target, thread, None).map_err(internal)?,
             Err(_) => None,
         };
+        if let Some(twin) = near.as_ref().filter(|n| n.apart == 0 && n.conversation_id == thread) {
+            self.env.refused(r, twin_refusal(twin));
+            return Ok(());
+        }
         let laid = match triggers::lay(self.conn, &lay) {
             Ok(l) => l,
             Err(e) => {
@@ -995,8 +978,8 @@ impl<'a> Day<'a> {
         }
         if let Some(n) = near {
             self.env.warn(format!(
-                "wake-up e{} is already laid for {} {} ({:?}), within {} minutes of the new e{} at {}; keep both, reword one, or take one off with day_remove",
-                n.event_id, n.date, n.at, n.prompt, triggers::NEAR_MIN, laid.event_id, laid.at
+                "e{} is already at {} {}: {:?}, {} minutes from the new e{} at {}; keep both only if they check different things, else change one by id or take one off with wake_remove",
+                n.event_id, n.date, n.at, excerpt(&n.prompt), n.apart, laid.event_id, laid.at
             ));
         }
         let landed: String = self
@@ -1021,7 +1004,7 @@ impl<'a> Day<'a> {
         match e {
             Refusal::CapReached { date, allowance, spent } => {
                 if self.kind == SessionKind::Talk {
-                    format!("{spent} of {date}'s {allowance} wake-ups are laid; ask the user, and once they agree pass extra_wakes {{n, reason}} with day_save")
+                    format!("{spent} of {date}'s {allowance} wake-ups are laid; ask the user, and once they agree pass extra_wakes {{n, reason}} with wake_save")
                 } else {
                     format!("{spent} of {date}'s {allowance} wake-ups are laid; only the user can raise that, in a chat")
                 }
@@ -1055,6 +1038,22 @@ impl<'a> Day<'a> {
                 }
                 At::Untimed => (e.date, e.wall.clone()),
             };
+            let twin = match crate::zone::instant(&self.tz, date, &w) {
+                Some(target) if (date, w.as_str()) != (e.date, e.wall.as_str()) => {
+                    let thread: Option<i64> = self
+                        .conn
+                        .query_row("SELECT conversation_id FROM events WHERE id = ?1", [e.id], |x| x.get(0))
+                        .map_err(internal)?;
+                    triggers::near(self.conn, self.ctx.user_id, &self.tz, target, thread, Some(e.id))
+                        .map_err(internal)?
+                        .filter(|n| n.apart == 0 && n.conversation_id == thread)
+                }
+                _ => None,
+            };
+            if let Some(twin) = twin {
+                self.env.refused(r, twin_refusal(&twin));
+                return Ok(());
+            }
             if self.gone_by(date, &w) {
                 self.ignore(r, "at", format!("{date} {w} has gone by; it stays at {}", e.wall));
             } else if (date, w.clone()) != (e.date, e.wall.clone()) {
@@ -1344,7 +1343,8 @@ impl<'a> Day<'a> {
         };
         if let Some(e) = resolved_event {
             if e.is_wake() {
-                return self.wake(r, e.date, Some(&e), wake, o, zone.as_ref());
+                self.env.refused(r, format!("e{} is a wake-up; change it with wake_save and its id", e.id));
+                return Ok(());
             }
             if let Some(t) = e.task {
                 let at = o.take(&["at", "time", "start", "when"]);
@@ -1362,10 +1362,8 @@ impl<'a> Day<'a> {
             return self.rework_routine(r, &e, at, snooze, minutes, flexibility.as_deref(), zone.as_ref());
         }
         if wake.is_some() || hint.as_deref().is_some_and(|h| matches!(h, "wake" | "trigger" | "reminder")) {
-            if let Some(t) = task {
-                o = with(o, "task", t);
-            }
-            return self.wake(r, date, None, wake, o, zone.as_ref());
+            self.env.refused(r, format!("wake-ups go in wake_save, like {WAKE_SHAPE}"));
+            return Ok(());
         }
         if let Some(name) = routine {
             return self.routine(r, date, &name, o, zone.as_ref());
@@ -1459,10 +1457,14 @@ fn is_end(s: &str) -> bool {
     matches!(s.trim().to_lowercase().as_str(), "end" | "last" | "bottom")
 }
 
-fn with(o: Obj, key: &str, v: Value) -> Obj {
-    let mut m = o.into_map();
-    m.insert(key.into(), v);
-    Obj::new(m)
+fn twin_refusal(twin: &triggers::Near) -> String {
+    format!(
+        "e{} is already at {} {}: {:?}; change it by id instead of laying another",
+        twin.event_id,
+        twin.date,
+        twin.at,
+        excerpt(&twin.prompt)
+    )
 }
 
 fn excerpt(s: &str) -> String {
@@ -1502,16 +1504,15 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> R
     let zone = day.zone(None, zone_v);
     let replace = o.take(&["replace", "replace_all"]).and_then(|v| loose::boolean(&v)).unwrap_or(false);
     let carry = o.take(&["carry", "carry_over", "carry_rest"]).and_then(|v| loose::boolean(&v)).unwrap_or(false);
-    let extra = o.take(&["extra_wakes", "extra", "budget"]);
-    let (items, warning) = loose::items(&mut o, "items", &["tasks", "order", "list", "entries", "events", "blocks", "wakes", "task_ids", "plan"], ITEM_FIELDS);
+    if o.take(&["extra_wakes", "extra", "budget"]).is_some() {
+        day.env.refuse_call(format!("extra_wakes goes with wake_save, like {EXTRA_SHAPE}"));
+    }
+    let (items, warning) = loose::items(&mut o, "items", &["tasks", "order", "list", "entries", "events", "blocks", "task_ids", "plan"], ITEM_FIELDS);
     if let Some(w) = warning {
         day.env.warn(w);
     }
     for field in o.rest() {
         day.env.ignored(None, &field, loose::unknown(&field, ELSEWHERE));
-    }
-    if let Some(v) = extra {
-        raise(&mut day, top, &v)?;
     }
     if carry {
         if kind == SessionKind::Nightly {
@@ -1526,12 +1527,13 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> R
         }
     }
     if items.is_empty() && !replace && !carry && day.env.saved.is_empty() {
-        let gated = |i: &Value| i.get("ref").is_none() && matches!(i["field"].as_str(), Some("extra_wakes" | "carry"));
-        if day.env.ignored.is_empty() {
+        let gated = |i: &Value| i.get("ref").is_none() && i["field"] == "carry";
+        if !day.env.refused.is_empty() {
+        } else if day.env.ignored.is_empty() {
             day.env.refuse_call(
-                r#"nothing was saved: items was empty. items is a list, like [{"wake":"check the essay is sent","at":"18:30","cancel_on":"reply"}] or [{"task":12,"at":"19:00"}]"#,
+                r#"nothing was saved: items was empty. items is a list, like [{"task":12,"at":"19:00"}] or [{"routine":"stretch","at":"07:30"}]; wake-ups go in wake_save"#,
             );
-        } else if day.env.refused.is_empty() && !day.env.ignored.iter().all(gated) {
+        } else if !day.env.ignored.iter().all(gated) {
             day.env.refuse_call("nothing was saved: the day's items go in items, a list");
         }
         return Ok(day.env.into_value());
@@ -1544,6 +1546,194 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> R
         replace_list(&mut day, top, &placed)?;
     }
     log_lists(&day)?;
+    Ok(day.env.into_value())
+}
+
+const EXTRA_SHAPE: &str = r#"{"extra_wakes":{"n":2,"reason":"they asked for more check-ins today"}}"#;
+const WAKE_SHAPE: &str = r#"{"at":"18:30","note":"check the essay is sent","cancel_on":"reply"}"#;
+const WAKE_FIELDS: &[&str] = &["at", "note", "id", "date", "ring", "cancel_on", "task", "event", "session_check", "thread", "tz"];
+
+// --- wake_save ---
+
+/// `wake_save`: one wake-up per item, or the call's own fields as one.
+pub fn wake_save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> Result<Value, ToolError> {
+    super::task_query::unscoped(ctx)?;
+    let mut args = Obj::new(loose::args(raw)?);
+    let mut day = Day::new(conn, ctx, kind)?;
+    let today = super::trigger_ops::target_date(ctx, kind, day.now);
+    let extra = args.take(&["extra_wakes", "extra", "budget"]);
+    let listed = args.has(&["items", "wakes", "list"]);
+    let items = if listed {
+        let (items, warning) = loose::items(&mut args, "items", &["wakes", "list"], WAKE_FIELDS);
+        if let Some(w) = warning {
+            day.env.warn(w);
+        }
+        for field in args.rest() {
+            day.env.ignored(None, &field, "with items, each wake-up's fields go in its item");
+        }
+        items
+    } else {
+        let rest = args.into_map();
+        if rest.is_empty() { Vec::new() } else { vec![Value::Object(rest)] }
+    };
+    if let Some(v) = &extra {
+        let date = items
+            .first()
+            .and_then(|i| i.get("date"))
+            .and_then(|v| day_arg(v, day.today).ok())
+            .unwrap_or(today);
+        raise(&mut day, date, v)?;
+    }
+    if items.is_empty() {
+        if extra.is_none() {
+            day.env.refuse_call(format!("nothing was saved: a wake-up is at plus note, like {WAKE_SHAPE}; to change one, give its id"));
+        }
+        return Ok(day.env.into_value());
+    }
+    for (i, v) in items.into_iter().enumerate() {
+        let r = Ref::top(i);
+        let Value::Object(map) = v else {
+            day.env.refused(&r, format!("a wake-up is an object, like {WAKE_SHAPE}"));
+            continue;
+        };
+        let mut fields = Obj::new(map);
+        let date = match fields.take(&["date", "day", "on"]) {
+            Some(v) => match day_arg(&v, day.today) {
+                Ok(d) => d,
+                Err(why) => {
+                    day.ignore(&r, "date", format!("{why}; read as {today}"));
+                    today
+                }
+            },
+            None => today,
+        };
+        let zone_v = fields.take(&["tz", "timezone", "zone"]);
+        let zone = day.zone(Some(&r), zone_v);
+        let note = fields.take(&["note", "wake", "prompt", "text", "message", "reminder"]).and_then(|v| loose::text(&v));
+        let existing = match fields.take(&["id", "event_id", "wake_id"]) {
+            None => None,
+            Some(v) => {
+                let Some(ItemId::Event(n) | ItemId::Either(n)) = item_id(&v) else {
+                    day.env.refused(&r, "a wake-up's id is its e id from wake_find, like e88");
+                    continue;
+                };
+                match event(conn, ctx.user_id, n)? {
+                    Some(e) if e.is_wake() => Some(e),
+                    Some(e) => {
+                        day.env.refused(&r, format!("e{} is a routine, not a wake-up; day_save changes routines", e.id));
+                        continue;
+                    }
+                    None => {
+                        day.env.refused(&r, format!("no wake-up e{n} of this user's; wake_find lists them"));
+                        continue;
+                    }
+                }
+            }
+        };
+        let on = existing.as_ref().map_or(date, |e| e.date);
+        day.wake(&r, on, existing.as_ref(), note, fields, zone.as_ref())?;
+    }
+    Ok(day.env.into_value())
+}
+
+// --- wake_find ---
+
+/// `wake_find`: every wake-up still waiting, today and ahead, soonest first.
+pub fn wake_find(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, ToolError> {
+    super::task_query::unscoped(ctx)?;
+    let o = Obj::new(loose::args(raw)?);
+    let mut warnings: Vec<String> = o.rest().into_iter().map(|f| format!("{f} is not a wake_find field")).collect();
+    let today = jiff::Timestamp::now().to_zoned(tz(ctx)).date();
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT e.id, p.date, e.wall_time, e.prompt, e.status, e.channel, e.cancel_if, e.conversation_id, e.work_session_id,
+                    (SELECT task_id FROM event_tasks WHERE event_id = e.id LIMIT 1)
+             FROM events e JOIN plans p ON p.id = e.plan_id
+             WHERE p.user_id = ?1 AND e.kind = ?2 AND e.status IN ('pending', 'snoozed') AND p.date >= ?3
+             ORDER BY p.date, e.wall_time, e.id LIMIT ?4",
+        )
+        .map_err(internal)?;
+    type Row = (i64, String, String, String, String, String, Option<String>, Option<i64>, Option<i64>, Option<i64>);
+    let rows: Vec<Row> = stmt
+        .query_map((ctx.user_id, triggers::KIND, today.to_string(), MAX_WAKES_FOUND as i64 + 1), |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?))
+        })
+        .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
+        .map_err(internal)?;
+    if rows.len() > MAX_WAKES_FOUND {
+        warnings.push(format!("only the first {MAX_WAKES_FOUND} are shown"));
+    }
+    let wakes: Vec<Value> = rows
+        .into_iter()
+        .take(MAX_WAKES_FOUND)
+        .map(|(id, date, at, note, status, channel, cancel_if, thread, session, task)| {
+            let mut v = json!({ "id": format!("e{id}"), "date": date, "at": at, "note": note });
+            if channel == crate::channels::RING_CHANNEL {
+                v["ring"] = true.into();
+            }
+            if status == "snoozed" {
+                v["status"] = status.into();
+            }
+            if let Some(c) = cancel_if {
+                v["cancel_on"] = cancel_label(&c).into();
+            }
+            if let Some(t) = thread {
+                v["thread"] = t.into();
+            }
+            if session.is_some() {
+                v["session_check"] = true.into();
+            }
+            if let Some(t) = task {
+                v["task"] = t.into();
+            }
+            v
+        })
+        .collect();
+    let allowance = triggers::allowance(conn, ctx.config_dir, ctx.username, ctx.user_id, today).map_err(internal)?;
+    let spent = triggers::spent(conn, ctx.user_id, today).map_err(internal)?;
+    let mut out = json!({ "total": wakes.len(), "wakes": wakes, "today": { "laid": spent, "allowance": allowance } });
+    if !warnings.is_empty() {
+        out["warnings"] = warnings.into();
+    }
+    Ok(out)
+}
+
+fn cancel_label(stored: &str) -> &str {
+    match stored {
+        "replied" => "reply",
+        "task_done" => "task",
+        "event_decided" => "event",
+        other => other,
+    }
+}
+
+// --- wake_remove ---
+
+/// `wake_remove`: wake-ups taken off by id.
+pub fn wake_remove(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> Result<Value, ToolError> {
+    super::task_query::unscoped(ctx)?;
+    let mut o = Obj::new(loose::args(raw)?);
+    let mut day = Day::new(conn, ctx, kind)?;
+    let ids = loose::ids(&mut o, &["ids", "id", "items", "event_ids", "event_id", "wakes"], &mut day.env);
+    for field in o.rest() {
+        day.env.ignored(None, &field, "not a wake_remove field");
+    }
+    if ids.is_empty() {
+        loose::nothing_removed(&mut day.env);
+        return Ok(day.env.into_value());
+    }
+    for (i, v) in ids.into_iter().enumerate() {
+        let r = Ref::top(i);
+        let found = match item_id(&v) {
+            Some(ItemId::Event(n) | ItemId::Either(n)) => event(conn, ctx.user_id, n)?,
+            _ => None,
+        };
+        match found {
+            Some(e) if e.is_wake() => remove_event(&mut day, &r, &e)?,
+            Some(e) => day.env.refused(&r, format!("e{} is a routine, not a wake-up; day_remove takes routines off", e.id)),
+            None => day.env.refused(&r, format!("no wake-up {v}; wake_find lists them")),
+        }
+    }
     Ok(day.env.into_value())
 }
 
@@ -1681,6 +1871,10 @@ fn take_off(day: &mut Day, r: &Ref, date: Date, named: &Value) -> Result<(), Too
                 Some(held) if order::slots(day.conn, day.ctx.user_id, ev.date).map_err(internal)?.iter().any(|s| s.task_id == held) => {
                     return remove_task(day, r, ev.date, held);
                 }
+                _ if ev.is_wake() => {
+                    day.env.refused(r, format!("e{} is a wake-up; wake_remove takes it off", ev.id));
+                    return Ok(());
+                }
                 _ => return remove_event(day, r, &ev),
             }
         }
@@ -1811,7 +2005,7 @@ mod tests {
     fn a_task_a_wake_up_points_at_is_not_on_the_day_and_placing_one_twice_updates_it() {
         let (conn, tmp) = env();
         let draft = task(&conn, &tmp, json!({ "title": "Draft", "minutes": 60 }));
-        let wake = talk(&conn, &tmp, "day_save", json!({ "items": [{ "wake": "see whether the draft started", "at": "+90min", "task": draft }] }));
+        let wake = talk(&conn, &tmp, "wake_save", json!({ "note": "see whether the draft started", "at": "+90min", "task": draft }));
         assert_eq!(wake["ok"], true, "{wake}");
         assert!(ids(&conn).is_empty(), "a wake-up's link is not a place on the day");
         let out = call(&conn, &tmp, SessionKind::Trigger, "day_save", json!({ "items": [{ "task": draft }] }));
@@ -1896,37 +2090,82 @@ mod tests {
     #[test]
     fn a_wake_up_beside_another_is_laid_with_a_warning_and_reworded_by_its_id() {
         let (conn, tmp) = env();
-        let first = talk(&conn, &tmp, "day_save", json!({ "items": [{ "wake": "ask about the essay", "at": "+90min" }] }));
+        let first = talk(&conn, &tmp, "wake_save", json!({ "note": "ask about the essay", "at": "+90min" }));
         let id = first["saved"][0]["id"].as_str().unwrap().to_string();
-        let near = talk(&conn, &tmp, "day_save", json!({ "items": [{ "wake": "essay?", "at": "+100min" }] }));
+        let near = talk(&conn, &tmp, "wake_save", json!({ "note": "essay?", "at": "+100min" }));
         assert_eq!(near["ok"], true);
-        assert!(near["warnings"][0].as_str().unwrap().contains(&format!("{id} is already laid")), "{near}");
-        let out = talk(&conn, &tmp, "day_save", json!({ "items": [{ "id": id, "wake": "ask about the essay, sharper", "ring": true }] }));
+        let warning = near["warnings"][0].as_str().unwrap();
+        assert!(warning.contains(&format!("{id} is already at")) && warning.contains("ask about the essay"), "{near}");
+        let out = talk(&conn, &tmp, "wake_save", json!({ "id": id, "note": "ask about the essay, sharper", "ring": true }));
         assert_eq!(out["saved"][0]["op"], "updated", "{out}");
         let (prompt, channel): (String, String) = conn
             .query_row("SELECT prompt, channel FROM events WHERE id = ?1", [id[1..].parse::<i64>().unwrap()], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap();
         assert_eq!((prompt.as_str(), channel.as_str()), ("ask about the essay, sharper", crate::channels::RING_CHANNEL));
+        let found = talk(&conn, &tmp, "wake_find", json!({}));
+        let wakes = found["wakes"].as_array().unwrap();
+        assert_eq!(wakes.len(), 2, "{found}");
+        assert_eq!((wakes[0]["id"].as_str(), wakes[0]["ring"].clone()), (Some(id.as_str()), json!(true)));
+        assert_eq!(wakes[0]["note"], "ask about the essay, sharper");
         let day = talk(&conn, &tmp, "day_find", json!({}));
-        let wakes: Vec<&Value> = day["items"].as_array().unwrap().iter().filter(|i| i["kind"] == "wake").collect();
-        assert_eq!(wakes.len(), 2);
-        assert_eq!(wakes[0]["ring"], true);
-        let reply = talk(&conn, &tmp, "day_save", json!({ "items": [{ "wake": "did they answer?", "at": "+200min", "cancel_on": "reply" }] }));
+        assert_eq!(day["wakes_waiting"], 2, "{day}");
+        assert!(day["items"].as_array().unwrap().iter().all(|i| i["kind"] != "wake"));
+        let reply = talk(&conn, &tmp, "wake_save", json!({ "items": [{ "note": "did they answer?", "at": "+200min", "cancel_on": "reply" }] }));
         assert_eq!(reply["saved"][0]["cancel_if"], "replied", "{reply}");
+    }
+
+    #[test]
+    fn a_wake_up_at_the_minute_of_another_in_its_thread_is_refused_naming_it() {
+        let (conn, tmp) = env();
+        let first = talk(&conn, &tmp, "wake_save", json!({ "note": "is the essay sent?", "at": "18:57" }));
+        let id = first["saved"][0]["id"].as_str().unwrap().to_string();
+        let twin = talk(&conn, &tmp, "wake_save", json!({ "note": "essay sent?", "at": "18:57" }));
+        assert_eq!(twin["ok"], false);
+        let why = twin["refused"][0]["why"].as_str().unwrap();
+        assert!(why.contains(&format!("{id} is already at")) && why.contains("18:57") && why.contains("is the essay sent?") && why.contains("by id"), "{why}");
+        let pair = talk(&conn, &tmp, "wake_save", json!({ "items": [{ "note": "stretch", "at": "19:30" }, { "note": "stretch again", "at": "19:30" }] }));
+        assert_eq!((pair["saved"].as_array().unwrap().len(), pair["refused"][0]["ref"].clone()), (1, json!("1")), "{pair}");
+        let other = pair["saved"][0]["id"].as_str().unwrap().to_string();
+        let moved = talk(&conn, &tmp, "wake_save", json!({ "id": other, "at": "18:57" }));
+        assert!(moved["refused"][0]["why"].as_str().unwrap().contains(&id), "{moved}");
+        let thread = crate::talk::create(&conn, 1, "other", jiff::Timestamp::now()).unwrap();
+        let elsewhere = talk(&conn, &tmp, "wake_save", json!({ "note": "in the other thread", "at": "18:57", "thread": thread }));
+        assert_eq!(elsewhere["ok"], true, "another thread's wake-up may share the minute: {elsewhere}");
+        assert_eq!(talk(&conn, &tmp, "wake_find", json!({}))["total"], 3);
+    }
+
+    #[test]
+    fn wake_ups_are_refused_by_the_day_tools_with_a_pointer_and_taken_off_by_wake_remove() {
+        let (conn, tmp) = env();
+        let sent = talk(&conn, &tmp, "day_save", json!({ "items": [{ "wake": "check", "at": "+90min" }] }));
+        assert!(sent["refused"][0]["why"].as_str().unwrap().contains("wake_save"), "{sent}");
+        let laid = talk(&conn, &tmp, "wake_save", json!({ "note": "check", "at": "+90min" }));
+        let e = laid["saved"][0]["id"].clone();
+        let off = talk(&conn, &tmp, "day_remove", json!({ "ids": [e.clone()] }));
+        assert!(off["refused"][0]["why"].as_str().unwrap().contains("wake_remove"), "{off}");
+        let changed = talk(&conn, &tmp, "day_save", json!({ "items": [{ "id": e.clone(), "at": "17:00" }] }));
+        assert!(changed["refused"][0]["why"].as_str().unwrap().contains("wake_save"), "{changed}");
+        let budget = talk(&conn, &tmp, "day_save", json!({ "extra_wakes": { "n": 1, "reason": "x" } }));
+        assert!(budget["refused"][0]["why"].as_str().unwrap().contains("wake_save"), "{budget}");
+        let gone = talk(&conn, &tmp, "wake_remove", json!({ "ids": [e] }));
+        assert_eq!(gone["removed"].as_array().unwrap().len(), 1, "{gone}");
+        assert_eq!(talk(&conn, &tmp, "wake_find", json!({}))["total"], 0);
+        let empty = talk(&conn, &tmp, "wake_save", json!({}));
+        assert!(empty["refused"][0]["why"].as_str().unwrap().contains(r#""note""#), "{empty}");
     }
 
     #[test]
     fn the_budget_refuses_a_wake_up_until_the_user_agrees_and_only_a_chat_raises_it() {
         let (conn, tmp) = env();
         for n in 1..=4 {
-            talk(&conn, &tmp, "day_save", json!({ "items": [{ "wake": format!("check {n}"), "at": format!("+{}min", 60 + n * 30) }] }));
+            talk(&conn, &tmp, "wake_save", json!({ "note": format!("check {n}"), "at": format!("+{}min", 60 + n * 30) }));
         }
-        let over = talk(&conn, &tmp, "day_save", json!({ "items": [{ "wake": "one more", "at": "+240min" }] }));
+        let over = talk(&conn, &tmp, "wake_save", json!({ "note": "one more", "at": "+240min" }));
         assert_eq!(over["ok"], false);
-        assert!(over["refused"][0]["why"].as_str().unwrap().contains("extra_wakes"), "{over}");
-        let ignored = call(&conn, &tmp, SessionKind::Trigger, "day_save", json!({ "extra_wakes": { "n": 2, "reason": "x" }, "items": [] }));
+        assert!(over["refused"][0]["why"].as_str().unwrap().contains("extra_wakes {n, reason} with wake_save"), "{over}");
+        let ignored = call(&conn, &tmp, SessionKind::Trigger, "wake_save", json!({ "extra_wakes": { "n": 2, "reason": "x" } }));
         assert_eq!((ignored["ok"].clone(), ignored["ignored"][0]["field"].clone()), (json!(true), json!("extra_wakes")), "{ignored}");
-        let out = talk(&conn, &tmp, "day_save", json!({ "extra_wakes": { "n": 9, "reason": "they asked to be pushed" }, "items": [{ "wake": "one more", "at": "+240min" }] }));
+        let out = talk(&conn, &tmp, "wake_save", json!({ "extra_wakes": { "n": 9, "reason": "they asked to be pushed" }, "note": "one more", "at": "+240min" }));
         assert_eq!(out["ok"], true, "{out}");
         assert_eq!(out["adjusted"][0]["to"], 4, "a day reaches at most twice its allowance");
         assert_eq!(out["saved"][0]["allowance"], 8);
@@ -1936,12 +2175,13 @@ mod tests {
     fn the_nightly_lays_on_the_day_it_plans_and_carries_nothing() {
         let (conn, tmp) = env();
         let a = task(&conn, &tmp, json!({ "title": "a" }));
-        let out = call(&conn, &tmp, SessionKind::Nightly, "day_save", json!({ "carry": true, "items": [{ "task": a }, { "wake": "after the first block", "at": "09:00" }] }));
+        let out = call(&conn, &tmp, SessionKind::Nightly, "day_save", json!({ "carry": true, "items": [{ "task": a }] }));
         assert_eq!(out["ignored"][0]["field"], "carry", "{out}");
         let tomorrow = today().tomorrow().unwrap();
         assert_eq!(out["saved"][0]["date"], tomorrow.to_string());
         assert_eq!(crate::order::ids(&conn, 1, tomorrow).unwrap(), [a]);
-        assert_eq!(out["saved"][1]["date"], tomorrow.to_string(), "{out}");
+        let wake = call(&conn, &tmp, SessionKind::Nightly, "wake_save", json!({ "note": "after the first block", "at": "09:00" }));
+        assert_eq!(wake["saved"][0]["date"], tomorrow.to_string(), "{wake}");
     }
 
     #[test]
@@ -1976,8 +2216,8 @@ mod tests {
     fn day_remove_takes_items_off_and_points_a_calendar_event_at_calendar_save() {
         let (conn, tmp) = env();
         let a = task(&conn, &tmp, json!({ "title": "Laundry" }));
-        let wake = talk(&conn, &tmp, "day_save", json!({ "items": [{ "task": a, "at": "15:00" }, { "wake": "check", "at": "+90min" }] }));
-        let e = wake["saved"][1]["id"].clone();
+        let laid = talk(&conn, &tmp, "day_save", json!({ "items": [{ "task": a, "at": "15:00" }, { "routine": "stretch", "at": "16:00" }] }));
+        let e = laid["saved"][1]["id"].clone();
         let out = talk(&conn, &tmp, "day_remove", json!({ "ids": ["laundry", e, "c4"] }));
         assert_eq!(out["removed"].as_array().unwrap().len(), 2, "{out}");
         assert!(out["refused"][0]["why"].as_str().unwrap().contains("calendar_save"));
@@ -1994,11 +2234,15 @@ mod tests {
             task(&conn, &tmp, json!({ "title": "essay", "minutes": 60 })),
             task(&conn, &tmp, json!({ "title": "laundry" })),
         );
-        talk(&conn, &tmp, "day_save", json!({ "items": [a, { "task": b, "at": "14:00" }, c, { "wake": "how did the essay go?", "at": "16:00" }] }));
+        talk(&conn, &tmp, "day_save", json!({ "items": [a, { "task": b, "at": "14:00" }, c, { "routine": "tea", "at": "16:00" }] }));
+        talk(&conn, &tmp, "wake_save", json!({ "note": "how did the essay go?", "at": "16:30" }));
         let day = talk(&conn, &tmp, "day_find", json!({}));
         let kinds: Vec<String> = day["items"].as_array().unwrap().iter().map(|i| format!("{} {}", i["kind"].as_str().unwrap(), i["id"].as_str().unwrap_or(""))).collect();
         assert_eq!(kinds[..3], [format!("task t{a}"), format!("task t{b}"), format!("task t{c}")]);
-        assert!(kinds[3].starts_with("wake e") && kinds[4].starts_with("event c"), "{kinds:?}");
+        assert!(kinds[3].starts_with("routine e") && kinds[4].starts_with("event c"), "{kinds:?}");
+        assert_eq!(day["wakes_waiting"], 1);
+        let api = super::items(&conn, tmp.path(), "aitest", 1, today()).unwrap();
+        assert!(api.iter().any(|i| i["kind"] == "wake"), "the web's day still shows its wake-ups");
         assert_eq!(day["items"][1]["minutes"], 60);
         let share = crate::shares::ShareScope { today: true, ..Default::default() };
         let visitor = ToolCtx { share: Some(share), share_thread: Some(1), ..ctx(&tmp) };

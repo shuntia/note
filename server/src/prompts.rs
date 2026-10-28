@@ -133,7 +133,7 @@ mod tests {
             let trigger = load("trigger");
             for name in [
                 "say", "stay_quiet", "call_user", "cancel_on",
-                "day_find", "day_save", "day_remove", "memory_save",
+                "day_save", "day_remove", "wake_find", "wake_save", "wake_remove", "memory_save", "note_save",
             ] {
                 assert!(trigger.contains(name), "the trigger prompt ({lang:?}) never mentions {name}");
             }

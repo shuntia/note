@@ -808,7 +808,7 @@ mod tests {
                     },
                     ToolCall {
                         id: "2".into(),
-                        name: "memory_remove".into(),
+                        name: "note_remove".into(),
                         args: format!(r#"{{"ids":["{stale}"]}}"#),
                     },
                 ],

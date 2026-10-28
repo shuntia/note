@@ -189,16 +189,11 @@ pub fn day_save() -> Value {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "id": { "type": "string", "description": "An item to change, as day_find lists it (t412, e88)." },
+                        "id": { "type": "string", "description": "As day_find lists it (t412, e88)." },
                         "task": { "type": id_or_title() },
-                        "at": { "type": "string", "description": "HH:MM, 9am or +20min; \"\" untimes a task." },
+                        "at": { "type": "string", "description": "HH:MM or 9am; \"\" untimes a task." },
                         "minutes": { "type": "integer", "description": "A block's length; default the task's size." },
                         "before": { "type": id_or_title(), "description": "The item it goes before; \"end\" puts it last." },
-                        "wake": { "type": "string", "description": "A wake-up: your note on what to check at at." },
-                        "ring": { "type": "boolean", "description": "The wake-up calls the user." },
-                        "cancel_on": { "type": "string", "enum": ["reply", "task"], "description": "Calls the wake-up off: a reply, or the task finished." },
-                        "session_check": { "type": "boolean", "description": "A check on the open work session; ends with it." },
-                        "thread": { "type": "integer", "description": "Conversation it speaks in; default the check-in thread." },
                         "routine": { "type": "string", "description": "Add a routine of this name at at." },
                         "flexibility": { "type": "string", "enum": ["fixed", "slide", "drop"], "description": "A new routine's; default slide." },
                         "snooze_min": { "type": "integer", "description": "Hold back a routine's delivery this long." }
@@ -207,11 +202,6 @@ pub fn day_save() -> Value {
             },
             "replace": { "type": "boolean", "description": "The task items given become the day's whole task list, in order." },
             "carry": { "type": "boolean", "description": "Move what is left of the day to the next." },
-            "extra_wakes": {
-                "type": "object",
-                "properties": { "n": { "type": "integer" }, "reason": { "type": "string" } },
-                "description": "Raise the day's wake-up budget by n once the user agreed; reason: what they agreed to."
-            },
             "tz": { "type": "string", "description": "IANA zone of the times, when not the user's." }
         }
     })
@@ -226,6 +216,54 @@ pub fn day_remove() -> Value {
         },
         "required": ["ids"]
     })
+}
+
+pub fn wake_find() -> Value {
+    json!({ "type": "object", "properties": {} })
+}
+
+pub fn wake_save() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "at": { "type": "string", "description": "HH:MM, 9am or +20min." },
+            "date": { "type": "string" },
+            "note": { "type": "string", "description": "What to check then." },
+            "id": { "type": "string", "description": "Rewords or moves this one." },
+            "ring": { "type": "boolean", "description": "Call the user." },
+            "cancel_on": { "type": "string", "enum": ["reply", "task", "event"] },
+            "task": { "type": id_or_title() },
+            "event": { "type": "string" },
+            "session_check": { "type": "boolean" },
+            "thread": { "type": "integer" },
+            "tz": { "type": "string" },
+            "extra_wakes": {
+                "type": "object",
+                "properties": { "n": { "type": "integer" }, "reason": { "type": "string" } },
+                "description": "Once the user agreed."
+            }
+        }
+    })
+}
+
+pub fn wake_remove() -> Value {
+    json!({ "type": "object", "properties": { "ids": ids(None) }, "required": ["ids"] })
+}
+
+pub fn note_save() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "title": { "type": "string" },
+            "from": { "type": "string", "description": "YYYY-MM-DDTHH:MM." },
+            "until": { "type": "string", "description": "A day or moment; \"\" clears it." },
+            "id": { "type": "string" }
+        }
+    })
+}
+
+pub fn note_remove() -> Value {
+    json!({ "type": "object", "properties": { "ids": ids(None) }, "required": ["ids"] })
 }
 
 pub fn task_brief() -> Value {
@@ -258,7 +296,7 @@ pub fn memory_find() -> Value {
         "properties": {
             "query": { "type": "string" },
             "id": { "type": ["string", "array"], "items": { "type": "string" }, "description": "A list works too." },
-            "kind": { "type": "string", "enum": ["semantic", "episodic", "procedural", "note"], "description": "Notes show only with kind note." },
+            "kind": { "type": "string", "enum": ["semantic", "episodic", "procedural"] },
             "limit": { "type": "integer", "description": "1-50; default 8." }
         }
     })
@@ -273,12 +311,11 @@ pub fn memory_save() -> Value {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "id": { "type": "string", "description": "Changes this memory or note; a note's id alone keeps it." },
-                        "kind": { "type": "string", "enum": ["semantic", "episodic", "procedural", "note"], "description": "Default semantic. A note given another kind becomes that memory." },
+                        "id": { "type": "string", "description": "Changes this memory." },
+                        "kind": { "type": "string", "enum": ["semantic", "episodic", "procedural"], "description": "Default semantic." },
                         "title": { "type": "string", "description": "One line." },
                         "body": { "type": "string" },
-                        "from": { "type": "string", "description": "A note's start, YYYY-MM-DDTHH:MM." },
-                        "until": { "type": "string", "description": "When it stops mattering: a day, or a note's moment; \"\" clears it." },
+                        "until": { "type": "string", "description": "The day it stops mattering; \"\" clears it." },
                         "supersedes": { "type": "string", "description": "A memory this replaces, archived." }
                     }
                 }

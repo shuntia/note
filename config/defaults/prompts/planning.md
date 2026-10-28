@@ -30,7 +30,7 @@ template.
 
 Settle each working note the opening lists as due once: memory_save it by id
 with a kind when still worth knowing later (rewrite title and body to stand
-alone; a stretch of time is episodic, a lasting fact semantic), memory_remove
+alone; a stretch of time is episodic, a lasting fact semantic), note_remove
 it when it no longer matters. A due note you leave is kept as a memory word for word.
 
 Then reply with the debrief text. It closes the session and becomes this

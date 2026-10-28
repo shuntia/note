@@ -348,6 +348,19 @@ impl<'a> Saver<'a> {
         Ok(rows)
     }
 
+    /// An open task anywhere titled like `title`.
+    fn open_twin(&self, title: &str) -> Result<Option<i64>, ToolError> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT id, title FROM tasks WHERE user_id = ?1 AND state IN ('open','in_progress') ORDER BY id")
+            .map_err(internal)?;
+        let open: Vec<(i64, String)> = stmt
+            .query_map([self.ctx.user_id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .and_then(|rows| rows.collect::<rusqlite::Result<_>>())
+            .map_err(internal)?;
+        Ok(open.into_iter().find(|(_, t)| super::same_title(t, title)).map(|(id, _)| id))
+    }
+
     /// The open tasks a create titled `title` lands on instead: siblings under
     /// `under`, or roots of the same goal and category.
     fn same_title(&self, title: &str, under: Option<i64>, category: Option<&str>) -> Result<Vec<i64>, ToolError> {
@@ -455,7 +468,16 @@ impl<'a> Saver<'a> {
                 }
                 None => match (&node.title, node.new) {
                     (Some(title), false) => match self.same_title(title, under.flatten(), node.category.as_deref())?.as_slice() {
-                        [] => None,
+                        [] => {
+                            if let Some(twin) = self.open_twin(title)? {
+                                let label = self.labeled(&[twin])?;
+                                self.env.warn(format!(
+                                    "{} was created beside open task {label}, titled the same; if it is that one, change it by id and take this one off; new: true says it is another",
+                                    r.0
+                                ));
+                            }
+                            None
+                        }
                         [one] => {
                             node.matched = true;
                             Some(*one)
@@ -1399,6 +1421,18 @@ mod tests {
         conn.execute("UPDATE tasks SET state = 'done'", []).unwrap();
         let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "Call the dentist"}]}));
         assert_eq!(out["saved"][0]["op"], "created", "a finished one is not matched");
+    }
+
+    #[test]
+    fn a_create_titled_like_an_open_task_elsewhere_is_made_with_a_warning_naming_it() {
+        let (conn, tmp) = env("UTC");
+        let essay = saved(&talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "English", "children": ["Draft the essay"]}]})), "0.0");
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "draft the essay"}]}));
+        assert_eq!(out["saved"][0]["op"], "created", "{out}");
+        let warning = out["warnings"][0].as_str().unwrap();
+        assert!(warning.contains(&essay.to_string()) && warning.contains("English › Draft the essay"), "{warning}");
+        let out = talk(&conn, &tmp, "task_save", json!({"tasks": [{"title": "Draft the essay", "new": true}]}));
+        assert!(out.get("warnings").is_none(), "new: true says it is another: {out}");
     }
 
     #[test]

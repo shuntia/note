@@ -1192,7 +1192,7 @@ impl CallEnv<'_> {
 
 /// Whether a write's result changed anything, and whether it was accepted
 /// whole. A save's answer changed something when it saved an item other than
-/// unchanged or removed one; an answer of another shape counts as a change.
+/// unchanged or kept, or removed one; an answer of another shape counts as a change.
 fn write_effect(content: &str) -> (bool, bool) {
     let Ok(serde_json::Value::Object(v)) = serde_json::from_str::<serde_json::Value>(content) else {
         return (true, true);
@@ -1202,7 +1202,7 @@ fn write_effect(content: &str) -> (bool, bool) {
         return (true, ok);
     }
     let listed = |key: &str| v.get(key).and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
-    let saved = listed("saved").iter().any(|s| s["op"] != "unchanged");
+    let saved = listed("saved").iter().any(|s| !matches!(s["op"].as_str(), Some("unchanged" | "kept")));
     let removed = !listed("removed").is_empty();
     let envelope = ["saved", "removed", "adjusted", "ignored", "refused", "warnings"];
     let other = v.keys().any(|k| k != "ok" && !envelope.contains(&k.as_str()));
@@ -3168,7 +3168,7 @@ mod tests {
         assert_eq!(seen.len(), LOOKUP_ROUNDS + 1);
         assert_eq!(out.reply, crate::text::max_turns_reply(Lang::En));
         let first = last_result(&seen[1]);
-        assert!(first.contains(r#""ok":false"#) && first.contains(r#"[{\"wake\""#), "{first}");
+        assert!(first.contains(r#""ok":false"#) && first.contains(r#"[{\"task\""#), "{first}");
         assert!(last_result(&seen[2]).starts_with(mt::repeated_idle_write(Lang::En, "").trim()));
         assert!(!last_result(&seen[1]).contains(mt::idle_writes(Lang::En)));
         assert!(last_result(&seen[2]).contains(mt::idle_writes(Lang::En)));
@@ -3182,7 +3182,7 @@ mod tests {
         let (db, tmp) = env();
         let llm = MockLLM::scripted(vec![
             one_call("a", "day_save", r#"{"carry":false}"#),
-            one_call("b", "day_save", r#"{"items":[{"wake":"check the essay","at":"+20min","cancel_on":"reply"}]}"#),
+            one_call("b", "wake_save", r#"{"note":"check the essay","at":"+20min","cancel_on":"reply"}"#),
             ChatResponse { text: "Set.".into(), tool_calls: vec![] },
         ]);
         let out = run_session(&deps(&db, &tmp, &llm), 1, "aki", SessionKind::Talk, now(), &[], "hi").unwrap();

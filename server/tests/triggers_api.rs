@@ -189,7 +189,7 @@ async fn a_trigger_that_stays_quiet_sends_nothing_and_settles() {
 #[tokio::test]
 async fn a_firing_trigger_may_leave_one_follow_up_behind_inside_its_work_session() {
     let w = world(vec![
-        call("c1", "day_save", r#"{"items":[{"wake":"still on the chapter?","at":"+30min","cancel_on":"reply","session_check":true}]}"#),
+        call("c1", "wake_save", r#"{"note":"still on the chapter?","at":"+30min","cancel_on":"reply","session_check":true}"#),
         call("c2", "say", r#"{"text":"half an hour in — how far did you get?"}"#),
     ])
     .await;
@@ -214,7 +214,7 @@ async fn a_firing_trigger_may_leave_one_follow_up_behind_inside_its_work_session
 #[tokio::test]
 async fn a_reminder_laid_inside_a_work_session_stays_on_the_day() {
     let w = world(vec![
-        call("c1", "day_save", r#"{"items":[{"wake":"remind them to hand it in","at":"+90min","cancel_on":"reply"}]}"#),
+        call("c1", "wake_save", r#"{"note":"remind them to hand it in","at":"+90min","cancel_on":"reply"}"#),
         call("c2", "say", r#"{"text":"half an hour in — how far did you get?"}"#),
     ])
     .await;
@@ -278,7 +278,7 @@ async fn a_trigger_whose_reason_settled_itself_is_cancelled_before_any_session_r
 #[tokio::test]
 async fn a_talk_session_raises_the_days_budget_once_the_user_has_agreed() {
     let w = world(vec![
-        call("c1", "day_save", r#"{"items":[],"extra_wakes":{"n":3,"reason":"they asked to be pushed today"}}"#),
+        call("c1", "wake_save", r#"{"extra_wakes":{"n":3,"reason":"they asked to be pushed today"}}"#),
         ChatResponse { text: "Raised today's check-in budget by 3.".into(), tool_calls: vec![] },
     ])
     .await;
@@ -353,7 +353,7 @@ fn lay_the_day(w: &World) {
 #[tokio::test]
 async fn the_first_wake_up_lays_the_rest_of_the_day_and_logs_it() {
     let w = world(vec![
-        call("c1", "day_save", r#"{"items":[{"wake":"after the essay block: is it moving?","at":"+60min"}]}"#),
+        call("c1", "wake_save", r#"{"note":"after the essay block: is it moving?","at":"+60min"}"#),
         call("c2", "stay_quiet", r#"{"reason":"the day is laid"}"#),
     ])
     .await;
@@ -367,7 +367,7 @@ async fn the_first_wake_up_lays_the_rest_of_the_day_and_logs_it() {
     assert_eq!(statuses(&w)[0], "done");
     let changes = logged(&w, "wake_change");
     assert_eq!(changes.len(), 1);
-    assert!(changes[0].contains("day_save"), "{}", changes[0]);
+    assert!(changes[0].contains("wake_save"), "{}", changes[0]);
 }
 
 /// Answers its script, then fails every round after it.
@@ -387,8 +387,8 @@ async fn a_wake_up_that_fails_after_a_write_still_logs_the_write() {
     lay_plain(&w);
     let llm = Arc::new(FailsAfter(MockLLM::scripted(vec![call(
         "c1",
-        "day_save",
-        r#"{"items":[{"wake":"see if the essay moved","at":"+60min"}]}"#,
+        "wake_save",
+        r#"{"note":"see if the essay moved","at":"+60min"}"#,
     )])));
     let state = w.state.clone().with_providers(llm, None);
 
@@ -397,7 +397,7 @@ async fn a_wake_up_that_fails_after_a_write_still_logs_the_write() {
     assert_eq!(logged(&w, "trigger_error").len(), 1);
     let changes = logged(&w, "wake_change");
     assert_eq!(changes.len(), 1, "{changes:?}");
-    assert!(changes[0].starts_with("event 1: day_save"), "{}", changes[0]);
+    assert!(changes[0].starts_with("event 1: wake_save"), "{}", changes[0]);
 }
 
 /// Each ring's user, conversation and reason.

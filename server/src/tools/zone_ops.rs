@@ -78,8 +78,8 @@ mod tests {
             .date()
             .checked_add(jiff::Span::new().days(2))
             .unwrap();
-        let laid = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "day_save",
-            &format!(r#"{{"date":"{day}","items":[{{"wake":"call them","at":"11:00"}}]}}"#)).unwrap();
+        let laid = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "wake_save",
+            &format!(r#"{{"date":"{day}","note":"call them","at":"11:00"}}"#)).unwrap();
         let out = dispatch(&conn, &ctx(&tmp), SessionKind::Talk, "timezone_set",
             r#"{"zone":"America/New_York"}"#).unwrap();
         assert_eq!(out["was"], "America/Los_Angeles");

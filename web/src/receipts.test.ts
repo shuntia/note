@@ -84,6 +84,16 @@ describe('find, save and remove receipts', () => {
     expect(receipt('day_remove', '{"ids":["t4"]}', false)).toBe('Took an item off the day')
     expect(receipt('day_find', '{}', false)).toBe("Looked at today's plan")
   })
+  test('wake-ups and notes read as their own tools', () => {
+    expect(receipt('wake_save', '{"note":"see whether the draft started","at":"+30min"}', false)).toBe('Set a check-in in 30 min')
+    expect(receipt('wake_save', '{"items":[{"note":"x","at":"18:30"}]}', false)).toBe('Set a check-in at 18:30')
+    expect(receipt('wake_save', '{"extra_wakes":{"n":2,"reason":"asked"}}', false)).toBe("Raised today's check-in budget by 2")
+    expect(receipt('wake_remove', '{"ids":["e4","e5"]}', false)).toBe('Took 2 check-ins off')
+    expect(receipt('wake_find', '{}', false)).toBe('Looked at the check-ins waiting')
+    expect(receipt('note_save', '{"title":"call the bank"}', false)).toBe('Noted “call the bank”')
+    expect(receipt('note_save', '{"id":"ab12cd34"}', false)).toBe('Kept a note')
+    expect(receipt('note_remove', '{"ids":["ab12cd34"]}', false)).toBe('Cleared a note')
+  })
   test('removals, goals and the calendar read plainly', () => {
     expect(receipt('task_remove', '{"ids":[1]}', false)).toBe('Deleted a task')
     expect(receipt('task_remove', '{"ids":[1,2,3]}', false)).toBe('Deleted 3 tasks')

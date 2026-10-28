@@ -120,7 +120,7 @@ mod tests {
         let brief = build(&deps, 1, "aki", &reason, Some(thread), now, Lang::En).unwrap();
         assert!(
             brief.contains(&format!(
-                "# Working memory\n\n- {}: the essay is the one that matters",
+                "# Working memory (note_save, note_remove)\n\n- {}: the essay is the one that matters",
                 crate::notes::short(&essay.id)
             )),
             "a call carries working memory: {brief}"

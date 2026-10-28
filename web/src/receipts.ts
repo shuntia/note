@@ -489,6 +489,42 @@ const TABLE: Record<string, Receipt> = {
     done: (a) => t('receipt.dayRemove.done', { count: Array.isArray(a.ids) ? a.ids.length : 1 }),
     failed: 'receipt.dayRemove.failed',
   },
+  wake_find: {
+    doing: 'receipt.wakeFind.doing',
+    done: 'receipt.wakeFind.done',
+    failed: 'receipt.wakeFind.failed',
+  },
+  wake_save: {
+    doing: 'receipt.checkIn.doing',
+    done: (a) => {
+      const wakes = Array.isArray(a.items) ? nodes(a, 'items') : [a]
+      const extra = a.extra_wakes as Args | undefined
+      if (!str(wakes[0] ?? {}, 'at') && extra && typeof extra === 'object')
+        return say(TABLE.trigger_budget.done, { extra: extra.n })
+      return laid(wakes[0] ?? {}, 'at')
+    },
+    failed: 'receipt.checkIn.failed',
+  },
+  wake_remove: {
+    doing: 'receipt.wakeRemove.doing',
+    done: (a) => t('receipt.wakeRemove.done', { count: Array.isArray(a.ids) ? a.ids.length : 1 }),
+    failed: 'receipt.wakeRemove.failed',
+  },
+  note_save: {
+    doing: 'receipt.noteWrite.doing',
+    done: (a) => {
+      const one = nodes(a, 'items')[0] ?? a
+      if (one.id === undefined) return say(TABLE.note_write.done, { ...one, op: 'add' })
+      if (Object.keys(one).length === 1) return t('receipt.noteWrite.kept')
+      return say(TABLE.note_write.done, { ...one, op: 'update' })
+    },
+    failed: 'receipt.noteWrite.failed',
+  },
+  note_remove: {
+    doing: 'receipt.noteWrite.doing',
+    done: 'receipt.noteWrite.removed',
+    failed: 'receipt.noteWrite.failed',
+  },
 
   calendar_skip: {
     doing: 'receipt.calendarSkip.doing',
