@@ -111,6 +111,8 @@ export type Task = {
   scheduled_at: string | null
   // How far along it is, 0 to 100.
   progress: number
+  // `progress` was set by hand and stands in for the steps' until one of them moves.
+  progress_set: boolean
   // Where the minutes already worked say the task lands, and what is left of
   // that; both absent until there is progress and time behind it.
   expected_min: number | null
@@ -139,6 +141,8 @@ export type Goal = {
   next_task_title: string | null
   next_due_at: string | null
   next_due_on: string | null
+  // Its finished top-level tasks, to weigh against the open ones on screen.
+  finished: { id: number; title: string; category: string; duration_min: number | null }[]
 }
 
 export type Token = {

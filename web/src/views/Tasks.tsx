@@ -8,7 +8,6 @@ import {
   useRef,
   useState,
   type FormEvent,
-  type ReactNode,
   type RefObject,
 } from 'react'
 import { api, ApiError } from '../api'
@@ -33,6 +32,8 @@ import {
   postOrder,
   progressOf,
   subtree,
+  unpinAbove,
+  weighted,
   withUrgency,
 } from '../tree'
 import '../styles/tasks.css'
@@ -171,8 +172,6 @@ const isLive = (t: Task) => t.state === 'open' || t.state === 'in_progress'
 // can ever show a duration the user could not have been offered.
 const round5 = (min: number) => Math.max(5, Math.round(min / 5) * 5)
 
-const shown = (t: Task) => (t.state === 'done' ? 100 : t.progress)
-
 function parentSub(node: TaskNode): string {
   const all = leaves(node)
   return t('tasks.stepsDone', { done: all.filter((l) => l.state === 'done').length, count: all.length })
@@ -241,8 +240,34 @@ const searchWords = (title: string) => {
   return search === '' ? [] : search.split(/\s+/)
 }
 
+const NO_TASKS: TaskNode[] = []
+
 const shownBy = (filter: string | null, words: string[]) => (n: TaskNode) =>
   (filter === null || n.category === filter) && matches(n, words)
+
+// The goal's tasks that pass the filters, open and finished, each weighed by its minutes,
+// and how many there were.
+function goalProgress(
+  goal: Goal,
+  nodes: TaskNode[],
+  filter: string | null,
+  words: string[],
+): { pct: number; parts: number } {
+  const visible = shownBy(filter, words)
+  const mine = nodes.filter((n) => n.goal_id === goal.id && n.parent_id === null && n.state !== 'dropped')
+  const onScreen = new Set(mine.map((n) => n.id))
+  const finished = goal.finished.filter(
+    (f) =>
+      !onScreen.has(f.id) &&
+      (filter === null || f.category === filter) &&
+      words.every((w) => `${f.title} ${f.category} ${goal.title}`.toLowerCase().includes(w)),
+  )
+  const parts = [
+    ...mine.filter(visible).map((n) => ({ min: n.duration_min, pct: progressOf(n) })),
+    ...finished.map((f) => ({ min: f.duration_min, pct: 100 })),
+  ]
+  return { pct: weighted(parts), parts: parts.length }
+}
 
 // The live rows in the order they are drawn, before any leaving row is put back:
 // today's order heads Soon, pulling in any ordered task Later would hold.
@@ -321,9 +346,11 @@ function useRowMotion(root: RefObject<HTMLDivElement | null>, busy: boolean) {
   const read = useCallback(() => {
     const at = new Map<string, DOMRect>()
     const els = new Map<string, HTMLElement>()
+    const base = root.current?.getBoundingClientRect()
     root.current?.querySelectorAll<HTMLElement>('[data-row]').forEach((el) => {
       const key = el.dataset.row as string
-      at.set(key, el.getBoundingClientRect())
+      const r = el.getBoundingClientRect()
+      at.set(key, new DOMRect(r.left - (base?.left ?? 0), r.top - (base?.top ?? 0), r.width, r.height))
       els.set(key, el)
     })
     return { at, els }
@@ -386,7 +413,6 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const [showLater, setShowLater] = useState(false)
   const [leaving, setLeaving] = useState<Leaving[]>([])
   const [openSteps, setOpenSteps] = useState<Set<number>>(new Set())
-  const [openGoals, setOpenGoals] = useState<Set<number>>(new Set())
   const [filter, setFilter] = useState<string | null>(null)
   const [sort, setSort] = useState<SortKey>(storedSort)
   const [goalDraft, setGoalDraft] = useState<{ title: string; due: string; time: string } | null>(null)
@@ -474,7 +500,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       mark()
       setLeaving((ls) => ls.filter((l) => !snap.some((s) => s.id === l.id)))
       setNodes((ns) =>
-        ns ? snap.reduce((acc, s) => withState(acc, s.id, s.state, s.progress), ns) : ns,
+        ns ? snap.reduce((acc, s) => unpinAbove(withState(acc, s.id, s.state, s.progress), s.id), ns) : ns,
       )
       for (const s of snap) await patch(s.id, { state: s.state, progress: s.progress })
     },
@@ -505,7 +531,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     for (const s of snap) unfinished.current.set(s.id, s.progress)
     const root = roots.find((r) => r.id === node.root_id || r.id === node.id)
     if (root?.state === 'done') markLeaving(root, 'done')
-    setNodes(roots)
+    setNodes(unpinAbove(roots, node.id))
     void patch(node.id, { state: 'done' })
     notify(t('tasks.doneToast', { title: node.title }), {
       label: t('toast.undo'),
@@ -557,7 +583,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   }
 
   const setProgress = (task: Task, progress: number) => {
-    setNodes((ns) => (ns ? withTask(ns, { ...task, progress }) : ns))
+    setNodes((ns) => (ns ? unpinAbove(withTask(ns, { ...task, progress, progress_set: true }), task.id) : ns))
     void patch(task.id, { progress })
   }
 
@@ -600,13 +626,6 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     void patch(node.id, { is_now })
   }
 
-  const toggleGoal = (id: number) =>
-    setOpenGoals((open) => {
-      const next = new Set(open)
-      if (!next.delete(id)) next.add(id)
-      return next
-    })
-
   const editGoal = (goal: Goal, patch: { title?: string } | DueBody) => {
     api
       .patchGoal(goal.id, patch)
@@ -647,10 +666,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     setGoalDraft(null)
     api
       .addGoal({ title: text, ...due })
-      .then((g) => {
-        setGoals((gs) => [...gs, g])
-        setOpenGoals((open) => new Set(open).add(g.id))
-      })
+      .then((g) => setGoals((gs) => [...gs, g]))
       .catch(() => notify(t('goals.addFailed')))
   }
 
@@ -740,6 +756,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       goal_title: null,
       scheduled_at: null,
       progress: 0,
+      progress_set: false,
       expected_min: null,
       remaining_min: null,
       children: [],
@@ -795,42 +812,24 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     announce,
     toggleSteps,
   })
-  const onToggleGoal = useStableCallback(toggleGoal)
+  const onCompleteInGoal = useStableCallback((node: TaskNode) => actions.complete(node))
   const onEditGoal = useStableCallback(editGoal)
   const onCloseGoal = useStableCallback(closeGoal)
   const categories = useMemo(() => (nodes ? categoriesOf(nodes) : []), [nodes])
 
-  // A goal's rows are drawn here so an unchanged goal keeps the very same children.
-  const goalRows = useMemo(() => {
-    const rows = new Map<number, ReactNode>()
-    if (!nodes) return rows
+  // Each goal's open tasks that pass the filters, kept the same array while nothing in it changed.
+  const goalTasks = useMemo(() => {
+    const out = new Map<number, TaskNode[]>()
+    if (!nodes) return out
     const visible = shownBy(filter, searchWords(query))
     for (const goal of goals)
-      rows.set(
-        goal.id,
-        nodes
-          .filter(
-            (n) =>
-              n.goal_id === goal.id && visible(n) && (isLive(n) || leaving.some((l) => l.id === n.id)),
-          )
-          .sort(bySchedule)
-          .map((n) => (
-            <Row
-              key={n.id}
-              node={n}
-              group="soon"
-              scope="g"
-              actions={actions}
-              leaving={leaving.find((l) => l.id === n.id)?.state ?? null}
-              onGone={gone}
-              stepsOpen={openSteps.has(n.id)}
-              categories={categories}
-              goals={goals}
-            />
-          )),
-      )
-    return rows
-  }, [nodes, goals, filter, query, leaving, openSteps, categories, actions, gone])
+      out.set(goal.id, nodes.filter((n) => n.goal_id === goal.id && isLive(n) && visible(n)).sort(bySchedule))
+    return out
+  }, [nodes, goals, filter, query])
+  const goalPcts = useMemo(() => {
+    const words = searchWords(query)
+    return new Map(goals.map((g) => [g.id, nodes ? goalProgress(g, nodes, filter, words) : { pct: 0, parts: 0 }]))
+  }, [nodes, goals, filter, query])
 
   if (failed)
     return (
@@ -855,6 +854,9 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const doneToday = g.doneToday.filter((n) => !leaving.some((l) => l.id === n.id))
   const nothingFound = search !== '' && soon.length === 0 && later.length === 0
   const laterOpen = showLater || search !== ''
+  // Under a filter, a goal with nothing that passes it steps aside.
+  const shownGoals =
+    filter === null && search === '' ? goals : goals.filter((g) => (goalPcts.get(g.id)?.parts ?? 0) > 0)
   const orderedIds = new Set((shown?.soon ?? []).slice(0, shown?.ordered ?? 0).map((n) => n.id))
   const edgeAt = soon.findIndex((p) => !orderedIds.has(p.node.id))
   const head = edgeAt === -1 ? soon : soon.slice(0, edgeAt)
@@ -1007,21 +1009,19 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
         </div>
       )}
       {nothingFound && <p className="task-empty task-hint">{t('tasks.addHint', { title: query.trim() })}</p>}
-      {goals.length > 0 && (
-        <section className="task-group goals">
-          <h3 className="task-group-head">{t('goals.head')}</h3>
-          <div className="task-list">
-            {goals.map((goal) => (
-              <GoalRow
+      {shownGoals.length > 0 && (
+        <section className="task-group goals" aria-label={t('goals.head')}>
+          <div className="goal-strip">
+            {shownGoals.map((goal) => (
+              <GoalCard
                 key={goal.id}
                 goal={goal}
-                open={openGoals.has(goal.id)}
-                onToggle={onToggleGoal}
+                pct={goalPcts.get(goal.id)?.pct ?? 0}
+                tasks={goalTasks.get(goal.id) ?? NO_TASKS}
+                onComplete={onCompleteInGoal}
                 onEdit={onEditGoal}
                 onClose={onCloseGoal}
-              >
-                {goalRows.get(goal.id)}
-              </GoalRow>
+              />
             ))}
           </div>
         </section>
@@ -1290,25 +1290,24 @@ function Progress({
 
 type GoalEdit = 'title' | 'due' | null
 
-const GoalRow = memo(function GoalRow({
+const GoalCard = memo(function GoalCard({
   goal,
-  open,
-  onToggle,
+  pct,
+  tasks,
+  onComplete,
   onEdit,
   onClose,
-  children,
 }: {
   goal: Goal
-  open: boolean
-  onToggle: (id: number) => void
+  pct: number
+  tasks: TaskNode[]
+  onComplete: (node: TaskNode) => void
   onEdit: (goal: Goal, patch: { title?: string } | DueBody) => void
   onClose: (goal: Goal, state: 'done' | 'dropped') => void
-  children: ReactNode
 }) {
   const [editing, setEditing] = useState<GoalEdit>(null)
   const [draft, setDraft] = useState('')
   const [time, setTime] = useState('')
-  const pct = goal.tasks === 0 ? 0 : Math.round((goal.done_tasks / goal.tasks) * 100)
 
   const start = (what: Exclude<GoalEdit, null>) => {
     const due = dueDraft(goalDated(goal))
@@ -1336,47 +1335,27 @@ const GoalRow = memo(function GoalRow({
   ]
 
   return (
-    <div className="task-item goal-item" data-row={`goal${goal.id}`}>
-      <div className="task-row goal-row">
-        <button
-          className="goal-chev"
-          aria-expanded={open}
-          aria-label={t('goals.tasksOf', { title: goal.title })}
-          onClick={() => onToggle(goal.id)}
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M9 6l6 6-6 6" />
-          </svg>
-        </button>
-        <div className="task-body">
-          <span className="task-title">{goal.title}</span>
-          {goalDue(goal) && <span className="meta">{goalDue(goal)}</span>}
-        </div>
-        <div className="task-foot">
-          <span className="task-prog">
-            <span
-              className="task-bar-wrap"
-              role="progressbar"
-              aria-valuenow={pct}
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-label={t('tasks.progressOf', { title: goal.title })}
-            >
-              <span className="task-bar">
-                <span className="task-bar-fill" style={{ width: `${pct}%` }} />
-              </span>
-            </span>
-          </span>
-        </div>
-        <span className="task-acts">
-          <Overflow
-            className="task-more"
-            row=".goal-row"
-            label={t('memory.moreFor', { name: goal.title })}
-            items={items}
-          />
-        </span>
+    <div className="goal-card" data-row={`goal${goal.id}`}>
+      <div className="goal-card-head">
+        <span className="goal-card-title">{goal.title}</span>
+        <Overflow
+          className="task-more"
+          row=".goal-card"
+          label={t('memory.moreFor', { name: goal.title })}
+          items={items}
+        />
       </div>
+      {goalDue(goal) && <span className="meta">{goalDue(goal)}</span>}
+      <span
+        className="task-bar"
+        role="progressbar"
+        aria-valuenow={pct}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label={t('tasks.progressOf', { title: goal.title })}
+      >
+        <span className="task-bar-fill" style={{ width: `${pct}%` }} />
+      </span>
       {editing !== null && (
         <form className="task-inline" onSubmit={keep}>
           {editing === 'title' ? (
@@ -1401,7 +1380,16 @@ const GoalRow = memo(function GoalRow({
           </button>
         </form>
       )}
-      {open && <div className="goal-tasks">{children}</div>}
+      {tasks.length > 0 && (
+        <ul className="goal-card-tasks" aria-label={t('goals.tasksOf', { title: goal.title })}>
+          {tasks.map((n) => (
+            <li key={n.id}>
+              <Tick checked={false} label={t('tasks.tick', { text: n.title })} onClick={() => onComplete(n)} />
+              <span className="goal-card-task">{shownTitle(n)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 })
@@ -1461,7 +1449,6 @@ const Row = memo(function Row({
   }
 
   const live = !done && leaving === null
-  const loose = live && steps.length === 0
 
   const items: OverflowItem[] = []
   if (live) items.push({ label: t('block.start'), run: () => actions.startFocus(node) })
@@ -1514,7 +1501,7 @@ const Row = memo(function Row({
       },
     )
   if (steps.length > 0) items.push({ label: t('tasks.mergeSteps'), run: () => actions.mergeSteps(node) })
-  if (sheet && loose)
+  if (sheet && live)
     items.push({
       label: t('tasks.progress'),
       children: [
@@ -1571,7 +1558,7 @@ const Row = memo(function Row({
               task={node}
               value={progress}
               quiet={!speaks}
-              onSet={loose ? (p) => actions.setProgress(node, p) : undefined}
+              onSet={live ? (p) => actions.setProgress(node, p) : undefined}
             />
           )}
         </div>
@@ -1684,7 +1671,7 @@ const Step = memo(function Step({
   const [open, setOpen] = useState(false)
   const kids = liveChildren(node)
   const finished = node.state === 'done'
-  const value = kids.length > 0 ? progressOf(node) : shown(node)
+  const value = progressOf(node)
   return (
     <li className={`task-step${finished ? ' done' : ''}`} data-drag={live || undefined}>
       <Tick
@@ -1716,7 +1703,7 @@ const Step = memo(function Step({
           task={node}
           value={value}
           quiet={value === 0}
-          onSet={live && !finished && kids.length === 0 ? (p) => actions.setProgress(node, p) : undefined}
+          onSet={live && !finished ? (p) => actions.setProgress(node, p) : undefined}
         />
       )}
       {kids.length > 0 && open && <Steps parent={node} live={live} sheet={sheet} actions={actions} />}

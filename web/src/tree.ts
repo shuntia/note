@@ -103,19 +103,31 @@ export function finish(
   return { roots: next, changed }
 }
 
-/** Duration-weighted like the server derives a parent's: an unsized node weighs its siblings' mean. */
-export function progressOf(node: TaskNode): number {
-  if (node.state === 'done') return 100
-  const kids = liveChildren(node)
-  if (kids.length === 0) return node.progress
-  const sized = kids.flatMap((k) => (k.duration_min === null ? [] : [k.duration_min]))
+/** Each part's progress weighted by its minutes; an unsized part weighs the sized ones' mean. */
+export function weighted(parts: { min: number | null; pct: number }[]): number {
+  const sized = parts.flatMap((p) => (p.min === null ? [] : [p.min]))
   const mean = sized.length > 0 ? sized.reduce((a, b) => a + b, 0) / sized.length : 1
   let sum = 0
   let weight = 0
-  for (const k of kids) {
-    const w = k.duration_min ?? mean
-    sum += w * progressOf(k)
+  for (const p of parts) {
+    const w = p.min ?? mean
+    sum += w * p.pct
     weight += w
   }
   return weight === 0 ? 0 : Math.round(sum / weight)
+}
+
+/** As the server derives a parent's: its steps weighted by duration, unless it was set by hand. */
+export function progressOf(node: TaskNode): number {
+  if (node.state === 'done') return 100
+  const kids = liveChildren(node)
+  if (kids.length === 0 || node.progress_set) return node.progress
+  return weighted(kids.map((k) => ({ min: k.duration_min, pct: progressOf(k) })))
+}
+
+/** The trees with every hand-set number above `id` handed back to its steps. */
+export function unpinAbove(nodes: TaskNode[], id: number): TaskNode[] {
+  return pathTo(nodes, id)
+    .slice(0, -1)
+    .reduce((ns, above) => mapNode(ns, above.id, (n) => ({ ...n, progress_set: false })), nodes)
 }

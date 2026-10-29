@@ -515,6 +515,7 @@ const MIGRATIONS: &[&str] = &[
     DAY,
     CLEANUP,
     MICS,
+    "ALTER TABLE tasks ADD COLUMN progress_set INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// v68: each user's input gain per calling client, and the client a call came in on.

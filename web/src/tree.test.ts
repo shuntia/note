@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { findNode, finish, firstOpenLeaf, holds, leaves, mapNode, mapSubtree, pathTo, progressOf, subtree, withUrgency } from './tree'
+import { findNode, finish, firstOpenLeaf, holds, leaves, mapNode, mapSubtree, pathTo, progressOf, subtree, unpinAbove, weighted, withUrgency } from './tree'
 import type { TaskNode, TaskState } from './types'
 
 const n = (id: number, children: TaskNode[] = [], state: TaskState = 'open') =>
@@ -85,5 +85,20 @@ describe('urgency and progress', () => {
       full(4, { state: 'dropped' }),
     ])
     expect(progressOf(node)).toBe(Math.round((30 * 33 + 10 * 50) / 40))
+  })
+  test('a hand-set parent stands in for its steps, and only the parents above a moved step give way', () => {
+    const node = full(1, {}, [
+      full(2, { duration_min: 30, progress: 80, progress_set: true }, [full(5, { duration_min: 30 })]),
+      full(3, { duration_min: 10, progress: 0 }, [full(6, { duration_min: 10 })]),
+    ])
+    expect(progressOf(node)).toBe(60)
+    const [back] = unpinAbove([{ ...node, progress_set: true }], 5)
+    expect(back.progress_set).toBe(false)
+    expect(back.children[0].progress_set).toBe(false)
+    expect(progressOf(back)).toBe(0)
+  })
+  test('an unsized part weighs the mean of the sized ones', () => {
+    expect(weighted([{ min: 60, pct: 100 }, { min: 20, pct: 0 }, { min: null, pct: 0 }])).toBe(50)
+    expect(weighted([])).toBe(0)
   })
 })

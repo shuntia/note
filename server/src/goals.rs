@@ -29,6 +29,16 @@ pub struct Goal {
     pub next_task_title: Option<String>,
     pub next_due_at: Option<String>,
     pub next_due_on: Option<String>,
+    /// Its finished top-level tasks, so the open ones on screen can be weighed against them.
+    pub finished: Vec<FinishedTask>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FinishedTask {
+    pub id: i64,
+    pub title: String,
+    pub category: String,
+    pub duration_min: Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -115,7 +125,21 @@ fn row_to_goal(r: &rusqlite::Row) -> rusqlite::Result<Goal> {
         next_due_at: r.get(11)?,
         due_on: r.get(12)?,
         next_due_on: r.get(13)?,
+        finished: Vec::new(),
     })
+}
+
+fn with_finished(conn: &Connection, mut goal: Goal) -> rusqlite::Result<Goal> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, title, category, duration_min FROM tasks
+         WHERE goal_id = ?1 AND parent_id IS NULL AND state = 'done' ORDER BY id",
+    )?;
+    goal.finished = stmt
+        .query_map([goal.id], |r| {
+            Ok(FinishedTask { id: r.get(0)?, title: r.get(1)?, category: r.get(2)?, duration_min: r.get(3)? })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(goal)
 }
 
 pub fn get(conn: &Connection, user_id: i64, goal_id: i64) -> rusqlite::Result<Option<Goal>> {
@@ -124,7 +148,9 @@ pub fn get(conn: &Connection, user_id: i64, goal_id: i64) -> rusqlite::Result<Op
         (goal_id, user_id),
         row_to_goal,
     )
-    .optional()
+    .optional()?
+    .map(|g| with_finished(conn, g))
+    .transpose()
 }
 
 /// The user's goals, the soonest deadline first and the undated ones last.
@@ -142,8 +168,8 @@ pub fn list(conn: &Connection, user_id: i64, state: Option<&str>) -> Result<Vec<
         "SELECT {COLS} FROM {FROM} WHERE g.user_id = ?1 AND {filter}
          ORDER BY g.due_at IS NULL, g.due_at, g.id"
     ))?;
-    let rows = stmt.query_map([user_id], row_to_goal)?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+    let rows = stmt.query_map([user_id], row_to_goal)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows.into_iter().map(|g| with_finished(conn, g)).collect::<rusqlite::Result<_>>()?)
 }
 
 pub fn create(conn: &Connection, user_id: i64, new: NewGoal) -> Result<Goal, UpdateError> {
@@ -251,6 +277,24 @@ mod tests {
         )
         .unwrap()
         .id
+    }
+
+    #[test]
+    fn a_goal_lists_its_finished_top_level_tasks() {
+        let (conn, uid) = db_with_user();
+        let goal = create(&conn, uid, NewGoal { title: "ship".into(), ..Default::default() }).unwrap();
+        let done = task(&conn, uid, "draft", Some(goal.id), None);
+        task(&conn, uid, "polish", Some(goal.id), None);
+        crate::tasks::update(
+            &conn,
+            uid,
+            done,
+            &crate::tasks::TaskPatch { state: Some("done".into()), ..Default::default() },
+        )
+        .unwrap();
+        let ids = |g: &Goal| g.finished.iter().map(|f| f.id).collect::<Vec<_>>();
+        assert_eq!(ids(&get(&conn, uid, goal.id).unwrap().unwrap()), vec![done]);
+        assert_eq!(ids(&list(&conn, uid, None).unwrap()[0]), vec![done]);
     }
 
     #[test]

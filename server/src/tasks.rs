@@ -121,6 +121,8 @@ pub struct Task {
     pub actual_min: Option<u32>,
     /// How far along the task is, 0 to 100.
     pub progress: u32,
+    /// `progress` was set by hand, so it stands in for the steps' until one of them moves.
+    pub progress_set: bool,
     /// Where the minutes already worked say the task will land, and what is left
     /// of that. Derived from `progress` and `actual_min`, never stored.
     pub expected_min: Option<u32>,
@@ -378,6 +380,7 @@ fn row_to_task(r: &rusqlite::Row) -> rusqlite::Result<Task> {
         scheduled_at: None,
         actual_min,
         progress,
+        progress_set: r.get(30)?,
         expected_min,
         remaining_min,
     })
@@ -397,7 +400,7 @@ const COLS: &str = "t.id, t.title, t.description, t.state, t.source, t.notes, t.
          WHEN a4.due_at IS NOT NULL THEN a4.id END, \
     CASE WHEN 'high' IN (t.urgency, a1.urgency, a2.urgency, a3.urgency, a4.urgency) THEN 'high' \
          WHEN 'normal' IN (t.urgency, a1.urgency, a2.urgency, a3.urgency, a4.urgency) THEN 'normal' \
-         ELSE 'low' END";
+         ELSE 'low' END, t.progress_set";
 
 /// A node reads its ancestors (at most `MAX_DEPTH` of them) for what it
 /// inherits, and its root for the category and goal it reports.
@@ -424,7 +427,8 @@ fn checked_duration(min: u32) -> Result<u32, UpdateError> {
 
 /// A parent with live children holds their progress, each weighted by its
 /// duration (a child without one weighs what its siblings average) and a
-/// finished child counted full. A finished parent keeps its 100.
+/// finished child counted full. A finished parent keeps its 100, and a hand-set
+/// one its own number.
 const DERIVE_PROGRESS: &str = "
     UPDATE tasks SET progress = COALESCE((
         SELECT CAST(ROUND(SUM(w * p) * 1.0 / SUM(w)) AS INTEGER) FROM (
@@ -436,7 +440,7 @@ const DERIVE_PROGRESS: &str = "
             FROM tasks s WHERE s.parent_id = tasks.id AND s.state != 'dropped'
         )
     ), progress)
-    WHERE id = ?1 AND state != 'done'";
+    WHERE id = ?1 AND state != 'done' AND progress_set = 0";
 
 fn checked_progress(value: u32) -> Result<u32, UpdateError> {
     if value > MAX_PROGRESS {
@@ -832,6 +836,14 @@ fn rederive(conn: &Connection, id: i64, actor: Actor, adjusted: &mut Vec<Adjuste
         )?;
     }
     conn.execute(DERIVE_PROGRESS, [id])?;
+    Ok(())
+}
+
+/// A step moved, so every hand-set number above it gives way to the steps' again.
+fn unpin_above(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    for above in ancestors(conn, id)? {
+        conn.execute("UPDATE tasks SET progress_set = 0 WHERE id = ?1", [above])?;
+    }
     Ok(())
 }
 
@@ -1974,6 +1986,8 @@ fn update_within(
             notify = COALESCE(?12, notify),
             progress = CASE WHEN COALESCE(?3, state) = 'done' THEN 100
                 ELSE COALESCE(?13, progress) END,
+            progress_set = CASE WHEN ?3 IS NOT NULL THEN 0
+                WHEN ?13 IS NOT NULL THEN 1 ELSE progress_set END,
             category = CASE WHEN ?17 THEN COALESCE(?14, category) ELSE category END,
             goal_id = CASE WHEN ?17 AND ?18 THEN ?15 ELSE goal_id END,
             urgency = COALESCE(?16, urgency),
@@ -2028,6 +2042,9 @@ fn update_within(
     }
     if due_changed || moving.is_some() {
         clamp_dues(conn, task_id, &mut adjusted)?;
+    }
+    if patch.progress.is_some() || patch.state.is_some() {
+        unpin_above(conn, task_id)?;
     }
     rederive(conn, task_id, patch.actor, &mut adjusted)?;
     refresh_up(conn, parent_id, patch.actor, &mut adjusted)?;
@@ -2408,11 +2425,13 @@ mod tests {
         assert_eq!(progress(parent), 56);
 
         update(&conn, uid, parent, &TaskPatch { progress: Some(5), ..Default::default() }).unwrap();
-        assert_eq!(progress(parent), 56, "a parent with steps is not set by hand");
+        assert_eq!(progress(parent), 5, "a hand-set number stands in for the steps'");
+        assert!(get(&conn, uid, parent).unwrap().unwrap().progress_set);
 
         update(&conn, uid, write, &TaskPatch { state: Some("dropped".into()), ..Default::default() })
             .unwrap();
-        assert_eq!(progress(parent), 83, "a dropped step weighs nothing");
+        assert_eq!(progress(parent), 83, "a step that moves hands the parent back to its steps");
+        assert!(!get(&conn, uid, parent).unwrap().unwrap().progress_set);
 
         delete(&conn, uid, notes).unwrap();
         assert_eq!(progress(parent), 100);
