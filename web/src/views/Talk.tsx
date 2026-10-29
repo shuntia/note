@@ -516,6 +516,8 @@ export function Talk({
   const busy = pending === era.current || (watch !== null && watch === current)
   // the send in flight, for the frames arriving on the shell's socket
   const inFlight = useRef<{ conversation: number | null } | null>(null)
+  // the thread was read again while the send was in flight, so its reply may already be among the rows
+  const reread = useRef(false)
   const liveId = busy ? (inFlight.current?.conversation ?? watch) : null
   const watching = useRef<number | null>(null)
   // frames for the thread being opened, held until its live turn has been read
@@ -549,7 +551,8 @@ export function Talk({
       wanted.current = id
       if (!quiet) setMsgState('loading')
       const owned = inFlight.current !== null
-      if (!owned) {
+      if (owned) reread.current = true
+      else {
         watching.current = id
         early.current = []
         doneEarly.current = false
@@ -791,6 +794,7 @@ export function Talk({
     stick.current = true
     const sent = { conversation: current }
     inFlight.current = sent
+    reread.current = false
 
     const el = input.current
     const paneEl = pane.current
@@ -849,6 +853,10 @@ export function Talk({
       const reply = await talkTurn(text, current ?? undefined, current === null ? fresh : undefined, ctl.signal)
       void loadList(true)
       if (era.current !== sentIn) return
+      if (reread.current) {
+        void loadMessages(reply.conversation_id, true)
+        return
+      }
       setItems((prev) => [
         ...prev,
         {
