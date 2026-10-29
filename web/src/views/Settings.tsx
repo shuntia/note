@@ -15,6 +15,7 @@ import { previewPlayer } from '../voicePreview'
 import { VoiceSheet } from '../voiceSheet'
 import { deviceZone, knownDeviceZone } from '../zone'
 import { AboutSection } from './settings/AboutSection'
+import { ChoresTimes } from './settings/ChoresTimes'
 import { ComputerGroup, PushRow } from './settings/ComputerGroup'
 import { DebugSection } from './settings/DebugSection'
 import { MicSection } from './settings/MicSection'
@@ -563,6 +564,18 @@ export function Settings({
                     {...commitOn('close_day')}
                   />
                   <Status save={save} row="close_day" />
+                </div>
+              )}
+            </FoldRow>
+            <FoldRow
+              label={t('settings.chores')}
+              value={settings.chores_times.join(' · ') || t('settings.off')}
+              open={open === 'chores'}
+              onToggle={fold('chores')}
+            >
+              {open === 'chores' && (
+                <div className="set-fold-body">
+                  <ChoresTimes />
                 </div>
               )}
             </FoldRow>

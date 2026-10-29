@@ -6,6 +6,7 @@ pub mod auth;
 pub mod builtin_memory;
 pub mod calendar;
 pub mod channels;
+pub mod chores;
 pub mod config;
 pub mod context;
 pub mod csp;

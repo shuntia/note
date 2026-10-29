@@ -331,6 +331,11 @@ pub struct UserConfig {
     /// ritual off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub close_day_time: Option<String>,
+    /// When the tidy-up wake-ups fire, zero-padded HH:MM; only those after
+    /// `day_start` and before `close_day_time` count, and an empty list turns
+    /// them off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chores_times: Option<Vec<String>>,
     /// When the day is laid if the user has not shown up by then, zero-padded
     /// HH:MM; blank turns day-laying off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -407,6 +412,8 @@ pub const DEFAULT_TRIGGERS_PER_DAY: u32 = 12;
 pub const UNLIMITED_TRIGGERS: i32 = -1;
 pub const DEFAULT_DAY_START: &str = "08:00";
 pub const DEFAULT_CLOSE_DAY_TIME: &str = "21:30";
+pub const DEFAULT_CHORES_TIMES: [&str; 3] = ["11:00", "15:00", "19:00"];
+pub const MAX_CHORES_TIMES: usize = 6;
 pub const DEFAULT_CALLS_UNTIL: &str = "23:00";
 pub const DEFAULT_MORNING_UNTIL: &str = "11:00";
 pub const DEFAULT_POMODORO_WORK_MIN: u32 = 25;
@@ -441,6 +448,13 @@ impl UserConfig {
     /// Blank where the user has turned the close of the day off.
     pub fn close_day_time(&self) -> &str {
         self.close_day_time.as_deref().unwrap_or(DEFAULT_CLOSE_DAY_TIME)
+    }
+
+    pub fn chores_times(&self) -> Vec<&str> {
+        match &self.chores_times {
+            Some(times) => times.iter().map(String::as_str).collect(),
+            None => DEFAULT_CHORES_TIMES.to_vec(),
+        }
     }
 
     pub fn day_start(&self) -> &str {
@@ -559,6 +573,12 @@ impl UserConfig {
             cfg.close_day_time().is_empty() || crate::templates::valid_time(cfg.close_day_time()),
             "invalid close_day_time {:?}",
             cfg.close_day_time()
+        );
+        anyhow::ensure!(
+            cfg.chores_times().len() <= MAX_CHORES_TIMES
+                && cfg.chores_times().iter().all(|t| crate::templates::valid_time(t)),
+            "invalid chores_times {:?}",
+            cfg.chores_times()
         );
         anyhow::ensure!(
             cfg.day_start().is_empty() || crate::templates::valid_time(cfg.day_start()),

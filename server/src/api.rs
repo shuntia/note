@@ -1677,6 +1677,7 @@ struct SettingsPatch {
     timezone_auto: Option<bool>,
     nightly_time: Option<String>,
     close_day_time: Option<String>,
+    chores_times: Option<Vec<String>>,
     calls_until: Option<String>,
     morning_until: Option<String>,
     template: Option<String>,
@@ -1729,6 +1730,7 @@ fn settings_body(
         "timezone_auto": cfg.timezone_auto(),
         "nightly_time": cfg.nightly_time,
         "close_day_time": cfg.close_day_time(),
+        "chores_times": cfg.chores_times(),
         "calls_until": cfg.calls_until(),
         "morning_until": cfg.morning_until(),
         "template": cfg.template,
@@ -1877,6 +1879,18 @@ async fn settings_put(
             );
         }
         cfg.close_day_time = Some(time.to_string());
+    }
+    if let Some(times) = req.chores_times {
+        let mut times: Vec<String> = times.iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
+        if times.len() > crate::config::MAX_CHORES_TIMES || !times.iter().all(|t| crate::templates::valid_time(t)) {
+            return invalid_field(
+                "chores_times",
+                &format!("must be up to {} zero-padded 24-hour HH:MM times", crate::config::MAX_CHORES_TIMES),
+            );
+        }
+        times.sort();
+        times.dedup();
+        cfg.chores_times = Some(times);
     }
     if let Some(time) = req.calls_until {
         let time = time.trim();

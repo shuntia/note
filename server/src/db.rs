@@ -516,7 +516,22 @@ const MIGRATIONS: &[&str] = &[
     CLEANUP,
     MICS,
     "ALTER TABLE tasks ADD COLUMN progress_set INTEGER NOT NULL DEFAULT 0;",
+    CHORES,
 ];
+
+/// v70: the tidy-up wake-ups get an origin of their own, and each user a
+/// cursor for the slice of long-term memory the next one looks over.
+const CHORES: &str = "
+    ALTER TABLE events ADD COLUMN origin_next TEXT NOT NULL DEFAULT 'template'
+        CHECK (origin_next IN ('template','agent','auto','user','idle','lay_day','await_reply','chores'));
+    UPDATE events SET origin_next = origin;
+    ALTER TABLE events DROP COLUMN origin;
+    ALTER TABLE events RENAME COLUMN origin_next TO origin;
+    CREATE TABLE memory_rounds (
+        user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        after TEXT NOT NULL
+    );
+";
 
 /// v68: each user's input gain per calling client, and the client a call came in on.
 const MICS: &str = "
@@ -788,6 +803,25 @@ mod tests {
         add("await_reply").unwrap();
         assert!(add("nope").is_err());
         conn.execute("INSERT INTO paused_sessions (event_id, session) VALUES (2, '{}')", []).unwrap();
+    }
+
+    #[test]
+    fn v70_gives_tidy_ups_their_origin_and_keeps_the_rest() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        apply_migrations(&conn, BASELINE, &MIGRATIONS[..MIGRATIONS.len() - 1]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member');
+             INSERT INTO plans (user_id, date, created_at) VALUES (1, '2026-10-29', 'x');
+             INSERT INTO events (plan_id, kind, wall_time, origin) VALUES (1, 'trigger', '09:00', 'await_reply');",
+        )
+        .unwrap();
+        assert!(conn.execute("INSERT INTO events (plan_id, kind, wall_time, origin) VALUES (1, 'trigger', '11:00', 'chores')", []).is_err());
+        apply_migrations(&conn, BASELINE, MIGRATIONS).unwrap();
+        let origin: String = conn.query_row("SELECT origin FROM events", [], |r| r.get(0)).unwrap();
+        assert_eq!(origin, "await_reply");
+        conn.execute("INSERT INTO events (plan_id, kind, wall_time, origin) VALUES (1, 'trigger', '11:00', 'chores')", []).unwrap();
+        conn.execute("INSERT INTO memory_rounds (user_id, after) VALUES (1, 'm1')", []).unwrap();
     }
 
     #[test]

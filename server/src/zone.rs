@@ -41,10 +41,10 @@ struct Pending {
     end: Option<String>,
 }
 
-/// Restates every still-pending event of the user that is not template
-/// furniture so it fires at the same instant under `to` as it would have under
-/// `from`, moving it to the plan of the date it now falls on. Template events
-/// keep their civil time, and anything already due is left for the runner. A
+/// Restates every still-pending event of the user that is not template or
+/// tidy-up furniture so it fires at the same instant under `to` as it would
+/// have under `from`, moving it to the plan of the date it now falls on.
+/// Furniture keeps its civil time, and anything already due is left for the runner. A
 /// block the move would carry past midnight ends at 23:59. Whole-day dues stay
 /// on their day and end where it ends under `to`. Returns how many events
 /// moved.
@@ -62,7 +62,7 @@ pub fn rezone(
         let mut stmt = conn.prepare(
             "SELECT e.id, p.date, e.wall_time, e.orig_wall_time, e.end_wall_time
              FROM events e JOIN plans p ON p.id = e.plan_id
-             WHERE p.user_id = ?1 AND e.status IN ('pending', 'snoozed') AND e.origin != 'template'",
+             WHERE p.user_id = ?1 AND e.status IN ('pending', 'snoozed') AND e.origin NOT IN ('template', 'chores')",
         )?;
         let rows = stmt.query_map([user_id], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get(2)?, r.get(3)?, r.get(4)?))

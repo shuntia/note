@@ -80,6 +80,7 @@ export const WRITABLE_SETTINGS = [
   'timezone_auto',
   'nightly_time',
   'close_day_time',
+  'chores_times',
   'calls_until',
   'morning_until',
   'template',

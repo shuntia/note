@@ -31,7 +31,7 @@ fn a_full_simulated_day() {
     write(
         tmp.path(),
         "defaults/user.toml",
-        "display_name = \"Aki\"\ntimezone = \"Asia/Tokyo\"\ntemplate = \"default\"\nday_start = \"\"\n",
+        "display_name = \"Aki\"\ntimezone = \"Asia/Tokyo\"\ntemplate = \"default\"\nday_start = \"\"\nchores_times = []\n",
     );
     write(
         tmp.path(),

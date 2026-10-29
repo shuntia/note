@@ -113,6 +113,12 @@ fn run_stages(
         crate::triggers::lay_close_day(&conn, deps.config_dir, username, user_id, date, now)
     };
     report.stage("close_day", at, closed.as_ref().err().inspect(|e| note("close_day_error", e)));
+    let at = std::time::Instant::now();
+    let chores = {
+        let conn = crate::db_guard(deps.db);
+        crate::chores::lay(&conn, deps.config_dir, username, user_id, date, now)
+    };
+    report.stage("chores", at, chores.as_ref().err().inspect(|e| note("chores_error", e)));
 
     let lang = crate::text::Lang::for_user(deps.config_dir, username);
     let mut opening = crate::model_text::nightly_opening(lang, date);
@@ -423,7 +429,7 @@ mod tests {
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert_eq!(n, 2, "the template event and the close of the day");
+            assert_eq!(n, 5, "the template event, the close of the day and three tidy-ups");
             let content: String = conn
                 .query_row(
                     "SELECT content FROM debriefs WHERE user_id=1 AND date='2026-08-31'",
@@ -442,7 +448,7 @@ mod tests {
             counts(
                 "SELECT COUNT(*) FROM events e JOIN plans p ON p.id = e.plan_id WHERE p.date='2026-08-31'"
             ),
-            2
+            5
         );
         assert_eq!(
             counts("SELECT COUNT(*) FROM debriefs WHERE user_id=1 AND date='2026-08-31'"),
@@ -586,7 +592,7 @@ mod tests {
         let line = nightly_run_row(&db.lock().unwrap());
         assert_eq!(
             without_timings(&line),
-            "2026-08-31: review=ok, learn=ok, plan=ok, close_day=ok, \
+            "2026-08-31: review=ok, learn=ok, plan=ok, close_day=ok, chores=ok, \
              session=ok, notes=ok, debrief=written"
         );
         assert_ne!(line, without_timings(&line), "every stage carries its own seconds");

@@ -20,7 +20,7 @@ pub fn config_dir() -> TempDir {
     };
     write(
         "defaults/user.toml",
-        "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\nday_start = \"\"\n",
+        "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\nday_start = \"\"\nchores_times = []\n",
     );
     write(
         "defaults/templates/default.toml",

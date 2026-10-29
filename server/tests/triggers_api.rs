@@ -1164,3 +1164,31 @@ async fn a_reply_sent_while_the_waiting_session_finishes_still_answers_the_wait(
     assert_eq!(wait["replies"], serde_json::json!(["ok starting"]));
     assert_eq!(statuses(&w), ["done", "done"]);
 }
+
+#[tokio::test]
+async fn a_tidy_up_opens_on_its_brief_lays_nothing_that_stays_and_waits_on_no_question() {
+    let w = world(vec![
+        call("c1", "wake_save", r#"{"note":"look again","at":"+90min"}"#),
+        call("c2", "say", r#"{"text":"Merged the two lab reports. Ten minutes on the bill?"}"#),
+    ])
+    .await;
+    let (status, body) = post(&w, "/api/tasks", r#"{"title":"pay the bill"}"#).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    {
+        let conn = w.state.db.lock().unwrap();
+        let today = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date();
+        let plan = note_server::plan::ensure(&conn, &w.state.config_dir, "aki", 1, today).unwrap();
+        let prompt = note_server::model_text::chores_prompt(note_server::text::Lang::En);
+        note_server::triggers::insert(&conn, plan, &this_minute(), prompt, "chores", None, None, None, jiff::Timestamp::now())
+            .unwrap();
+    }
+
+    note_server::runner::sweep_once(&w.state);
+
+    let opening = format!("{:?}", w.llm.seen()[0].messages.last().unwrap());
+    assert!(opening.contains("This wake-up is for housekeeping"), "{opening}");
+    assert!(opening.contains("\\\"pay the bill\\\": no duration"), "{opening}");
+    assert_eq!(w.push.seen().len(), 1);
+    let left: Vec<String> = rows(&w, "SELECT origin || ':' || status FROM events WHERE kind = 'trigger' ORDER BY id");
+    assert_eq!(left, vec!["chores:done", "agent:dropped"], "no wait on its question, and no wake-up of its own");
+}

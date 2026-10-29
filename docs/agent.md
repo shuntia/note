@@ -110,7 +110,7 @@ stage's outcome and timing.
 ## Wake-ups
 
 A wake-up is a trigger session: Note looks at the day on its own and ends with
-`say` or `stay_quiet`. Three things lay one (the first and last only with
+`say` or `stay_quiet`. Four things lay one (all but `wake_save` only with
 check-ins on):
 
 - `lay_day`, once per local day, at the user's first activity at or after
@@ -134,12 +134,28 @@ check-ins on):
   waiting wake-ups; later ones only as a count and the next one's moment.
 - Idle: after `idle_nudge_min` (default 20; 0 is off) minutes without a sign of
   the user on a day they were active, outside a work session, quiet window and
-  `close_day_time`, within budget. Each idle check that ends quiet doubles the
+  `close_day_time`, while the agent's own wake-ups leave budget. Idle checks
+  never spend the budget themselves. Each idle check that ends quiet doubles the
   wait for the next (20, 40, then 80 minutes) until the user is seen again, and
   none is laid within an hour of one that spoke while nothing has changed since
   (no message, task change or plan event). Its opening says how long the user has been
   quiet and lists active working notes, if any, with each one's age and last
   nudge.
+- Tidy-ups (origin `chores`), at each of `chores_times` (default 11:00, 15:00,
+  19:00) after `day_start` and before `close_day_time`, off the budget. The
+  nightly run lays them for its day and every sweep lays today's still ahead,
+  so a time is laid once per day whatever became of it; a pending one whose
+  time the user dropped is taken back. One waits out an open work session
+  (dropped once 90 minutes late) and never folds with other wake-ups. Its
+  opening asks it to merge duplicate tasks, re-date or drop plainly dead ones
+  (asking when unsure), add obvious durations and steps, and supersede, fix or
+  remove memories, then offer one small task and end with a short `say`. It
+  lists up to 25 task candidates (likely duplicates, overdue 3+ days, untouched
+  14+ days, 90+ minute roots with no steps, steps with no duration), a random
+  small step, the next 30 long-term facts after a per-user cursor
+  (`memory_rounds`, wrapping), and what earlier tidy-ups said today. It cannot
+  call, a question in it waits only when it names `await_min`, and any
+  wake-up it lays is dropped when it ends.
 
 A wake-up tends tasks, the order, the schedule, working notes and memory
 ([tools](#tools)), lays tasks on the plan, reads goals and the calendar, searches

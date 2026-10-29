@@ -184,7 +184,8 @@ pub fn fire_due(
 ///
 /// Triggers fire at most one session per user per sweep, and none for a user
 /// in `running`. One more than `LATE_MIN` late is dropped; the rest due
-/// alongside the first fold into it, except a resumed wait, which waits its turn.
+/// alongside the first fold into it, except a resumed wait or a tidy-up, which
+/// waits its turn. A tidy-up also waits out an open work session.
 pub fn fire_due_except<S: std::hash::BuildHasher>(
     conn: &Connection,
     config_dir: &Path,
@@ -262,12 +263,15 @@ pub fn fire_due_except<S: std::hash::BuildHasher>(
         if trigger && cancel_settled_trigger(conn, &c, now)? {
             continue;
         }
-        let resumes = c.origin == crate::triggers::AWAIT_ORIGIN;
+        let alone = c.origin == crate::triggers::AWAIT_ORIGIN || c.origin == crate::chores::ORIGIN;
         let into = if trigger { lead.get(&c.user_id).copied() } else { None };
-        if let Some((_, lead_resumes)) = into {
-            if resumes || lead_resumes {
+        if let Some((_, lead_alone)) = into {
+            if alone || lead_alone {
                 continue;
             }
+        }
+        if c.origin == crate::chores::ORIGIN && crate::triggers::open_work_session(conn, c.user_id)?.is_some() {
+            continue;
         }
         conn.execute(
             "UPDATE events SET status='fired', fired_at=?1 WHERE id=?2",
@@ -285,7 +289,7 @@ pub fn fire_due_except<S: std::hash::BuildHasher>(
         }
         crate::log::record(conn, Some(c.user_id), "event_fired", &format!("event {} due {}", c.event_id, due))?;
         if trigger {
-            lead.insert(c.user_id, (fired.len(), resumes));
+            lead.insert(c.user_id, (fired.len(), alone));
         }
         fired.push(FiredEvent {
             event_id: c.event_id,
@@ -454,6 +458,9 @@ pub fn sweep(state: &AppState) -> Vec<std::thread::JoinHandle<()>> {
             Vec::new()
         });
         if let Err(e) = crate::wake::check(&conn, &state.config_dir, now) {
+            note(e);
+        }
+        if let Err(e) = crate::chores::check(&conn, &state.config_dir, now) {
             note(e);
         }
         let started = block_starts(&conn, &state.config_dir, now).unwrap_or_else(|e| {

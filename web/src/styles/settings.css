@@ -78,6 +78,19 @@
 }
 .set-fold-body :is(input, select, textarea):focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .set-fold-body input:disabled { color: var(--quiet); opacity: 1; }
+.set-times { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; max-width: 100%; }
+.set-time { display: inline-flex; align-items: center; gap: 0.125rem; }
+.set-time-remove {
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+  border: 0;
+  background: none;
+  color: var(--faint);
+  font: inherit;
+  font-size: 1.125rem;
+  cursor: pointer;
+}
+.set-time-remove:hover { color: var(--ink); }
 .set-zone { display: flex; align-items: center; gap: 0.75rem; max-width: 100%; }
 .set-zone input { flex: 1 1 auto; min-width: 0; }
 .set-hint { font-size: 0.78rem; color: var(--faint); }

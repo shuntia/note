@@ -195,14 +195,14 @@ pub fn allowance_over(
     Ok(Some(per_day.saturating_add(extra.max(0) as u32)))
 }
 
-/// Triggers the agent laid, or idleness laid, for that day out of its own
-/// budget: a check inside a work session is the session's, not the day's, and
-/// a dropped one gives its place back.
+/// Triggers the agent laid for that day out of its own budget: a check inside a
+/// work session is the session's, not the day's, and a dropped one gives its
+/// place back.
 pub fn spent(conn: &Connection, user_id: i64, date: jiff::civil::Date) -> rusqlite::Result<u32> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM events e JOIN plans p ON p.id = e.plan_id
          WHERE p.user_id = ?1 AND p.date = ?2 AND e.kind = ?3
-           AND e.origin IN ('agent', 'idle') AND e.work_session_id IS NULL AND e.status != 'dropped'",
+           AND e.origin = 'agent' AND e.work_session_id IS NULL AND e.status != 'dropped'",
         (user_id, date.to_string(), KIND),
         |r| r.get(0),
     )?;
@@ -586,7 +586,7 @@ pub fn log(conn: &Connection, user_id: i64, today: jiff::civil::Date) -> rusqlit
 
 /// How each trigger since `since` ended, from the log rows its firing wrote:
 /// `said`, `rang`, `quiet`, `cancelled` or `replaced`, with the words or reason.
-fn endings(
+pub(crate) fn endings(
     conn: &Connection,
     user_id: i64,
     since: jiff::civil::Date,
@@ -1333,7 +1333,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     }
     let tz = timezone(&state.config_dir, &fired.username);
     let l = Lang::for_user(&state.config_dir, &fired.username);
-    let (ev, opening, history, thread_note, parked, also, linked) = {
+    let (ev, opening, history, thread_note, parked, also, linked, fence) = {
         let conn = state.db();
         let Ok(Some(ev)) = read(&conn, fired.event_id) else {
             return;
@@ -1358,10 +1358,14 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         if ev.origin == crate::idle::ORIGIN {
             opening.push_str(&crate::idle::context(&conn, &state.data_dir, fired.user_id, &fired.username, &tz, l, now).unwrap_or_default());
         }
+        let fence = (ev.origin == crate::chores::ORIGIN).then(|| {
+            opening.push_str(&crate::chores::opening(&conn, fired.user_id, &fired.username, &tz, l, now).unwrap_or_default());
+            crate::chores::fence(&conn).unwrap_or(i64::MAX)
+        });
         opening.push_str(&crate::follow_up::summary(&conn, fired.user_id, &tz, l, now).unwrap_or_default());
         let linked = crate::follow_up::tasks_of_events(&conn, &all).unwrap_or_default();
         let (history, note) = thread_context(&conn, ev.conversation_id, l);
-        (ev, opening, history, note, parked, also, linked)
+        (ev, opening, history, note, parked, also, linked, fence)
     };
     let resumed = parked.map(|p| resumed(state, fired, &ev, p, now));
     let deps = crate::agent::SessionDeps {
@@ -1377,7 +1381,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         token_id: None,
         thread_note,
         share: None,
-        caller: Some(state),
+        caller: if fence.is_some() { None } else { Some(state) },
         conversation_id: None,
     };
     let call_args = std::cell::RefCell::new(String::new());
@@ -1407,6 +1411,9 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
             &log_writes,
         ),
     };
+    if let Some(fence) = fence {
+        let _ = crate::chores::drop_laid_since(&state.db(), fired.user_id, fence, now);
+    }
     if changed.get() {
         state.hub.broadcast_changed(fired.user_id);
     }
@@ -1462,7 +1469,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     let defaulted = result["await_default"] == true;
     let asked = result["await_min"]
         .as_u64()
-        .filter(|_| !(defaulted && (own || laid_a_wake(&out))))
+        .filter(|_| !(defaulted && (own || fence.is_some() || laid_a_wake(&out))))
         .map(|min| u32::try_from(min).unwrap_or(*AWAIT_MIN.end()));
     let wait_min = if rings {
         Some(CALL_WAIT_MIN)
@@ -1629,7 +1636,7 @@ fn fire_capped(state: &crate::AppState, fired: &crate::runner::FiredEvent, now: 
     let Ok(Some(ev)) = read(&conn, fired.event_id) else {
         return;
     };
-    let silent = [crate::idle::ORIGIN, crate::wake::ORIGIN, AWAIT_ORIGIN].contains(&ev.origin.as_str());
+    let silent = [crate::idle::ORIGIN, crate::wake::ORIGIN, crate::chores::ORIGIN, AWAIT_ORIGIN].contains(&ev.origin.as_str());
     if silent {
         let _ = conn.execute("DELETE FROM paused_sessions WHERE event_id = ?1", [ev.event_id]);
         let _ = conn.execute(
@@ -2161,11 +2168,14 @@ mod tests {
     }
 
     #[test]
-    fn an_idle_trigger_spends_the_days_budget() {
+    fn only_the_agents_own_triggers_spend_the_days_budget() {
         let (conn, tmp, uid) = env();
         let plan_id = crate::plan::ensure(&conn, tmp.path(), "aki", uid, date()).unwrap();
-        insert(&conn, plan_id, "09:00", "idle", "idle", Some(Cancel::Active), None, None,
-            at("2026-09-17T09:00:00Z")).unwrap();
+        for origin in ["idle", crate::chores::ORIGIN, "template", crate::wake::ORIGIN] {
+            insert(&conn, plan_id, "09:00", origin, origin, None, None, None, at("2026-09-17T09:00:00Z")).unwrap();
+        }
+        assert_eq!(spent(&conn, uid, date()).unwrap(), 0);
+        insert(&conn, plan_id, "09:00", "check", "agent", None, None, None, at("2026-09-17T09:00:00Z")).unwrap();
         assert_eq!(spent(&conn, uid, date()).unwrap(), 1);
     }
 

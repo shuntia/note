@@ -22,7 +22,7 @@ export type InviteCreated = Invite & { token: string; url: string }
 export type MovedTo = { event_id: number; date: string; wall_time: string; kind: string }
 
 // Where the event came from: the template, the agent, the allocator, or a user edit.
-export type EventOrigin = 'template' | 'agent' | 'auto' | 'user' | 'idle' | 'lay_day' | 'await_reply'
+export type EventOrigin = 'template' | 'agent' | 'auto' | 'user' | 'idle' | 'lay_day' | 'await_reply' | 'chores'
 
 export type TaskUrgency = 'low' | 'normal' | 'high'
 
@@ -262,6 +262,8 @@ export type Settings = {
   nightly_time: string
   // When the close-the-day card appears; '' where the user turned it off.
   close_day_time: string
+  // When the tidy-ups fire, HH:MM; those outside the day are skipped and [] turns them off.
+  chores_times: string[]
   // Until when Note may call, HH:MM; '' runs calls to midnight.
   calls_until: string
   // Until when an open morning brings the letter to the face, HH:MM.

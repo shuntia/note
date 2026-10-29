@@ -91,7 +91,8 @@ async fn put_persists_to_disk_and_is_reflected_by_get() {
     let raw = std::fs::read_to_string(cfg.path().join("users/aki/user.toml")).unwrap();
     let on_disk: toml::Value = toml::from_str(&raw).unwrap();
     let table = on_disk.as_table().unwrap();
-    assert_eq!(table.len(), 7, "unexpected keys in {raw}");
+    assert_eq!(table.len(), 8, "unexpected keys in {raw}");
+    assert_eq!(table["chores_times"].as_array().map(Vec::len), Some(0));
     assert_eq!(table["display_name"].as_str(), Some("X"));
     assert_eq!(table["timezone"].as_str(), Some("Asia/Tokyo"));
     assert_eq!(table["nightly_time"].as_str(), Some("22:30"));
@@ -211,6 +212,8 @@ async fn invalid_fields_are_rejected_by_name() {
         (r#"{"close_day_time":"9:30"}"#, "close_day_time"),
         (r#"{"close_day_time":"21:60"}"#, "close_day_time"),
         (r#"{"calls_until":"11pm"}"#, "calls_until"),
+        (r#"{"chores_times":["9:00"]}"#, "chores_times"),
+        (r#"{"chores_times":["01:00","02:00","03:00","04:00","05:00","06:00","07:00"]}"#, "chores_times"),
         (r#"{"template":"nope"}"#, "template"),
     ];
     for (body, field) in cases {
@@ -238,6 +241,20 @@ async fn the_close_of_the_day_defaults_to_an_evening_and_blank_turns_it_off() {
     assert_eq!(v["close_day_time"], "");
     let v = json(app.oneshot(get(&cookie)).await.unwrap()).await;
     assert_eq!(v["close_day_time"], "");
+}
+
+#[tokio::test]
+async fn tidy_up_times_save_sorted_and_distinct_and_empty_turns_them_off() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let v = json(
+        app.clone().oneshot(put(&cookie, r#"{"chores_times":["16:00"," 10:30","16:00",""]}"#)).await.unwrap(),
+    )
+    .await;
+    assert_eq!(v["chores_times"], serde_json::json!(["10:30", "16:00"]));
+    let v = json(app.clone().oneshot(put(&cookie, r#"{"chores_times":[]}"#)).await.unwrap()).await;
+    assert_eq!(v["chores_times"], serde_json::json!([]));
+    let v = json(app.oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!(v["chores_times"], serde_json::json!([]));
 }
 
 #[tokio::test]

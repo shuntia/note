@@ -802,6 +802,124 @@ pub fn lay_day_prompt(l: Lang) -> &'static str {
     )
 }
 
+pub fn chores_prompt(l: Lang) -> &'static str {
+    l.of(
+        "Tidy-up: look over tasks and memory, then offer one small task.",
+        "整理: タスクと記憶を見直し、小さなタスクを一つ提案する。",
+    )
+}
+
+pub fn chores_brief(l: Lang) -> &'static str {
+    l.of(
+        "\nThis wake-up is for housekeeping. Here changing things is the point, more than \
+         \"change only what clearly helps\" suggests; everything is logged.\n\
+         1. Tasks: the candidates below are hints, not verdicts. Merge duplicates: keep one, fold \
+         the other's detail into it (task_save), set the extra to state dropped. Re-date or drop a \
+         task only when it is plainly dead or stale; when unsure, ask about it in your message \
+         instead. Add a duration or a few steps where they are obvious.\n\
+         2. Memory: the facts below are this run's slice of long-term memory. Merge duplicates and \
+         settle contradictions (memory_save with supersedes), remove stale ones (memory_remove), \
+         fix wrong ones.\n\
+         3. Then pick ONE small open task that suits right now and offer it. Not always the most \
+         urgent: vary it; the random pick below, or another small or later one, is fine.\n\
+         4. End with `say`: one to three short lines, no headings, naming what you tidied and the \
+         task you offer, its id in task_ids. `stay_quiet` only when you changed nothing and \
+         nothing is worth offering.\n\
+         Lay no wake-ups and make no call from this run.\n",
+        "\nこの目覚めは片付けのためのものです。ここでは「はっきり良くなることだけを変える」よりも踏み込んで\
+         変えることが目的です。すべて記録されます。\n\
+         1. タスク: 下の候補はヒントであり、結論ではありません。重複はまとめる: 一つを残し、\
+         もう一方の詳細をそこに移し(task_save)、余分な方を state dropped にする。日付の変更や\
+         手放しは、明らかに終わっている・古いときだけ。迷うときは手放さず、メッセージで尋ねる。\
+         所要時間やステップが明らかなら追加する。\n\
+         2. 記憶: 下の事実は今回見直す長期記憶の一部です。重複や矛盾はまとめる\
+         (memory_save の supersedes)、古いものは削除(memory_remove)、誤りは直す。\n\
+         3. そのあと、今に合った小さな未完了タスクを一つ選んで提案する。いつも最も急ぐものではなく、\
+         変化をつける。下のランダムな候補や、ほかの小さなもの・後回しのものでよい。\n\
+         4. 最後は `say`: 見出しなしの短い一〜三行で、片付けたことと提案するタスクを伝え、\
+         その id を task_ids に入れる。`stay_quiet` は何も変えず、提案する価値のあるものもない\
+         ときだけ。\n\
+         この実行では目覚めを置かず、電話もかけない。\n",
+    )
+}
+
+pub fn chores_tasks_heading(l: Lang) -> &'static str {
+    l.of("\nTask candidates:\n", "\nタスクの候補:\n")
+}
+
+pub fn chores_no_tasks(l: Lang) -> &'static str {
+    l.of("\nNo task looks in need of tidying.\n", "\n片付けが必要そうなタスクはありません。\n")
+}
+
+pub fn chores_task_line(l: Lang, id: i64, title: &str, flags: &[String]) -> String {
+    let sep = l.of("; ", "、");
+    format!("- t{id} {title:?}: {}", flags.join(sep))
+}
+
+pub fn chores_duplicate(l: Lang, others: &[i64]) -> String {
+    let ids = others.iter().map(|id| format!("t{id}")).collect::<Vec<_>>().join(", ");
+    match l {
+        Lang::En => format!("looks like {ids}"),
+        Lang::Ja => format!("{ids}と重複の可能性"),
+    }
+}
+
+pub fn chores_overdue(l: Lang, days: i64) -> String {
+    match l {
+        Lang::En => format!("overdue {days} days"),
+        Lang::Ja => format!("期限超過{days}日"),
+    }
+}
+
+pub fn chores_untouched(l: Lang, days: i64) -> String {
+    match l {
+        Lang::En => format!("untouched {days} days"),
+        Lang::Ja => format!("{days}日間変更なし"),
+    }
+}
+
+pub fn chores_no_steps(l: Lang, min: u32) -> String {
+    match l {
+        Lang::En => format!("{min} min with no steps"),
+        Lang::Ja => format!("{min}分でステップなし"),
+    }
+}
+
+pub fn chores_no_duration(l: Lang) -> String {
+    l.of("no duration", "所要時間なし").to_string()
+}
+
+pub fn chores_random_pick(l: Lang, id: i64, title: &str) -> String {
+    match l {
+        Lang::En => format!("\nRandom small pick: t{id} {title:?}\n"),
+        Lang::Ja => format!("\nランダムな小さな候補: t{id} {title:?}\n"),
+    }
+}
+
+pub fn chores_memory_heading(l: Lang, shown: usize, total: usize) -> String {
+    match l {
+        Lang::En => format!("\nLong-term memory, {shown} of {total} facts (the rest come round on later runs):\n"),
+        Lang::Ja => format!("\n長期記憶、{total}件中{shown}件(残りは後の実行で回ってくる):\n"),
+    }
+}
+
+pub fn chores_memory_line(id: &str, category: &str, summary: &str) -> String {
+    format!("- {id} [{category}] {summary}")
+}
+
+pub fn chores_earlier_heading(l: Lang) -> &'static str {
+    l.of("\nEarlier tidy-ups today:\n", "\n今日これまでの片付け:\n")
+}
+
+pub fn chores_earlier_line(l: Lang, at: &str, said: Option<&str>) -> String {
+    match (l, said) {
+        (Lang::En, Some(said)) => format!("- {at} said: {said}"),
+        (Lang::En, None) => format!("- {at} stayed quiet"),
+        (Lang::Ja, Some(said)) => format!("- {at} 伝えた: {said}"),
+        (Lang::Ja, None) => format!("- {at} 何も伝えず"),
+    }
+}
+
 pub fn idle_prompt(l: Lang) -> &'static str {
     l.of(
         "The user has gone quiet. Decide whether anything — a note, the next item in the order — \
@@ -1171,10 +1289,11 @@ mod tests {
     /// translation; every pair here must differ.
     #[test]
     fn every_fixed_line_has_its_own_japanese() {
-        let pairs: [fn(Lang) -> &'static str; 14] = [
+        let pairs: [fn(Lang) -> &'static str; 18] = [
             call_briefly, no_standing, standing_heading, now_heading, plan_heading, tasks_heading,
             working_memory_heading, coming_up, debrief_heading, activity_heading, close_day_prompt,
-            idle_prompt, share_shared, notes_to_settle,
+            idle_prompt, share_shared, notes_to_settle, chores_prompt, chores_brief, chores_tasks_heading,
+            chores_earlier_heading,
         ];
         for f in pairs {
             assert_ne!(f(Lang::En), f(Lang::Ja));
