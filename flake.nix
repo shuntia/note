@@ -158,7 +158,7 @@
             ${lib.concatStrings (lib.mapAttrsToList (file: src: "cp ${src} $out/nemotron/${file}\n") nemotronFp32)}
             tar xjf ${pkgs.fetchurl {
               url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2";
-              hash = "sha256-xffi0srwgrwdIPtwM0ph2Z0gtIRQCq0y58+EwSjqMpg=";
+              hash = "sha256-YHA3B7wFzNSNYOHrcj84sH1uR0eVoLaliNciBADg96Q=";
             }} -C $out/kokoro --strip-components=1
             rm -rf $out/kokoro/dict $out/kokoro/*-zh.*
             rm -rf $out/nemotron/test_wavs
