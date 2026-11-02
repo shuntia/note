@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>Note</title>
+<!-- Icons: Lucide phone-incoming, phone, phone-off from lucide-static v1.55.0, ISC License, Copyright (c) Lucide Icons and Contributors -->
+<style>
+  :root {
+    color-scheme: light dark;
+    --card: #f6efe6; --fg: #1e2a32; --dim: #6b7780; --edge: rgba(30, 42, 50, 0.12);
+    --a: #e8871e; --b: #d9486b; --c: #3f9c8f;
+    --answer: #3f9c6b; --decline: #d9486b; --on: #fffaf3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --card: #1e2a32; --fg: #eaf0f4; --dim: #8a9aa5; --edge: rgba(234, 240, 244, 0.1);
+      --a: #f4a64a; --b: #f07a95; --c: #6cc8b9;
+      --answer: #4fb37f; --decline: #e3607e; --on: #10181d;
+    }
+  }
+  html, body { height: 100%; margin: 0; background: transparent; overflow: hidden; }
+  body { display: grid; place-items: center; font: 15px/1.3 system-ui, sans-serif; color: var(--fg); user-select: none; }
+  .card {
+    box-sizing: border-box; width: calc(100% - 16px); height: calc(100% - 16px);
+    display: flex; align-items: center; gap: 14px; padding: 0 14px 0 16px;
+    background: var(--card); border: 1px solid var(--edge); border-radius: 20px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18); -webkit-app-region: drag;
+    animation: arrive 260ms cubic-bezier(.2, .8, .2, 1);
+  }
+  @keyframes arrive { from { opacity: 0; transform: translateY(-8px) scale(.98); } }
+  .mark { width: 40px; height: 40px; flex: none; fill: none; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+  .who { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .who b { font-weight: 650; }
+  .who span { color: var(--dim); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .who span:empty { display: none; }
+  button {
+    -webkit-app-region: no-drag; width: 40px; height: 40px; flex: none; padding: 0; border: 0; border-radius: 50%;
+    display: grid; place-items: center; cursor: pointer; color: var(--on); transition: transform 120ms ease, filter 120ms ease;
+  }
+  button:hover { filter: brightness(1.08); }
+  button:active { transform: scale(.94); }
+  button:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+  button svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  #decline { background: var(--decline); }
+  #answer { background: var(--answer); }
+  @media (prefers-reduced-motion: reduce) { .card { animation: none; } button { transition: none; } }
+</style>
+</head>
+<body>
+<div class="card">
+  <svg class="mark" id="mark" viewBox="0 0 24 24" aria-hidden="true">
+    <defs>
+      <linearGradient id="flow" gradientUnits="userSpaceOnUse" x1="2" y1="12" x2="22" y2="12">
+        <stop offset="0" style="stop-color: var(--a)" />
+        <stop offset="0.5" style="stop-color: var(--b)" />
+        <stop offset="1" style="stop-color: var(--c)" />
+        <animateTransform id="spin" attributeName="gradientTransform" type="rotate" from="0 12 12" to="360 12 12" dur="2.4s" repeatCount="indefinite" />
+      </linearGradient>
+    </defs>
+    <g stroke="url(#flow)">
+      <path d="M16 2v6h6" />
+      <path d="m22 2-6 6" />
+      <path d="M13.832 16.568a1 1 0 0 0 1.213-.303l.355-.465A2 2 0 0 1 17 15h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2A18 18 0 0 1 2 4a2 2 0 0 1 2-2h3a2 2 0 0 1 2 2v3a2 2 0 0 1-.8 1.6l-.468.351a1 1 0 0 0-.292 1.233 14 14 0 0 0 6.392 6.384" />
+    </g>
+  </svg>
+  <div class="who"><b>Note</b><span id="title"></span></div>
+  <button id="decline">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M10.1 13.9a14 14 0 0 0 3.732 2.668 1 1 0 0 0 1.213-.303l.355-.465A2 2 0 0 1 17 15h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2 18 18 0 0 1-12.728-5.272" />
+      <path d="M22 2 2 22" />
+      <path d="M4.76 13.582A18 18 0 0 1 2 4a2 2 0 0 1 2-2h3a2 2 0 0 1 2 2v3a2 2 0 0 1-.8 1.6l-.468.351a1 1 0 0 0-.292 1.233 14 14 0 0 0 .244.473" />
+    </svg>
+  </button>
+  <button id="answer">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M13.832 16.568a1 1 0 0 0 1.213-.303l.355-.465A2 2 0 0 1 17 15h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2A18 18 0 0 1 2 4a2 2 0 0 1 2-2h3a2 2 0 0 1 2 2v3a2 2 0 0 1-.8 1.6l-.468.351a1 1 0 0 0-.292 1.233 14 14 0 0 0 6.392 6.384" />
+    </svg>
+  </button>
+</div>
+<script>
+  const ja = new URLSearchParams(location.search).get('lang') === 'ja'
+  document.documentElement.lang = ja ? 'ja' : 'en'
+  const answer = document.getElementById('answer')
+  const decline = document.getElementById('decline')
+  answer.setAttribute('aria-label', ja ? '応答' : 'Answer')
+  decline.setAttribute('aria-label', ja ? '拒否' : 'Decline')
+  document.querySelector('.card').setAttribute('aria-label', ja ? 'Noteから着信' : 'Note is calling')
+
+  const mark = document.getElementById('mark')
+  const still = matchMedia('(prefers-reduced-motion: reduce)')
+  const motion = () => (still.matches ? mark.pauseAnimations() : mark.unpauseAnimations())
+  still.addEventListener('change', motion)
+  motion()
+
+  window.noteRing.onInfo((info) => {
+    document.getElementById('title').textContent = info?.title ?? ''
+  })
+  answer.addEventListener('click', () => window.noteRing.answer())
+  decline.addEventListener('click', () => window.noteRing.decline())
+  addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') window.noteRing.decline()
+  })
+</script>
+</body>
+</html>

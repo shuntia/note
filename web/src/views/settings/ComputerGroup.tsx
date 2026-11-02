@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { ApiError } from '../../api'
-import { callsOn, desktop, noticesOn, setCallsOn, setNoticesOn, type ShellSettings } from '../../desktop'
+import { callsOn, desktop, noticesOn, setCallsOn, setNoticesOn, type ShellAbout, type ShellSettings } from '../../desktop'
 import { t } from '../../i18n'
 import { disablePush, enablePush, pushState } from '../../push'
 import { Chevron, Group, ToggleRow } from '../../ui/rows'
@@ -12,9 +12,11 @@ export function ComputerGroup() {
   const [notices, setNotices] = useState(noticesOn)
   const [calls, setCalls] = useState(callsOn)
   const [settings, setSettings] = useState<ShellSettings | null>(null)
+  const [about, setAbout] = useState<ShellAbout | null>(null)
 
   useEffect(() => {
     shell.settings?.().then(setSettings).catch(() => {})
+    shell.about?.().then(setAbout).catch(() => {})
   }, [shell])
 
   const flip = (key: keyof ShellSettings, on: boolean) => {
@@ -50,6 +52,14 @@ export function ComputerGroup() {
       {settings && settings.nightly !== null && (
         <ToggleRow label={t('settings.computer.nightly')} on={settings.nightly} onToggle={() => flip('nightly', !settings.nightly)} />
       )}
+      {settings?.launcher && (
+        <div className="set-row">
+          <span className="set-row-body">
+            <span className="set-label">{t('settings.computer.launcher')}</span>
+          </span>
+          <kbd className="set-value">{settings.launcher}</kbd>
+        </div>
+      )}
       {shell.changeServer && (
         <button className="set-row set-open" onClick={() => shell.changeServer?.()}>
           <span className="set-row-body">
@@ -58,6 +68,14 @@ export function ComputerGroup() {
           </span>
           <Chevron />
         </button>
+      )}
+      {about && (
+        <div className="set-row">
+          <span className="set-row-body">
+            <span className="set-label">{t('settings.computer.version')}</span>
+          </span>
+          <span className="set-value">{about.version}</span>
+        </div>
       )}
     </Group>
   )

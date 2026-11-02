@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react'
 import { api } from '../api'
-import { desktop } from '../desktop'
+import { desktop, desktopRing } from '../desktop'
 import { t } from '../i18n'
 import { gainScale, rememberGains } from '../mic'
 import { reducedMotion } from '../motion'
@@ -131,6 +131,14 @@ export function CallView({
     })
   }, [open, control])
   useEffect(() => systemMuted(muted), [muted])
+  const ringing = phase === 'ringing'
+  const thread = call.conversationId
+  useEffect(() => {
+    if (!ringing) return
+    const title =
+      thread === null || !desktop()?.ringStop ? undefined : api.conversations().then((all) => all.find((c) => c.id === thread)?.title ?? null)
+    return desktopRing({ answer: () => control.tap(), decline: () => control.end() }, title)
+  }, [ringing, thread, control])
   useEffect(() => {
     const escape = (e: globalThis.KeyboardEvent) => {
       if (e.key !== 'Escape') return

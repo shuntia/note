@@ -60,3 +60,48 @@ export function gainScale(): number {
   const db = current ? gains.get(current) : undefined
   return db === undefined ? 1 : 10 ** (db / 20)
 }
+
+export const CALL_AUDIO: MediaTrackConstraints = { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 }
+
+const CHOSEN_KEY = 'note.mic.input'
+
+// The input picked in Settings, kept per browser; null follows the system default.
+export function chosenMic(): string | null {
+  try {
+    return localStorage.getItem(CHOSEN_KEY) || null
+  } catch {
+    return null
+  }
+}
+
+export function chooseMic(deviceId: string | null): void {
+  try {
+    if (deviceId) localStorage.setItem(CHOSEN_KEY, deviceId)
+    else localStorage.removeItem(CHOSEN_KEY)
+  } catch {}
+}
+
+export type MicInput = { deviceId: string; label: string }
+
+// The real inputs, without the aliases that stand for whichever is the default.
+export const micInputs = (devices: Pick<MediaDeviceInfo, 'kind' | 'deviceId' | 'label'>[]): MicInput[] =>
+  devices
+    .filter((d) => d.kind === 'audioinput' && !ALIASES.has(d.deviceId))
+    .map((d) => ({ deviceId: d.deviceId, label: d.label }))
+
+const GONE = new Set(['OverconstrainedError', 'NotFoundError'])
+
+// Opens the chosen input, or the default once the chosen one is gone.
+export async function openMic(
+  audio: MediaTrackConstraints,
+  open: (c: MediaStreamConstraints) => Promise<MediaStream> = (c) => navigator.mediaDevices.getUserMedia(c),
+  chosen: string | null = chosenMic(),
+): Promise<MediaStream> {
+  if (!chosen) return open({ audio })
+  try {
+    return await open({ audio: { ...audio, deviceId: { exact: chosen } } })
+  } catch (e) {
+    if (!(e instanceof Error) || !GONE.has(e.name)) throw e
+    return open({ audio })
+  }
+}

@@ -1,0 +1,42 @@
+/* The launcher window is transparent; the card is the only thing drawn. Where the OS frosts the window
+   itself (data-glass), the card only tints it, and the window's own edge and shadow frame it. */
+html.launcher-page, html.launcher-page body { background: transparent; overflow: hidden; }
+html.launcher-page body::before { display: none; }
+
+.launcher { box-sizing: border-box; padding: 14px 18px 26px; }
+html[data-glass='true'] .launcher { padding: 0; }
+
+.launcher .jot-wrap {
+  overflow: hidden;
+  border-radius: 1.375rem;
+  border: 1px solid color-mix(in oklab, var(--ink) 10%, transparent);
+  background:
+    linear-gradient(to bottom, color-mix(in oklab, white 30%, transparent), transparent 3.5rem),
+    color-mix(in oklab, var(--ivory) 96%, transparent);
+  box-shadow: 0 18px 40px -12px oklch(23% 0.03 255 / 0.45), 0 2px 6px oklch(23% 0.03 255 / 0.12);
+}
+@media (prefers-color-scheme: dark) {
+  .launcher .jot-wrap {
+    background:
+      linear-gradient(to bottom, color-mix(in oklab, white 7%, transparent), transparent 3.5rem),
+      color-mix(in oklab, var(--ivory) 96%, transparent);
+  }
+}
+html[data-glass='true'] .launcher .jot-wrap {
+  border: 0;
+  border-radius: 0;
+  background: color-mix(in oklab, var(--ivory) 30%, transparent);
+  box-shadow: none;
+}
+
+.launcher .jot-wrap.flow .jot { min-height: 3.75rem; padding: 0 0.75rem 0 1.375rem; background: none; border-radius: 0; }
+.launcher .jot-wrap.flow .jot input { font-size: 1.25rem; }
+.launcher .jot:focus-within { outline: none; }
+.launcher .jot-wrap.flow .jot-panel {
+  max-height: 26rem;
+  overflow-y: auto;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  padding: 0.875rem 1.375rem 1rem;
+}

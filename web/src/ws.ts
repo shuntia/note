@@ -87,9 +87,11 @@ const DEAD_HANDSHAKE_STREAK = 3
 // Reconnects with capped backoff; the server pings every 30s, so a healthy
 // socket stays quiet from our side. A `changed` frame carries no detail: it
 // says only that something the client is showing was decided elsewhere.
+// `rings` says whether this page may be rung; the desktop launcher never is.
 export function connectEvents(
   onEvent: (ev: EventFrame) => void,
   onChanged: () => void,
+  rings: () => boolean = ringable,
 ): () => void {
   let socket: WebSocket | null = null
   let closed = false
@@ -98,7 +100,7 @@ export function connectEvents(
   let deadHandshakes = 0
   let sessionChecked = false
   const report = () => {
-    if (socket?.readyState === WebSocket.OPEN) socket.send(visibilityFrame(ringable()))
+    if (socket?.readyState === WebSocket.OPEN) socket.send(visibilityFrame(rings()))
   }
   const reportShown = (shown: boolean) => {
     if (socket?.readyState === WebSocket.OPEN) socket.send(windowFrame(shown))
@@ -107,6 +109,15 @@ export function connectEvents(
   window.addEventListener(RINGABLE_CHANGED, report)
   const native = desktop()
   const stopShown = native?.onShown?.(reportShown)
+  // Back from sleep or offline, a socket waiting out its backoff tries now.
+  const nudge = () => {
+    if (closed || (socket && socket.readyState <= WebSocket.OPEN)) return
+    window.clearTimeout(timer)
+    retry = 1000
+    open()
+  }
+  window.addEventListener('online', nudge)
+  const stopResume = native?.onResume?.(nudge)
   const open = () => {
     if (closed) return
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
@@ -154,6 +165,8 @@ export function connectEvents(
     document.removeEventListener('visibilitychange', report)
     window.removeEventListener(RINGABLE_CHANGED, report)
     stopShown?.()
+    stopResume?.()
+    window.removeEventListener('online', nudge)
     window.clearTimeout(timer)
     socket?.close()
     if (shell === socket) shell = null

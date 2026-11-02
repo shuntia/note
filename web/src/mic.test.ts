@@ -1,5 +1,18 @@
 import { afterEach, expect, test } from 'vitest'
-import { autoOn, gainScale, micClientId, micFrame, micKey, realDevice, rememberGains, setCurrentMic, slid, type Mic } from './mic'
+import {
+  autoOn,
+  gainScale,
+  micClientId,
+  micFrame,
+  micInputs,
+  micKey,
+  openMic,
+  realDevice,
+  rememberGains,
+  setCurrentMic,
+  slid,
+  type Mic,
+} from './mic'
 
 afterEach(() => setCurrentMic(null))
 
@@ -35,6 +48,53 @@ test('a slid gain turns that row manual and clamps to 0..24; auto turns it back'
   expect(slid(rows, 'k1', 30)).toEqual([row('element', 6), row('k1', 24, false)])
   expect(slid(rows, 'k1', -2)[1].gain_db).toBe(0)
   expect(autoOn(slid(rows, 'k1', 9), 'k1')[1]).toEqual(row('k1', 9, true))
+})
+
+const stream = {} as MediaStream
+const failing = (name: string) => Object.assign(new Error(name), { name })
+
+test('the chosen input opens by its exact id', async () => {
+  const asked: MediaStreamConstraints[] = []
+  const got = await openMic({ channelCount: 1 }, async (c) => (asked.push(c), stream), 'usb')
+  expect(got).toBe(stream)
+  expect(asked).toEqual([{ audio: { channelCount: 1, deviceId: { exact: 'usb' } } }])
+})
+
+test('a chosen input that is gone falls back to the default', async () => {
+  const asked: MediaStreamConstraints[] = []
+  const open = async (c: MediaStreamConstraints) => {
+    asked.push(c)
+    if (asked.length === 1) throw failing('OverconstrainedError')
+    return stream
+  }
+  expect(await openMic({}, open, 'gone')).toBe(stream)
+  expect(asked[1]).toEqual({ audio: {} })
+})
+
+test('a refused mic is not retried', async () => {
+  let tries = 0
+  const open = async () => {
+    tries++
+    throw failing('NotAllowedError')
+  }
+  await expect(openMic({}, open, 'usb')).rejects.toThrow('NotAllowedError')
+  expect(tries).toBe(1)
+})
+
+test('no choice opens the default', async () => {
+  const asked: MediaStreamConstraints[] = []
+  await openMic({}, async (c) => (asked.push(c), stream), null)
+  expect(asked).toEqual([{ audio: {} }])
+})
+
+test('the input list leaves out the default aliases and outputs', () => {
+  const list = micInputs([
+    { kind: 'audioinput', deviceId: 'default', label: 'Default - USB' },
+    { kind: 'audioinput', deviceId: 'communications', label: 'Comms' },
+    { kind: 'audioinput', deviceId: 'usb', label: 'USB' },
+    { kind: 'audiooutput', deviceId: 'spk', label: 'Speakers' },
+  ])
+  expect(list).toEqual([{ deviceId: 'usb', label: 'USB' }])
 })
 
 test("the ring scales by the current device's gain", () => {

@@ -217,10 +217,19 @@ export function App() {
     CallView.preload().catch(() => {})
     return onCallFrame((f) => {
       if (f.type !== 'incoming' || !ringable()) return
-      desktop()?.ring()
       setCall((c) => c ?? { conversationId: f.conversation_id, ring: f.ring, at: Date.now() })
     })
   }, [me])
+
+  // The desktop app's menu asks for a view or a thread by path, `settings` or `chat/<id>`.
+  useEffect(() => {
+    if (!me) return
+    return desktop()?.onOpen?.((path) => {
+      const id = conversationOf(`#/${path}`)
+      if (id !== null) openConversation(id)
+      else if (NAV.some((n) => n.id === path)) go(path as NavTab)
+    })
+  }, [me, go, openConversation])
 
   // `#/chat/<id>` in the address bar, at load or from a notification, and the
   // same route handed over by the service worker when a tab is already open.
@@ -372,7 +381,8 @@ export function App() {
     return connectEvents((ev) => {
       if (desktop() && noticesOn()) {
         notice()
-        systemNotice(ev.title, ev.body)
+        const thread = ev.conversation_id
+        systemNotice(ev.title, ev.body, thread === null ? undefined : () => openConversation(thread))
       }
       // A check-in (it carries its event) or an urgent ask has its question waiting in
       // the thread, so the thread is the notice; a session's notices are toasts over

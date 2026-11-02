@@ -184,4 +184,9 @@
 .set-mic-glyph { width: 1.125rem; height: 1.125rem; flex: none; fill: none; stroke: var(--quiet); stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; }
 .set-mic input[type='range'] { width: 100%; margin: 0; accent-color: var(--ink); }
 .set-mic[data-auto='true'] input[type='range'] { opacity: 0.45; }
+.set-mic-input { flex-direction: column; align-items: stretch; gap: 0.5rem; }
+.set-mic-input select { width: 100%; }
+.set-mic-meter { position: relative; display: block; height: 0.25rem; margin: 0 1.125rem; border-radius: 999px; background: var(--haze-strong); overflow: hidden; }
+.set-mic-meter::after { content: ''; position: absolute; inset: 0; border-radius: inherit; background: var(--sun-ink); transform-origin: left; transform: scaleX(var(--level, 0)); }
+.set-mic-meter[data-live='false'] { opacity: 0.4; }
 .set-debug { width: 100%; max-height: 60vh; overflow: auto; margin: 0; padding: 0.875rem 1.125rem; border-radius: 1.125rem; background: var(--haze-strong); color: var(--ink); font-size: 0.72rem; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }

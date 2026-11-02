@@ -1,4 +1,4 @@
-import { realDevice, type MicTrack } from '../mic'
+import { CALL_AUDIO, openMic, realDevice, type MicTrack } from '../mic'
 import captureUrl from './capture.worklet.ts?worker&url'
 import playbackUrl from './playback.worklet.ts?worker&url'
 import { rms16 } from './pcm'
@@ -54,9 +54,7 @@ export function webAudio(): AudioIo {
           throw new Error('closed')
         }
       }
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
-      })
+      stream = await openMic(CALL_AUDIO)
       ensureOpen()
       await Promise.all([ctx.audioWorklet.addModule(captureUrl), ctx.audioWorklet.addModule(playbackUrl)])
       ensureOpen()

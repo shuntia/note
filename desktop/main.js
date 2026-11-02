@@ -1,11 +1,28 @@
 'use strict'
 
-const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, net, powerSaveBlocker, screen, shell, systemPreferences } = require('electron')
+const {
+  app,
+  BrowserWindow,
+  Menu,
+  Notification,
+  Tray,
+  clipboard,
+  globalShortcut,
+  ipcMain,
+  nativeImage,
+  net,
+  powerMonitor,
+  powerSaveBlocker,
+  screen,
+  shell,
+  systemPreferences,
+} = require('electron')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const { pauseOthers } = require('./media')
 const { normalizeServerUrl, resolveServerUrl } = require('./server-url')
+const { LAUNCHER_HEIGHT, centerTop, clampZoom, cornerBounds, launcherHeight, micSettingsUrl, ringInfo, spellLanguages } = require('./shell')
 const { CHECK_EVERY_MS, RELEASES_URL, updateMode } = require('./updates')
 
 const BAKED_URL = require('./package.json').noteUrl
@@ -19,6 +36,13 @@ let win = null
 let setupWin = null
 let widgetWin = null
 let widgetClock = null
+let ringWin = null
+let ringShown = null
+let ringLimit = null
+let ringBounce = null
+let launcherWin = null
+let pendingOpen = null
+let openReady = false
 let callHold = null
 let tray = null
 let quitting = false
@@ -43,6 +67,14 @@ const STRINGS = {
     nightly: 'Nightly builds',
     checkUpdates: 'Check for updates',
     restartToUpdate: 'Restart to update',
+    settings: 'Settings…',
+    trayHint: 'Note keeps running in the tray.',
+    openLink: 'Open in browser',
+    copyLink: 'Copy link',
+    addToDictionary: 'Add to dictionary',
+    resetZoom: 'Actual Size',
+    zoomIn: 'Zoom In',
+    zoomOut: 'Zoom Out',
   },
   ja: {
     show: '表示',
@@ -60,6 +92,11 @@ const STRINGS = {
     nightly: 'ナイトリービルド',
     checkUpdates: 'アップデートを確認',
     restartToUpdate: '再起動してアップデート',
+    settings: '設定…',
+    trayHint: 'Noteはトレイで動作を続けます。',
+    openLink: 'ブラウザで開く',
+    copyLink: 'リンクをコピー',
+    addToDictionary: '辞書に追加',
     undo: '取り消す',
     redo: 'やり直す',
     cut: '切り取り',
@@ -263,6 +300,7 @@ function createWindow(startHidden) {
     },
   })
   if (saved.maximized) win.maximize()
+  if (saved.fullscreen) win.setFullScreen(true)
 
   win.once('ready-to-show', () => {
     if (!startHidden) win.show()
@@ -272,23 +310,31 @@ function createWindow(startHidden) {
   const saveBounds = () => {
     clearTimeout(saveTimer)
     saveTimer = setTimeout(() => {
-      if (!win || win.isDestroyed()) return
+      if (!win || win.isDestroyed() || win.isFullScreen()) return
       const maximized = win.isMaximized()
       writeState(maximized ? { maximized } : { maximized, bounds: win.getBounds() })
     }, 400)
   }
   win.on('resize', saveBounds)
   win.on('move', saveBounds)
+  win.on('enter-full-screen', () => writeState({ fullscreen: true }))
+  win.on('leave-full-screen', () => writeState({ fullscreen: false }))
 
   win.on('close', (event) => {
     if (quitting) return
     event.preventDefault()
     win.hide()
     refreshTray()
+    hintTray()
   })
   win.on('focus', () => win.flashFrame(false))
-  win.webContents.on('did-start-loading', () => holdCall(false))
-  win.webContents.on('render-process-gone', () => holdCall(false))
+  const pageGone = () => {
+    holdCall(false)
+    closeRing()
+    openReady = false
+  }
+  win.webContents.on('did-start-loading', pageGone)
+  win.webContents.on('render-process-gone', pageGone)
   const tellShown = () => {
     refreshTray()
     if (!win.isDestroyed()) win.webContents.send('desktop:shown', win.isVisible())
@@ -314,6 +360,7 @@ function createWindow(startHidden) {
   webContents.on('did-finish-load', () => {
     if (!sameOrigin(webContents.getURL())) return
     failures = 0
+    webContents.setZoomLevel(clampZoom(readState().zoom))
     webContents
       .executeJavaScript('document.documentElement.lang')
       .then((tag) => {
@@ -336,9 +383,244 @@ function createWindow(startHidden) {
   })
   webContents.session.setPermissionCheckHandler((wc, _permission, requestingOrigin) =>
     sameOrigin(requestingOrigin || wc?.getURL() || ''))
+  webContents.on('zoom-changed', (_e, direction) => zoomBy(direction === 'in' ? ZOOM_STEP : -ZOOM_STEP))
+  webContents.on('context-menu', (_e, params) => contextMenu(params))
+  if (process.platform !== 'darwin') {
+    const langs = spellLanguages(webContents.session.availableSpellCheckerLanguages, ['en-US', 'ja'])
+    if (langs.length) webContents.session.setSpellCheckerLanguages(langs)
+  }
 
   load(appUrl.href)
 }
+
+const ZOOM_STEP = 0.5
+
+function setZoom(level) {
+  if (!win || !sameOrigin(win.webContents.getURL())) return
+  const next = clampZoom(level)
+  win.webContents.setZoomLevel(next)
+  writeState({ zoom: next })
+}
+
+const zoomBy = (step) => win && setZoom(win.webContents.getZoomLevel() + step)
+
+function contextMenu(params) {
+  const { webContents } = win
+  const items = []
+  const gap = () => items.length && items.at(-1).type !== 'separator' && items.push({ type: 'separator' })
+  if (params.misspelledWord) {
+    for (const word of params.dictionarySuggestions.slice(0, 5)) {
+      items.push({ label: word, click: () => webContents.replaceMisspelling(word) })
+    }
+    items.push({
+      label: s('addToDictionary'),
+      click: () => webContents.session.addWordToSpellCheckerDictionary(params.misspelledWord),
+    })
+    gap()
+  }
+  if (/^https?:/.test(params.linkURL)) {
+    items.push(
+      { label: s('openLink'), click: () => openExternal(params.linkURL) },
+      { label: s('copyLink'), click: () => clipboard.writeText(params.linkURL) },
+    )
+    gap()
+  }
+  const can = params.editFlags
+  if (params.isEditable) {
+    items.push(
+      { ...role('cut'), enabled: can.canCut },
+      { ...role('copy'), enabled: can.canCopy },
+      { ...role('paste'), enabled: can.canPaste },
+      { type: 'separator' },
+      { ...role('selectAll'), enabled: can.canSelectAll },
+    )
+  } else if (params.selectionText.trim()) {
+    items.push(role('copy'))
+  }
+  if (items.at(-1)?.type === 'separator') items.pop()
+  if (items.length) Menu.buildFromTemplate(items).popup({ window: win })
+}
+
+// Closing to the tray says so once, where a closed window usually means a quit app.
+function hintTray() {
+  if (process.platform === 'darwin' || readState().trayHinted || !Notification.isSupported()) return
+  writeState({ trayHinted: true })
+  new Notification({ title: 'Note', body: s('trayHint'), silent: true }).show()
+}
+
+// A path is handed over once the page says it listens; until then the latest one waits.
+function openPath(appPath) {
+  if (openReady && win && sameOrigin(win.webContents.getURL())) win.webContents.send('desktop:open', appPath)
+  else pendingOpen = appPath
+}
+
+const RING_SIZE = { width: 320, height: 96 }
+const RING_MARGIN = 12
+// Past the page's own ring timeout, in case the page never says the ring stopped.
+const RING_LIMIT_MS = 45_000
+
+function activeArea() {
+  try {
+    return screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea
+  } catch {
+    return screen.getPrimaryDisplay().workArea
+  }
+}
+
+// The ring floats in a corner without taking focus or raising the main window.
+function openRing(info) {
+  ringShown = info
+  clearTimeout(ringLimit)
+  ringLimit = setTimeout(closeRing, RING_LIMIT_MS)
+  if (ringWin) {
+    ringWin.webContents.send('ring:info', info)
+    return
+  }
+  const popup = new BrowserWindow({
+    ...cornerBounds(activeArea(), RING_SIZE, RING_MARGIN),
+    show: false,
+    frame: false,
+    transparent: true,
+    hasShadow: false,
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    title: 'Note',
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: path.join(__dirname, 'ring-preload.js'),
+      devTools: dev,
+    },
+  })
+  ringWin = popup
+  popup.setAlwaysOnTop(true, 'pop-up-menu')
+  popup.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  popup.on('closed', () => {
+    if (ringWin === popup) ringWin = null
+  })
+  popup.webContents.on('will-navigate', (event) => event.preventDefault())
+  popup.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  popup.webContents.on('did-finish-load', () => popup.webContents.send('ring:info', ringShown))
+  popup.once('ready-to-show', () => {
+    if (ringWin !== popup) return
+    popup.showInactive()
+    popup.flashFrame(true)
+    if (process.platform === 'darwin') ringBounce = app.dock?.bounce('critical') ?? null
+  })
+  popup.loadFile(path.join(__dirname, 'ring.html'), { query: { lang } }).catch(() => {})
+}
+
+// Forgotten at once, so a ring right after this opens a fresh popup rather than the one closing.
+function closeRing() {
+  clearTimeout(ringLimit)
+  ringLimit = null
+  if (ringBounce !== null) app.dock?.cancelBounce(ringBounce)
+  ringBounce = null
+  const popup = ringWin
+  ringWin = null
+  if (popup && !popup.isDestroyed()) popup.close()
+}
+
+const LAUNCHER_WIDTH = 640
+
+// macOS and Windows draw the frosted glass natively; elsewhere the page paints its own over a transparent window.
+function launcherGlass() {
+  if (process.platform === 'darwin') return { transparent: true, vibrancy: 'popover', visualEffectState: 'active', roundedCorners: true }
+  if (process.platform === 'win32') return { backgroundColor: '#00000000', backgroundMaterial: 'acrylic', roundedCorners: true }
+  return { transparent: true, hasShadow: false }
+}
+
+function placeLauncher() {
+  const { x, y } = centerTop(activeArea(), { width: LAUNCHER_WIDTH, height: LAUNCHER_HEIGHT.min })
+  launcherWin.setBounds({ x, y, width: LAUNCHER_WIDTH, height: launcherWin.getBounds().height })
+}
+
+function showLauncher() {
+  placeLauncher()
+  launcherWin.show()
+  launcherWin.focus()
+  launcherWin.webContents.send('launcher:shown')
+}
+
+function hideLauncher() {
+  if (!launcherWin?.isVisible()) return
+  launcherWin.hide()
+  if (process.platform === 'darwin' && !BrowserWindow.getAllWindows().some((w) => w.isVisible())) app.hide()
+}
+
+// A one-line ask from anywhere: the server's own page in a launcher mode, sharing the main window's sign-in.
+function toggleLauncher() {
+  if (!appUrl) return showWindow()
+  if (launcherWin?.isVisible()) return hideLauncher()
+  if (launcherWin) return showLauncher()
+  const glass = launcherGlass()
+  launcherWin = new BrowserWindow({
+    ...centerTop(activeArea(), { width: LAUNCHER_WIDTH, height: LAUNCHER_HEIGHT.min }),
+    show: false,
+    frame: false,
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    title: 'Note',
+    ...glass,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: path.join(__dirname, 'launcher-preload.js'),
+      devTools: dev,
+    },
+  })
+  launcherWin.setAlwaysOnTop(true, 'pop-up-menu')
+  launcherWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  launcherWin.on('blur', hideLauncher)
+  launcherWin.on('closed', () => {
+    launcherWin = null
+  })
+  const { webContents } = launcherWin
+  webContents.on('will-navigate', (event) => event.preventDefault())
+  webContents.setWindowOpenHandler(({ url }) => {
+    if (!sameOrigin(url)) openExternal(url)
+    return { action: 'deny' }
+  })
+  launcherWin.once('ready-to-show', showLauncher)
+  const page = new URL(appUrl.href)
+  page.searchParams.set('launcher', glass.vibrancy || glass.backgroundMaterial ? 'glass' : 'plain')
+  launcherWin.loadURL(page.href).catch(() => {})
+}
+
+function closeLauncher() {
+  if (launcherWin && !launcherWin.isDestroyed()) launcherWin.close()
+}
+
+const fromLauncher = (event) =>
+  Boolean(launcherWin) && event.sender === launcherWin.webContents && sameOrigin(event.senderFrame?.url ?? '')
+
+ipcMain.on('launcher:hide', (event) => {
+  if (fromLauncher(event)) hideLauncher()
+})
+
+ipcMain.on('launcher:resize', (event, height) => {
+  if (!fromLauncher(event)) return
+  const bounds = launcherWin.getBounds()
+  launcherWin.setBounds({ ...bounds, height: launcherHeight(height) })
+})
+
+// The thread a launcher answer belongs to opens in the main window.
+ipcMain.on('launcher:open', (event, conversationId) => {
+  if (!fromLauncher(event)) return
+  hideLauncher()
+  showWindow()
+  if (Number.isSafeInteger(conversationId) && conversationId > 0) openPath(`chat/${conversationId}`)
+})
 
 const WIDGET_SIZE = { width: 180, height: 64 }
 
@@ -454,6 +736,7 @@ function useServer(url) {
   appUrl = new URL(url)
   if (process.platform === 'linux' && autostartEnabled()) setAutostart(true)
   setupWin?.close()
+  closeLauncher()
   if (win) {
     failures = 0
     load(appUrl.href)
@@ -477,7 +760,13 @@ ipcMain.handle('setup:connect', async (event, address) => {
 const fromApp = (event) => Boolean(win) && event.sender === win.webContents && sameOrigin(event.senderFrame?.url ?? '')
 
 // `nightly` is null where the app does not update itself.
-const shellSettings = () => ({ startAtLogin: autostartEnabled(), nightly: updates === 'self' ? nightlyOn() : null })
+const shellSettings = () => ({
+  startAtLogin: autostartEnabled(),
+  nightly: updates === 'self' ? nightlyOn() : null,
+  launcher: shortcutLabel(),
+})
+
+ipcMain.handle('desktop:about', (event) => (fromApp(event) ? { version: app.getVersion(), server: appUrl?.host ?? null } : null))
 
 ipcMain.on('desktop:show', (event) => {
   if (fromApp(event)) showWindow()
@@ -541,12 +830,73 @@ ipcMain.on('desktop:changeServer', (event) => {
   if (fromApp(event)) openSetup()
 })
 
-ipcMain.on('desktop:ring', (event) => {
+// A page from before the popup sends no details and expects the window raised.
+ipcMain.on('desktop:ring', (event, raw) => {
   if (!fromApp(event)) return
+  const info = ringInfo(raw)
+  if (info) return openRing(info)
   showWindow()
   if (process.platform === 'darwin') app.dock?.bounce('critical')
   else win.flashFrame(true)
 })
+
+ipcMain.on('desktop:ringStop', (event) => {
+  if (fromApp(event)) closeRing()
+})
+
+const fromRing = (event) => Boolean(ringWin) && event.sender === ringWin.webContents
+
+ipcMain.on('ring:answer', (event) => {
+  if (!fromRing(event)) return
+  closeRing()
+  showWindow()
+  win?.webContents.send('desktop:ringAction', 'answer')
+})
+
+ipcMain.on('ring:decline', (event) => {
+  if (!fromRing(event)) return
+  closeRing()
+  win?.webContents.send('desktop:ringAction', 'decline')
+})
+
+// `status` is the OS's own answer where it keeps one (macOS, Windows), else 'unknown'.
+function micAccess() {
+  let status = 'unknown'
+  if (process.platform === 'darwin' || process.platform === 'win32') {
+    try {
+      status = systemPreferences.getMediaAccessStatus('microphone')
+    } catch {}
+  }
+  return { status, settings: micSettingsUrl(process.platform) !== null }
+}
+
+ipcMain.handle('desktop:micAccess', (event) => (fromApp(event) ? micAccess() : null))
+
+ipcMain.on('desktop:micSettings', (event) => {
+  const url = micSettingsUrl(process.platform)
+  if (fromApp(event) && url) shell.openExternal(url).catch(() => {})
+})
+
+ipcMain.on('desktop:openReady', (event) => {
+  if (!fromApp(event)) return
+  openReady = true
+  if (pendingOpen) {
+    const waiting = pendingOpen
+    pendingOpen = null
+    openPath(waiting)
+  }
+})
+
+// Waking up or getting the network back: the offline page retries now, a loaded page reconnects on its own terms.
+function resumed() {
+  if (!win || !appUrl) return
+  if (sameOrigin(win.webContents.getURL())) {
+    win.webContents.send('desktop:resume')
+  } else {
+    failures = 0
+    load(appUrl.href)
+  }
+}
 
 const updates = updateMode({ platform: process.platform, packaged: app.isPackaged, dev, env: process.env })
 const nightlyOn = () => readJson(configPath()).nightly === true
@@ -607,7 +957,10 @@ function refreshTray() {
   const visible = win?.isVisible()
   tray.setContextMenu(
     Menu.buildFromTemplate([
-      { label: visible ? s('hide') : s('show'), click: () => (visible ? win.hide() : showWindow()) },
+      {
+        label: visible ? s('hide') : s('show'),
+        click: () => (visible ? win.hide() : showWindow()),
+      },
       { label: s('changeServer'), click: openSetup },
       {
         label: s('startAtLogin'),
@@ -635,15 +988,16 @@ function createTray() {
 }
 
 function appMenu() {
+  const zoom = (name, accelerator, click, extra = {}) => ({ label: s(name), accelerator, click, ...extra })
   const view = [
     { ...role('reload'), label: s('reload') },
     { ...role('forceReload'), label: s('forceReload') },
     ...(dev ? [role('toggleDevTools')] : []),
     { type: 'separator' },
-    role('resetZoom'),
-    role('zoomIn'),
-    { ...role('zoomIn'), accelerator: 'CommandOrControl+=', visible: false },
-    role('zoomOut'),
+    zoom('resetZoom', 'CommandOrControl+0', () => setZoom(0)),
+    zoom('zoomIn', 'CommandOrControl+Plus', () => zoomBy(ZOOM_STEP)),
+    zoom('zoomIn', 'CommandOrControl+=', () => zoomBy(ZOOM_STEP), { visible: false }),
+    zoom('zoomOut', 'CommandOrControl+-', () => zoomBy(-ZOOM_STEP)),
     { type: 'separator' },
     role('togglefullscreen'),
   ]
@@ -655,6 +1009,15 @@ function appMenu() {
     {
       label: s('file'),
       submenu: [
+        {
+          label: s('settings'),
+          accelerator: 'CommandOrControl+,',
+          enabled: Boolean(appUrl),
+          click: () => {
+            showWindow()
+            openPath('settings')
+          },
+        },
         { label: s('changeServer'), click: openSetup },
         { type: 'separator' },
         ...updateItems(),
@@ -668,6 +1031,20 @@ function appMenu() {
   ])
 }
 
+const LAUNCHER_SHORTCUT = 'CommandOrControl+Shift+Space'
+let shortcutTaken = false
+
+function registerShortcut() {
+  try {
+    return globalShortcut.register(LAUNCHER_SHORTCUT, toggleLauncher)
+  } catch {
+    return false
+  }
+}
+
+const shortcutLabel = () =>
+  shortcutTaken ? null : process.platform === 'darwin' ? '⌘⇧Space' : 'Ctrl+Shift+Space'
+
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
@@ -679,7 +1056,10 @@ if (!app.requestSingleInstanceLock()) {
   app.on('before-quit', () => {
     quitting = true
     holdCall(false)
+    closeRing()
+    closeLauncher()
   })
+  app.on('will-quit', () => globalShortcut.unregisterAll())
   app.on('activate', showWindow)
   app.on('window-all-closed', () => {})
 
@@ -697,6 +1077,8 @@ if (!app.requestSingleInstanceLock()) {
     })
     if (server) appUrl = new URL(server.url)
     initAutostart()
+    shortcutTaken = !registerShortcut()
+    powerMonitor.on('resume', resumed)
     createTray()
     startUpdates()
     if (appUrl) {
