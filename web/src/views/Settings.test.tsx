@@ -1,8 +1,10 @@
 import { renderToStaticMarkup } from 'react-dom/server'
-import { expect, test, vi } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
+import { doubleColumn, setDoubleColumn } from '../columns'
 import { previewPlayer, type Sample } from '../voicePreview'
 import { VoiceGrid } from '../voiceSheet'
 import { RingChoices } from './Settings'
+import { AppearanceSection } from './settings/AppearanceSection'
 import { triggersFromInput, triggersLabel, UNLIMITED } from './settings/triggers'
 
 test('a_second_preview_replaces_the_first', () => {
@@ -84,4 +86,29 @@ test('a_cleared_check_in_field_is_no_limit', () => {
   expect(triggersFromInput('99')).toBe(20)
   expect(triggersLabel(UNLIMITED)).toBe('No limit')
   expect(triggersLabel(4)).toBe('Up to 4 a day')
+})
+
+afterEach(() => vi.unstubAllGlobals())
+
+test('double_column_is_kept_on_this_device_and_off_until_turned_on', () => {
+  const kept = new Map<string, string>()
+  vi.stubGlobal('localStorage', { getItem: (k: string) => kept.get(k) ?? null, setItem: (k: string, v: string) => kept.set(k, v) })
+  const switched = () =>
+    /role="switch"[^>]*aria-checked="(true|false)"/.exec(renderToStaticMarkup(<AppearanceSection />))?.[1]
+  expect(doubleColumn()).toBe(false)
+  expect(switched()).toBe('false')
+  setDoubleColumn(true)
+  expect(doubleColumn()).toBe(true)
+  expect(switched()).toBe('true')
+  setDoubleColumn(false)
+  expect(switched()).toBe('false')
+})
+
+test('double_column_stays_off_where_storage_is_blocked', () => {
+  const blocked = () => {
+    throw new Error('blocked')
+  }
+  vi.stubGlobal('localStorage', { getItem: blocked, setItem: blocked })
+  expect(() => setDoubleColumn(true)).not.toThrow()
+  expect(doubleColumn()).toBe(false)
 })

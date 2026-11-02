@@ -180,16 +180,17 @@
 }
 .task-empty { margin: 0.125rem 0 0; font-size: 0.875rem; color: var(--faint); }
 
-/* a wide screen reads Later in columns, each row whole in one of them; the
-   soon list stays one, as wide as a column once there are two */
+/* one column holds to half a very wide screen; two read top to bottom down the
+   first, then the second, each row whole in one of them, and fall back to one
+   where there is no room for both */
 .tasks { container-type: inline-size; }
-@media (min-width: 1088px) {
-  .task-group:is(.later, .done) .task-list { columns: 38rem; column-gap: 4rem; }
-  .task-item { break-inside: avoid; }
-}
 @container (min-width: 80rem) {
-  .task-group.soon .task-list { max-width: calc((100% - 4rem) / 2); }
+  .tasks:not([data-columns]) .task-list { max-width: calc((100% - 4rem) / 2); }
 }
+.tasks[data-columns] .task-group:not(.goals) { display: block; columns: 2 30rem; column-gap: 4rem; --bar: 9rem; }
+.tasks[data-columns] :is(.task-done-fold, .order-edge) { column-span: all; }
+.tasks[data-columns] .task-sub-head { break-after: avoid; }
+.task-item, .order-edge { break-inside: avoid; }
 
 .task-item { position: relative; }
 /* a row folding away drives the list's layout and nothing else: its own contents
@@ -224,14 +225,47 @@
 .task-acts { grid-area: acts; }
 @media (min-width: 1088px) {
   .task-row {
-    grid-template-columns: auto minmax(0, 1fr) auto var(--bar) var(--acts);
-    grid-template-areas: 'tick body chips prog acts';
+    grid-template-columns: auto minmax(0, 1fr) auto auto var(--bar) var(--acts);
+    grid-template-areas: 'tick body cat chips prog acts';
     padding: 0.4375rem 0;
   }
   .task-foot { display: contents; }
+  .task-chip-slot { grid-area: cat; }
   .task-meta { grid-area: chips; justify-self: end; }
   .task-foot > .task-prog { grid-area: prog; flex-direction: column; align-items: stretch; gap: 0; }
+  /* in two columns the title keeps its words and the category takes only the
+     room left over, never a squeeze or a second line */
+  .tasks[data-columns] .task-row { grid-template-columns: auto minmax(0, max-content) minmax(0, 1fr) auto var(--bar) var(--acts); }
+  .tasks[data-columns] .task-chip { margin-left: 2rem; }
 }
+
+/* the category as a small pill; when it does not fit beside the full-height lead it
+   wraps onto a line the slot cuts off */
+.task-chip-slot {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  min-width: 0;
+  height: 1.5rem;
+  overflow: hidden;
+}
+.task-chip-slot::before { content: ''; height: 100%; }
+.task-chip {
+  flex: none;
+  padding: 0.125rem 0.5rem;
+  border: 0;
+  border-radius: 999px;
+  background: var(--track);
+  color: var(--quiet);
+  font: inherit;
+  font-size: 0.6875rem;
+  line-height: 1.6;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.task-chip:hover { background: var(--haze-strong); color: var(--ink); }
+.task-chip:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 .task-meta { display: flex; align-items: center; gap: 0.625rem; }
 .task-meta:empty { display: none; }
 .task-acts { display: flex; align-items: center; justify-content: flex-end; gap: 0.5rem; width: var(--acts); }
@@ -536,6 +570,8 @@
   box-shadow: 0 0.75rem 1.75rem -0.5rem rgb(0 0 0 / 0.12);
 }
 .task-item[data-lifted][data-settling], .task-step[data-lifted][data-settling] { transition: transform 180ms ease; }
+/* in columns, a card reaching above its row is cut off into the foot of the column before */
+.tasks[data-columns] .task-item[data-lifted]::before { inset: 0 -0.5rem; }
 .order-edge { border: 0; height: 1px; margin: 6px 0; background: var(--line); }
 .order-edge.bare { opacity: 0; transition: opacity 180ms ease; }
 [data-dragging] .order-edge.bare { opacity: 1; }

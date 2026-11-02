@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { dropped, gapAt, landing, openTaskItems, withOrder } from './order'
+import { arranged, dropped, gapAt, landing, openTaskItems, withOrder } from './order'
 import type { DayItem, TaskNode } from './types'
 
 const node = (id: number, steps: number[] = []) =>
@@ -96,10 +96,65 @@ describe('landing', () => {
   ]
 
   test('a release away from the lift lands where the middle of the row is', () => {
-    expect(landing(-90, 100, slots)).toEqual({ to: 0, into: true })
-    expect(landing(30, 30, slots)).toEqual({ to: 1, into: false })
+    expect(landing({ dx: 0, dy: -90 }, { left: 0, mid: 100 }, slots)).toEqual({ to: 0, into: true })
+    expect(landing({ dx: 0, dy: 30 }, { left: 0, mid: 30 }, slots)).toEqual({ to: 1, into: false })
   })
   test('a release where the row was lifted lands nowhere', () => {
-    expect(landing(4, 100, slots)).toBeNull()
+    expect(landing({ dx: 3, dy: 4 }, { left: 0, mid: 100 }, slots)).toBeNull()
+  })
+})
+
+describe('across two columns', () => {
+  // A list flowed into columns at 0 and 400: rows a, b down the first, c, d down the second.
+  const seq = [
+    { top: 0, height: 40, left: 0 },
+    { top: 40, height: 40, left: 0 },
+    { top: 0, height: 40, left: 400 },
+    { top: 40, height: 50, left: 400 },
+  ]
+  const others = seq.slice(1)
+
+  test('the gap opens in the column the row is carried to', () => {
+    expect(gapAt(10, others, 390)).toEqual({ at: 1, to: 1, into: false })
+    expect(gapAt(30, others, 390)).toEqual({ at: 2, to: 2, into: false })
+    expect(gapAt(80, others, 390)).toEqual({ at: 3, to: 3, into: false })
+    expect(gapAt(70, others, 10)).toEqual({ at: 1, to: 1, into: false })
+    expect(gapAt(30, others, 10)).toEqual({ at: 0, to: 0, into: false })
+  })
+  test('a row carried sideways lands in the other column', () => {
+    expect(landing({ dx: 400, dy: 50 }, { left: 0, mid: 20 }, others)).toEqual({ to: 3, into: false })
+  })
+  test('each column keeps its count and fills down from its top', () => {
+    expect(arranged(seq, 0, 2)).toEqual([
+      { left: 400, top: 0 },
+      { left: 0, top: 0 },
+      { left: 0, top: 40 },
+      { left: 400, top: 40 },
+    ])
+  })
+  test('a row carried into the order sits over the edge and the rest balance beneath it', () => {
+    const flowed = [
+      { top: 0, height: 1, left: 0, edge: true },
+      { top: 7, height: 40, left: 0 },
+      { top: 47, height: 40, left: 0 },
+      { top: 7, height: 40, left: 400 },
+      { top: 47, height: 40, left: 400 },
+    ]
+    expect(arranged(flowed, 4, 0)).toEqual([
+      { left: 0, top: 46 },
+      { left: 0, top: 53 },
+      { left: 0, top: 93 },
+      { left: 400, top: 53 },
+      { left: 0, top: 0 },
+    ])
+  })
+  test('in one column the rows below close up and open the gap', () => {
+    const one = [
+      { top: 0, height: 40 },
+      { top: 40, height: 40 },
+      { top: 86, height: 1, edge: true },
+      { top: 93, height: 40 },
+    ]
+    expect(arranged(one, 0, 3).map((p) => p.top)).toEqual([93, 0, 46, 53])
   })
 })

@@ -15,6 +15,7 @@ import { previewPlayer } from '../voicePreview'
 import { VoiceSheet } from '../voiceSheet'
 import { deviceZone, knownDeviceZone } from '../zone'
 import { AboutSection } from './settings/AboutSection'
+import { AppearanceSection } from './settings/AppearanceSection'
 import { ChoresTimes } from './settings/ChoresTimes'
 import { ComputerGroup, PushRow } from './settings/ComputerGroup'
 import { DebugSection } from './settings/DebugSection'
@@ -916,6 +917,9 @@ export function Settings({
                 )}
               </div>
             )}
+          </FoldRow>
+          <FoldRow label={t('settings.appearance')} open={open === 'appearance'} onToggle={fold('appearance')}>
+            {open === 'appearance' && <AppearanceSection />}
           </FoldRow>
           {settings && (
             <FoldRow

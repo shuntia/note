@@ -12,9 +12,10 @@ import {
 } from 'react'
 import { api, ApiError } from '../api'
 import { latest } from '../coalesce'
+import { doubleColumn } from '../columns'
 import { dropped, openTaskItems, useLiftDrag, withOrder, type DropTo } from '../order'
 import type { ViewProps } from '../app'
-import { collapse, flip, settle } from '../motion-gsap'
+import { collapse, flip, settle, vanish } from '../motion-gsap'
 import { reducedMotion } from '../motion'
 import { Overflow, useMenuSheet, type OverflowItem } from '../overflow'
 import { useStableCallback, useStableMethods } from '../stable'
@@ -141,6 +142,10 @@ function shownTitle(node: TaskNode): string {
     ? node.title.slice(prefix.length)
     : node.title
 }
+
+// A row names its category unless a heading over it or the picked pill already does.
+export const chipOf = (node: Task, filter: string | null, headed: boolean): string | null =>
+  node.category === '' || filter !== null || headed ? null : node.category
 
 // The user's categories, the ones they use most first.
 function categoriesOf(nodes: TaskNode[]): string[] {
@@ -402,6 +407,7 @@ type RowActions = {
   startFocus: (node: TaskNode) => void
   announce: (node: TaskNode, notify: TaskNotify) => void
   toggleSteps: (id: number) => void
+  pickCategory: (category: string) => void
 }
 
 export function Tasks({ notify, refresh, openNow }: ViewProps) {
@@ -417,12 +423,13 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const [sort, setSort] = useState<SortKey>(storedSort)
   const [goalDraft, setGoalDraft] = useState<{ title: string; due: string; time: string } | null>(null)
   const [runOrder, setRunOrder] = useState<number[]>([])
+  const [columns] = useState(doubleColumn)
   const dropRef = useRef<DropTo | null>(null)
   useLiftDrag(dropRef)
   const seeded = useRef(false)
   const unfinished = useRef(new Map<number, number>())
   const root = useRef<HTMLDivElement>(null)
-  const { mark } = useRowMotion(root, leaving.length > 0)
+  const { mark } = useRowMotion(root, !columns && leaving.length > 0)
   // The list follows the box a beat behind, so typing never waits on the rows.
   const query = useDeferredValue(title)
   const shown = useMemo(
@@ -811,6 +818,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     startFocus,
     announce,
     toggleSteps,
+    pickCategory: setFilter,
   })
   const onCompleteInGoal = useStableCallback((node: TaskNode) => actions.complete(node))
   const onEditGoal = useStableCallback(editGoal)
@@ -893,12 +901,11 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     return true
   }
 
-  const row = (p: Placed, group: Exclude<Group, 'done'>, scope = '', drag = false) => (
+  const row = (p: Placed, group: Exclude<Group, 'done'>, drag = false, headed = false) => (
     <Row
       key={p.node.id}
       node={p.node}
       group={group}
-      scope={scope}
       actions={actions}
       leaving={p.leaving}
       onGone={gone}
@@ -906,6 +913,8 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       categories={categories}
       goals={goals}
       drag={drag}
+      chip={chipOf(p.node, filter, headed)}
+      columns={columns}
     />
   )
 
@@ -914,15 +923,15 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       byCategory(ps, categories).map(([head, rows]) => (
         <div key={head} className="task-cat">
           <h4 className="task-sub-head">{head}</h4>
-          <div className="task-list">{rows.map((p) => row(p, group, '', drag))}</div>
+          <div className="task-list">{rows.map((p) => row(p, group, drag, true))}</div>
         </div>
       ))
     ) : (
-      <div className="task-list">{ps.map((p) => row(p, group, '', drag))}</div>
+      <div className="task-list">{ps.map((p) => row(p, group, drag))}</div>
     )
 
   return (
-    <div className="tasks" ref={root}>
+    <div className="tasks" ref={root} data-columns={columns || undefined}>
       <div className="task-box">
         {goalDraft === null ? (
           <>
@@ -1029,7 +1038,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       {soon.length > 0 && (
         <section className="task-group soon" data-drag-list="soon">
           {head.length > 0 && (
-            <div className="task-list">{head.map((p) => row(p, 'soon', '', canDrag))}</div>
+            <div className="task-list">{head.map((p) => row(p, 'soon', canDrag))}</div>
           )}
           {(head.length > 0 || canDrag) && (
             <hr
@@ -1080,6 +1089,8 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
                   stepsOpen={false}
                   categories={categories}
                   goals={goals}
+                  chip={chipOf(n, filter, false)}
+                  columns={columns}
                 />
               ))}
             </div>
@@ -1410,6 +1421,8 @@ const Row = memo(function Row({
   categories,
   goals,
   drag = false,
+  chip,
+  columns,
 }: {
   node: TaskNode
   group: Group
@@ -1422,6 +1435,8 @@ const Row = memo(function Row({
   categories: string[]
   goals: Goal[]
   drag?: boolean
+  chip: string | null
+  columns: boolean
 }) {
   const item = useRef<HTMLDivElement>(null)
   const [reviving, setReviving] = useState(false)
@@ -1434,8 +1449,9 @@ const Row = memo(function Row({
 
   useLayoutEffect(() => {
     if (leaving === null) return
-    return collapse(item.current, () => onGone(node.id), leaving === 'done' ? FINISH_HOLD_S : 0)
-  }, [leaving, node.id, onGone])
+    const go = columns ? vanish : collapse
+    return go(item.current, () => onGone(node.id), leaving === 'done' ? FINISH_HOLD_S : 0)
+  }, [leaving, node.id, onGone, columns])
 
   const revive = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => () => void (revive.current && clearTimeout(revive.current)), [])
@@ -1548,6 +1564,13 @@ const Row = memo(function Row({
           )}
         </div>
         <div className="task-foot">
+          {chip !== null && (
+            <span className="task-chip-slot">
+              <button type="button" className="task-chip" onClick={() => actions.pickCategory(chip)}>
+                {chip}
+              </button>
+            </span>
+          )}
           {!done && (
             <span className="task-meta">
               <Due task={node} />

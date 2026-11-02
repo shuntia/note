@@ -99,6 +99,28 @@ export function collapse(el: Element | null | undefined, done: () => void, delay
   }
 }
 
+/** `collapse` for a row in a list flowed into columns, which a shrinking row would
+ *  reshuffle every frame: it fades in place and the rows close up once it is gone. */
+export function vanish(el: Element | null | undefined, done: () => void, delay = 0): () => void {
+  if (still() || !el) {
+    done()
+    return () => {}
+  }
+  const tween = gsap.to(el, {
+    autoAlpha: 0,
+    scale: 0.98,
+    duration: 0.28,
+    delay,
+    ease: 'power2.in',
+    onComplete: done,
+  })
+  return () => {
+    if (tween.progress() === 1) return
+    tween.kill()
+    gsap.set(el, { clearProps: 'opacity,visibility,transform' })
+  }
+}
+
 /** A panel growing out of the box above it, from nothing to the height it asks for. */
 export function unfold(el: Target): void {
   if (still() || !el) return
