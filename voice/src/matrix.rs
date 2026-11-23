@@ -181,6 +181,7 @@ impl Matrix {
             .map(|_| ())
     }
 
+    /// `membershipID` is the bot's LiveKit identity: Element Call plays only participants it can match to one.
     pub async fn put_member(&self, room: &str, expires_ms: u64, livekit_url: &str) -> Result<String> {
         let path = format!(
             "/_matrix/client/v3/rooms/{}/state/{MEMBER_TYPE}/{}",
@@ -192,8 +193,9 @@ impl Matrix {
             "call_id": "",
             "scope": "m.room",
             "device_id": self.device_id,
+            "membershipID": format!("{}:{}", self.user_id, self.device_id),
             "expires": expires_ms,
-            "focus_active": { "type": "livekit", "focus_selection": "oldest_membership" },
+            "focus_active": { "type": "livekit", "focus_selection": "multi_sfu" },
             "foci_preferred": [{ "type": "livekit", "livekit_service_url": livekit_url, "livekit_alias": room }],
             "m.call.intent": "audio",
         });
