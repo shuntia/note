@@ -812,6 +812,7 @@ impl Service {
         .filter(|d| !d.is_empty());
         if let Some(profile) = lock(&self.state).data.profiles.get(&mxid) {
             self.backends.engines.warm(&profile.language);
+            self.sidecars.warm(&profile.language);
         }
         let svc = self.clone();
         let attempt = self.answering.begin(&room, move |start| svc.turn_away(&start));
@@ -871,6 +872,7 @@ impl Handler for VoiceHandler {
         match body {
             CallBody::Start { room_id, mxid, ring_secs, ring_by_ms, voice, direction, origin, .. } => {
                 svc.backends.engines.warm(&voice.language);
+                svc.sidecars.warm(&voice.language);
                 let room_busy = origin == Origin::Matrix && direction == Direction::Outbound && svc.busy(&room_id);
                 {
                     let mut st = lock(&svc.state);

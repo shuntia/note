@@ -7,12 +7,13 @@ mod voicevox;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::Response;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
@@ -23,6 +24,7 @@ use tokio::sync::mpsc;
 use engines::{Engines, Settings, Voice, SAMPLE_RATE, VOICES};
 
 const FRAME_SAMPLES: usize = SAMPLE_RATE as usize / 4;
+const REAP_EVERY: Duration = Duration::from_secs(30);
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -60,6 +62,9 @@ async fn main() -> anyhow::Result<()> {
             .context("NOTE_TTS_JA_VOICEVOX_DIR is not set")?,
         gpu: env("DEVICE").as_deref() != Some("cpu"),
     };
+    let idle: u64 = env("IDLE_UNLOAD")
+        .map_or(Ok(600), |s| s.parse())
+        .context("NOTE_TTS_IDLE_UNLOAD")?;
 
     ort::init().with_name("note-tts-ja").commit()?;
     let engines = Arc::new(Engines::default());
@@ -70,10 +75,18 @@ async fn main() -> anyhow::Result<()> {
             std::process::exit(1);
         }
     });
+    if idle > 0 {
+        let (reaper, idle) = (engines.clone(), Duration::from_secs(idle));
+        std::thread::spawn(move || loop {
+            std::thread::sleep(REAP_EVERY.min(idle));
+            reaper.reap(idle);
+        });
+    }
 
     let app = Router::new()
         .route("/info", get(info))
         .route("/stream", get(stream))
+        .route("/warm", post(warm))
         .with_state(engines);
     let listener = tokio::net::TcpListener::bind((host.as_str(), port)).await?;
     axum::serve(listener, app).await?;
@@ -95,6 +108,10 @@ async fn info(State(engines): State<Arc<Engines>>) -> Json<serde_json::Value> {
     }))
 }
 
+async fn warm(State(engines): State<Arc<Engines>>) {
+    tokio::task::spawn_blocking(move || engines.wake());
+}
+
 async fn stream(ws: WebSocketUpgrade, State(engines): State<Arc<Engines>>) -> Response {
     ws.on_upgrade(move |socket| serve(socket, engines))
 }
@@ -105,10 +122,17 @@ type Sink = SplitSink<WebSocket, Message>;
 async fn serve(socket: WebSocket, engines: Arc<Engines>) {
     let (mut sink, mut source) = socket.split();
     let voice = match opening(&mut source, &engines).await {
+        Ok(Voice::Ami) => {
+            let waking = engines.clone();
+            tokio::task::spawn_blocking(move || waking.wake());
+            Voice::Ami
+        }
         Ok(voice) => voice,
         Err(Some(message)) => return fail(&mut sink, &message).await,
         Err(None) => return,
     };
+    let held = engines.clone();
+    let _stream = held.stream();
     let cancel = Arc::new(AtomicBool::new(false));
     let (queue, chunks) = mpsc::unbounded_channel::<Option<String>>();
     let speaker = tokio::spawn(speak(sink, voice, engines, cancel.clone(), chunks));

@@ -90,6 +90,24 @@ impl Sidecars {
         *self.live.lock().expect("sidecars lock") = live;
     }
 
+    /// Asks each live sidecar speaking `language` to load what it has let go, without waiting.
+    pub fn warm(&self, language: &str) {
+        let urls: Vec<(Handle, String)> = {
+            let live = self.live.lock().expect("sidecars lock");
+            live.iter()
+                .filter(|s| s.voices.iter().any(|v| v.languages.is_empty() || v.languages.iter().any(|l| l == language)))
+                .filter_map(|s| Some((s.rt.clone(), self.configs.iter().find(|c| c.id == s.id)?)))
+                .map(|(rt, c)| (rt, format!("{}/warm", c.url.trim_end_matches('/'))))
+                .collect()
+        };
+        for (rt, url) in urls {
+            let http = self.http.clone();
+            rt.spawn(async move {
+                let _ = http.post(url).send().await;
+            });
+        }
+    }
+
     /// Probes now and every 30 s, so a sidecar started later is offered; `probed` runs after each probe.
     pub fn watch(self: &Arc<Self>, probed: impl Fn() + Send + Sync + 'static) {
         if self.configs.is_empty() {

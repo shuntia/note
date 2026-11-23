@@ -29,6 +29,7 @@ first, spelled-out letters for acronyms, and VOICEVOX's
 | `NOTE_TTS_JA_SBV2`          |                                     | `off` leaves both voices to VOICEVOX    |
 | `NOTE_TTS_JA_SBV2_DIR`      | `deberta.onnx`, `tokenizer.json`, `model.onnx`, `style_vectors.json` | |
 | `NOTE_TTS_JA_VOICEVOX_DIR`  | `lib/`, `dict/`, `model.vvm`        |                                         |
+| `NOTE_TTS_IDLE_UNLOAD`      | `600`                               | seconds unused before Style-Bert-VITS2 leaves the GPU; `0` keeps it; `POST /warm` or the next アミ stream loads it again |
 | `ORT_DYLIB_PATH`            | note-voice's CUDA onnxruntime       |                                         |
 
 ## Provenance and licences

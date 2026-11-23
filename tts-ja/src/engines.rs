@@ -1,8 +1,8 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::sbv2::{self, Sbv2};
 use crate::voicevox::Voicevox;
@@ -60,11 +60,38 @@ struct Loaded {
 }
 
 /// Both engines behind one lock; each voice is spoken by the other engine when its own is
-/// missing or fails, so a stream never goes silent.
-#[derive(Default)]
+/// missing or fails, so a stream never goes silent. Style-Bert-VITS2, which holds the GPU,
+/// leaves after going unused and loads again for the next render that wants it.
 pub struct Engines {
     loaded: Mutex<Loaded>,
     ready: AtomicBool,
+    sbv2_dir: OnceLock<(PathBuf, bool)>,
+    sbv2_gate: Mutex<()>,
+    streams: AtomicUsize,
+    last_used: Mutex<Instant>,
+}
+
+impl Default for Engines {
+    fn default() -> Self {
+        Engines {
+            loaded: Mutex::default(),
+            ready: AtomicBool::new(false),
+            sbv2_dir: OnceLock::new(),
+            sbv2_gate: Mutex::new(()),
+            streams: AtomicUsize::new(0),
+            last_used: Mutex::new(Instant::now()),
+        }
+    }
+}
+
+/// Holds Style-Bert-VITS2 in while a stream is open.
+pub struct Stream<'a>(&'a Engines);
+
+impl Drop for Stream<'_> {
+    fn drop(&mut self) {
+        self.0.touch();
+        self.0.streams.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl Engines {
@@ -104,6 +131,8 @@ impl Engines {
                         t0.elapsed().as_secs_f64()
                     );
                     self.lock().sbv2 = Some(s);
+                    let _ = self.sbv2_dir.set((dir.clone(), settings.gpu));
+                    self.touch();
                     self.ready.store(true, Ordering::Release);
                 }
                 Err(e) => eprintln!(
@@ -121,6 +150,10 @@ impl Engines {
         let text = text::prepare(raw);
         if !text::speakable(&text) {
             return Ok(Vec::new());
+        }
+        self.touch();
+        if voice == Voice::Ami {
+            self.wake();
         }
         let mut loaded = self.lock();
         let Loaded { sbv2, voicevox } = &mut *loaded;
@@ -157,6 +190,49 @@ impl Engines {
         }
         eprintln!("tts-ja: skipping {text:?}, which neither engine could say");
         Ok(Vec::new())
+    }
+
+    pub fn stream(&self) -> Stream<'_> {
+        self.streams.fetch_add(1, Ordering::AcqRel);
+        self.touch();
+        Stream(self)
+    }
+
+    /// Loads Style-Bert-VITS2 back in if it left; VOICEVOX keeps speaking meanwhile.
+    pub fn wake(&self) {
+        let Some((dir, gpu)) = self.sbv2_dir.get() else { return };
+        let _gate = self.sbv2_gate.lock().unwrap_or_else(|e| e.into_inner());
+        if self.lock().sbv2.is_some() {
+            return;
+        }
+        let t0 = Instant::now();
+        match load_sbv2(dir, *gpu) {
+            Ok(s) => {
+                eprintln!("tts-ja: Style-Bert-VITS2 back in {:.1} s", t0.elapsed().as_secs_f64());
+                self.lock().sbv2 = Some(s);
+            }
+            Err(e) => eprintln!("tts-ja: Style-Bert-VITS2 failed to load again, VOICEVOX speaks for アミ: {e:#}"),
+        }
+        self.touch();
+    }
+
+    /// Drops Style-Bert-VITS2 once no stream has used it for `idle`.
+    pub fn reap(&self, idle: Duration) {
+        if self.streams.load(Ordering::Acquire) > 0 {
+            return;
+        }
+        let since = *self.last_used.lock().unwrap_or_else(|e| e.into_inner());
+        if since.elapsed() < idle {
+            return;
+        }
+        let _gate = self.sbv2_gate.lock().unwrap_or_else(|e| e.into_inner());
+        if self.lock().sbv2.take().is_some() {
+            eprintln!("tts-ja: Style-Bert-VITS2 unloaded after {} s unused", idle.as_secs());
+        }
+    }
+
+    fn touch(&self) {
+        *self.last_used.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Loaded> {
