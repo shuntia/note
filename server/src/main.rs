@@ -150,7 +150,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(model) = db::server_setting(&conn, admin::LLM_MODEL_SETTING)? {
         llm.set_model(&model);
     }
-    let own_keys = note_server::own_keys::OwnKeys::new(&cfg.secrets_dir, &cfg.providers, cfg.voice.as_ref());
+    let own_keys = note_server::own_keys::OwnKeys::new(&cfg.secrets_dir, &cfg.data_dir, &cfg.providers, cfg.voice.as_ref());
     match own_keys.seed_from_server(&conn, &cfg.providers, llm.model(), jiff::Timestamp::now()) {
         Ok(0) => {}
         Ok(n) => eprintln!("llm keys: gave {n} user(s) the server's key as their own"),

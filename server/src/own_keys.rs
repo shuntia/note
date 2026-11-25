@@ -11,6 +11,7 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 const KEY_FILE: &str = "llm_keys";
@@ -89,7 +90,8 @@ struct SealedRow {
 }
 
 enum Secret {
-    File(PathBuf),
+    /// Read from the first of these that exists, else made in the first that takes it.
+    Files(Vec<PathBuf>),
     Fixed([u8; 32]),
 }
 
@@ -106,16 +108,26 @@ pub struct OwnKeys {
     /// Off only in unit tests, whose providers answer on loopback.
     guard: bool,
     built: Mutex<HashMap<i64, Option<Arc<Own>>>>,
+    /// Bumped by every key change, so a build that read the row before it is not kept.
+    changes: AtomicU64,
 }
 
 impl OwnKeys {
-    /// Seals under `secrets_dir/llm_keys`, written with a fresh key on first use.
-    pub fn new(secrets_dir: &Path, providers: &crate::config::ProvidersConfig, voice: Option<&crate::config::VoiceConfig>) -> Self {
+    /// Seals under `llm_keys` in `secrets_dir`, or in `data_dir` when the
+    /// secrets directory holds none and cannot be written, as a systemd
+    /// credentials directory cannot; a fresh key is written on first use.
+    pub fn new(
+        secrets_dir: &Path,
+        data_dir: &Path,
+        providers: &crate::config::ProvidersConfig,
+        voice: Option<&crate::config::VoiceConfig>,
+    ) -> Self {
         let timeouts = providers.llm.as_ref().map_or(
             (crate::config::DEFAULT_PROVIDER_TIMEOUT_SECS, crate::config::DEFAULT_BACKGROUND_TIMEOUT_SECS),
             |p| (p.timeout_secs, p.background_timeout_secs),
         );
-        Self { timeouts, voice: voice.cloned(), ..Self::with_secret(Secret::File(secrets_dir.join(KEY_FILE))) }
+        let files = Secret::Files(vec![secrets_dir.join(KEY_FILE), data_dir.join(KEY_FILE)]);
+        Self { timeouts, voice: voice.cloned(), ..Self::with_secret(files) }
     }
 
     /// Seals under a key that lives only as long as the process.
@@ -141,6 +153,7 @@ impl OwnKeys {
             server_stands_in: false,
             guard: true,
             built: Mutex::default(),
+            changes: AtomicU64::new(0),
         }
     }
 
@@ -179,7 +192,7 @@ impl OwnKeys {
         }
         let key = match &self.secret {
             Secret::Fixed(key) => *key,
-            Secret::File(path) => load_or_create(path)?,
+            Secret::Files(paths) => load_or_create(paths)?,
         };
         *loaded = Some(key);
         Ok(key)
@@ -238,17 +251,26 @@ impl OwnKeys {
     }
 
     fn forget(&self, user_id: i64) {
-        self.built.lock().unwrap_or_else(PoisonError::into_inner).remove(&user_id);
+        let mut built = self.built.lock().unwrap_or_else(PoisonError::into_inner);
+        self.changes.fetch_add(1, Ordering::SeqCst);
+        built.remove(&user_id);
     }
 
     /// The user's providers, built once and kept until their key changes.
     /// `db` is locked only to build them, so the caller must not hold it.
     pub fn own(&self, db: &Mutex<Connection>, user_id: i64, server: &dyn LLMProvider) -> Option<Arc<Own>> {
-        if let Some(own) = self.built.lock().unwrap_or_else(PoisonError::into_inner).get(&user_id) {
-            return own.clone();
+        let changes = {
+            let built = self.built.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(own) = built.get(&user_id) {
+                return own.clone();
+            }
+            self.changes.load(Ordering::SeqCst)
+        };
+        let own = self.build(&crate::db_guard(db), user_id, server).ok()?.map(Arc::new);
+        let mut built = self.built.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.changes.load(Ordering::SeqCst) == changes {
+            built.insert(user_id, own.clone());
         }
-        let own = self.build(&crate::db_guard(db), user_id, server).map(Arc::new);
-        self.built.lock().unwrap_or_else(PoisonError::into_inner).insert(user_id, own.clone());
         own
     }
 
@@ -284,7 +306,7 @@ impl OwnKeys {
         !self.server_stands_in
     }
 
-    fn build(&self, conn: &Connection, user_id: i64, server: &dyn LLMProvider) -> Option<Own> {
+    fn build(&self, conn: &Connection, user_id: i64, server: &dyn LLMProvider) -> rusqlite::Result<Option<Own>> {
         let row: Option<SealedRow> = conn
             .query_row(
                 "SELECT kind, model, models, nonce, sealed, base_url, seeded FROM llm_keys WHERE user_id = ?1",
@@ -301,10 +323,8 @@ impl OwnKeys {
                     })
                 },
             )
-            .optional()
-            .ok()
-            .flatten();
-        let row = row?;
+            .optional()?;
+        let Some(row) = row else { return Ok(None) };
         let opened = KeyKind::parse(&row.kind)
             .context("unknown key kind")
             .and_then(|kind| Ok((kind, open(&self.secret()?, user_id, &row.nonce, &row.sealed)?)));
@@ -313,13 +333,13 @@ impl OwnKeys {
             Err(e) => {
                 let _ = crate::log::record(conn, Some(user_id), "llm_key_unreadable", &format!("{e:#}"));
                 let broken: Arc<dyn LLMProvider> = Arc::new(Unusable(Reason::AuthInvalid, "the saved AI key cannot be read; save it again"));
-                return Some(Own { llm: broken.clone(), voice: broken });
+                return Ok(Some(Own { llm: broken.clone(), voice: broken }));
             }
         };
         let models: Vec<String> = serde_json::from_str(&row.models).unwrap_or_default();
         let base = self.endpoint(kind, row.base_url.as_deref());
         let public = !self.trusted(&base, row.seeded);
-        Some(self.providers(kind, &key, &row.model, &models, &base, public, server))
+        Ok(Some(self.providers(kind, &key, &row.model, &models, &base, public, server)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -468,33 +488,61 @@ fn chat_models(catalogue: &serde_json::Value, chosen: &str) -> Vec<String> {
     std::iter::once(chosen.to_string()).chain(rows.into_iter().take(OPENAI_MODELS).map(|(_, id)| id)).collect()
 }
 
-fn load_or_create(path: &Path) -> Result<[u8; 32]> {
-    use std::io::Write;
+fn load_or_create(paths: &[PathBuf]) -> Result<[u8; 32]> {
+    for path in paths {
+        if let Some(key) = read_key_file(path)? {
+            return Ok(key);
+        }
+    }
+    let mut refused = anyhow::anyhow!("no place is given for the key file");
+    for path in paths {
+        match create_key_file(path) {
+            Ok(key) => return Ok(key),
+            Err(e) => refused = e,
+        }
+    }
+    Err(refused)
+}
+
+fn read_key_file(path: &Path) -> Result<Option<[u8; 32]>> {
     let engine = base64::engine::general_purpose::STANDARD;
     match std::fs::read_to_string(path) {
         Ok(raw) => {
             let bytes = engine.decode(raw.trim()).with_context(|| format!("{} is not base64", path.display()))?;
-            return bytes.try_into().map_err(|_| anyhow::anyhow!("{} does not hold 32 bytes", path.display()));
+            bytes.try_into().map(Some).map_err(|_| anyhow::anyhow!("{} does not hold 32 bytes", path.display()))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(anyhow::Error::new(e).context(format!("reading {}", path.display()))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow::Error::new(e).context(format!("reading {}", path.display()))),
     }
+}
+
+/// Writes a fresh key beside `path` and links it into place whole, so a crash
+/// never leaves a partial file and a racing writer's key wins for both.
+fn create_key_file(path: &Path) -> Result<[u8; 32]> {
+    use std::io::Write;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     let mut key = [0u8; 32];
     getrandom::fill(&mut key).expect("os rng");
+    let mut tag = [0u8; 8];
+    getrandom::fill(&mut tag).expect("os rng");
+    let staged = path.with_extension(format!("new-{}", u64::from_le_bytes(tag)));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    match options.open(path) {
-        Ok(mut file) => {
-            file.write_all(engine.encode(key).as_bytes())?;
-            file.sync_all()?;
-            Ok(key)
+    let written = options.open(&staged).and_then(|mut file| {
+        file.write_all(base64::engine::general_purpose::STANDARD.encode(key).as_bytes())?;
+        file.sync_all()
+    });
+    let linked = written.and_then(|()| std::fs::hard_link(&staged, path));
+    let _ = std::fs::remove_file(&staged);
+    match linked {
+        Ok(()) => Ok(key),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            read_key_file(path)?.with_context(|| format!("{} vanished as it was made", path.display()))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => load_or_create(path),
         Err(e) => Err(anyhow::Error::new(e).context(format!("writing {}", path.display()))),
     }
 }
@@ -604,18 +652,39 @@ mod tests {
     fn the_key_file_is_made_once_owner_only_and_read_back() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("secrets");
-        let first = load_or_create(&dir.join(KEY_FILE)).unwrap();
-        assert_eq!(load_or_create(&dir.join(KEY_FILE)).unwrap(), first);
+        let first = load_or_create(&[dir.join(KEY_FILE)]).unwrap();
+        assert_eq!(load_or_create(&[dir.join(KEY_FILE)]).unwrap(), first);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "nothing staged is left behind");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(dir.join(KEY_FILE)).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
-        let keys = OwnKeys::new(&dir, &crate::config::ProvidersConfig::default(), None);
+        let data = tmp.path().join("data");
+        let keys = OwnKeys::new(&dir, &data, &crate::config::ProvidersConfig::default(), None);
         let conn = db();
         keys.store(&crate::db_guard(&conn), 1, &NewKey { kind: KeyKind::Openai, key: "sk-proj-1234", model: "gpt-5", base_url: None, models: &["gpt-5".into()] }, now()).unwrap();
-        let reread = OwnKeys::new(&dir, &crate::config::ProvidersConfig::default(), None);
+        let reread = OwnKeys::new(&dir, &data, &crate::config::ProvidersConfig::default(), None);
+        let server: Arc<dyn LLMProvider> = Arc::new(crate::providers::mock::NullLLM);
+        assert_eq!(reread.llm(&conn, 1, &server).model().as_deref(), Some("gpt-5"));
+        assert!(!data.join(KEY_FILE).exists(), "a key in the secrets directory is the one used");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_secrets_directory_puts_the_key_file_in_the_data_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let (secrets, data) = (tmp.path().join("credentials"), tmp.path().join("data"));
+        std::fs::create_dir_all(&secrets).unwrap();
+        std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let conn = db();
+        let new = NewKey { kind: KeyKind::Openai, key: "sk-proj-1234", model: "gpt-5", base_url: None, models: &[] };
+        OwnKeys::new(&secrets, &data, &crate::config::ProvidersConfig::default(), None).store(&crate::db_guard(&conn), 1, &new, now()).unwrap();
+        std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(data.join(KEY_FILE).exists() && !secrets.join(KEY_FILE).exists());
+        let reread = OwnKeys::new(&secrets, &data, &crate::config::ProvidersConfig::default(), None);
         let server: Arc<dyn LLMProvider> = Arc::new(crate::providers::mock::NullLLM);
         assert_eq!(reread.llm(&conn, 1, &server).model().as_deref(), Some("gpt-5"));
     }
@@ -639,6 +708,19 @@ mod tests {
         assert!(keys.remove(&crate::db_guard(&conn), 1).unwrap());
         assert!(!keys.usable(&conn, 1, server.as_ref()), "a removed key is forgotten at once");
         assert!(Arc::ptr_eq(&OwnKeys::server_stands_in().llm(&conn, 2, &server), &server));
+    }
+
+    #[test]
+    fn a_key_that_could_not_be_read_is_looked_for_again() {
+        let keys = OwnKeys::ephemeral();
+        let conn = db();
+        let server: Arc<dyn LLMProvider> = Arc::new(crate::providers::mock::NullLLM);
+        keys.store(&crate::db_guard(&conn), 1, &NewKey { kind: KeyKind::Openai, key: "sk-1", model: "gpt-5", base_url: None, models: &[] }, now()).unwrap();
+        keys.forget(1);
+        crate::db_guard(&conn).execute_batch("ALTER TABLE llm_keys RENAME TO llm_keys_away").unwrap();
+        assert!(!keys.usable(&conn, 1, server.as_ref()));
+        crate::db_guard(&conn).execute_batch("ALTER TABLE llm_keys_away RENAME TO llm_keys").unwrap();
+        assert!(keys.usable(&conn, 1, server.as_ref()), "a failed read is not remembered as no key");
     }
 
     #[test]

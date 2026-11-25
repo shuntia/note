@@ -174,7 +174,7 @@ in
           secrets_dir = lib.mkOption {
             type = lib.types.str;
             default = credDir;
-            description = "Holds the legacy admin_totp seed; defaults to the credentials directory.";
+            description = "Holds the legacy admin_totp seed and an `llm_keys` credential if given, which seals the users' AI keys and is otherwise made in data_dir; defaults to the credentials directory.";
           };
         };
       };
