@@ -70,7 +70,7 @@ fn fire_checkins(state: &AppState, mock: &Arc<MockChannel>) -> Vec<runner::Fired
 }
 
 #[tokio::test]
-async fn an_unanswered_checkin_gives_its_place_to_the_next_in_the_list() {
+async fn an_unanswered_checkin_asks_again_in_the_same_thread() {
     let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
     let mock = Arc::new(MockChannel::new("mock"));
     let fired = fire_checkins(&state, &mock);
@@ -78,14 +78,13 @@ async fn an_unanswered_checkin_gives_its_place_to_the_next_in_the_list() {
 
     let seen = mock.seen();
     let morning = seen[0].1.conversation_id.expect("the morning check-in opened a thread");
-    let id = seen[1].1.conversation_id.expect("the afternoon one opened its own");
-    assert_ne!(morning, id);
+    let id = seen[1].1.conversation_id.expect("the afternoon one names a thread");
+    assert_eq!(morning, id, "the thread keeps its id, so the morning's notification still leads to it");
 
     let list = json(get(&app, "/api/conversations", &cookie).await).await;
     assert_eq!(list.as_array().unwrap().len(), 1);
     assert_eq!(list[0]["id"], id);
     assert!(list[0]["title"].as_str().unwrap().contains("15:30"), "{}", list[0]["title"]);
-    assert_eq!(get(&app, &format!("/api/conversations/{morning}/messages"), &cookie).await.status(), StatusCode::NOT_FOUND);
 
     let rows = json(get(&app, &format!("/api/conversations/{id}/messages"), &cookie).await).await;
     let rows = rows.as_array().unwrap();
@@ -94,7 +93,7 @@ async fn an_unanswered_checkin_gives_its_place_to_the_next_in_the_list() {
 }
 
 #[tokio::test]
-async fn a_reply_continues_the_thread_and_the_session_knows_it_was_a_checkin() {
+async fn a_reply_through_an_earlier_notification_lands_once_and_answers_only_the_latest_question() {
     let llm = Arc::new(MockLLM::scripted(vec![ChatResponse {
         text: "Glad the morning went. What is next?".into(),
         tool_calls: vec![],
@@ -103,7 +102,7 @@ async fn a_reply_continues_the_thread_and_the_session_knows_it_was_a_checkin() {
         common::app_with_logged_in_user_llm_and_state(llm.clone()).await;
     let mock = Arc::new(MockChannel::new("mock"));
     fire_checkins(&state, &mock);
-    let id = mock.seen()[1].1.conversation_id.unwrap();
+    let id = mock.seen()[0].1.conversation_id.unwrap();
 
     let res = talk(
         &app,

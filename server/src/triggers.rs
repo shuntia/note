@@ -903,11 +903,10 @@ fn thread_context(
     (history, note)
 }
 
-/// Where a trigger's words land: the thread it is laid against now, which a
-/// check-in may have moved it to while its session ran, else the day's
-/// check-in thread, either replaced by a new one while it is an unanswered
-/// check-in, unless the words come from a `resumed` session. The text is
-/// written there whether or not a channel takes it.
+/// Where a trigger's words land: the thread it is laid against, else the day's
+/// check-in thread; one still unanswered asks again in place, unless the words
+/// come from a `resumed` session. The text is written there whether or not a
+/// channel takes it.
 fn record_said(
     conn: &Connection,
     fired: &crate::runner::FiredEvent,
@@ -921,8 +920,9 @@ fn record_said(
         .optional()?
         .flatten();
     if let (Some(id), false) = (conversation_id, resumed) {
-        if let Some(old) = crate::talk::unanswered_checkin(conn, fired.user_id, Some(id), &fired.date)? {
-            return crate::talk::renew_checkin(conn, fired.user_id, old, &fired.date, &fired.wall_time, text, lang, now);
+        if crate::talk::unanswered_checkin(conn, fired.user_id, Some(id), &fired.date)?.is_some() {
+            crate::talk::renew_checkin(conn, fired.user_id, id, &fired.wall_time, text, lang, now)?;
+            return Ok(id);
         }
     }
     match conversation_id {
@@ -1759,7 +1759,7 @@ mod tests {
     }
 
     #[test]
-    fn words_land_where_the_wake_up_was_moved_while_its_session_ran() {
+    fn words_land_in_the_thread_a_checkin_asked_again_in_while_the_session_ran() {
         let (conn, tmp, uid) = env();
         let first = crate::talk::checkin_thread(&conn, uid, "2026-09-17", "09:00", "How did you sleep?", Lang::En, at("2026-09-17T09:00:00Z")).unwrap();
         let laid = lay(&conn, &Lay { conversation_id: Some(first), ..lay_at(&tmp, uid, "09:30") }).unwrap();
@@ -1771,15 +1771,18 @@ mod tests {
             wall_time: "09:30".into(),
             ..Default::default()
         };
-        let moved = crate::talk::checkin_thread(&conn, uid, "2026-09-17", "09:20", "Started yet?", Lang::En, at("2026-09-17T09:20:00Z")).unwrap();
-        assert!(!crate::talk::owned(&conn, uid, first).unwrap());
+        let again = crate::talk::checkin_thread(&conn, uid, "2026-09-17", "09:20", "Started yet?", Lang::En, at("2026-09-17T09:20:00Z")).unwrap();
+        assert_eq!(again, first);
         let landed = record_said(&conn, &fired, Lang::En, "How did the essay go?", at("2026-09-17T09:30:00Z"), false).unwrap();
-        assert_ne!(landed, first);
-        let said: String = conn
-            .query_row("SELECT content FROM talk_messages WHERE conversation_id = ?1 ORDER BY id DESC LIMIT 1", [landed], |r| r.get(0))
+        assert_eq!(landed, first);
+        let said: Vec<String> = conn
+            .prepare("SELECT content FROM talk_messages WHERE conversation_id = ?1 ORDER BY id")
+            .unwrap()
+            .query_map([landed], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
             .unwrap();
-        assert_eq!(said, "How did the essay go?");
-        assert!(landed == moved || !crate::talk::owned(&conn, uid, moved).unwrap());
+        assert_eq!(said, ["How did the essay go?"], "only the newest question is left to answer");
     }
 
     #[test]

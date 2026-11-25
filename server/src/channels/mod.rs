@@ -628,10 +628,21 @@ mod tests {
         let rows = thread_rows(&db.lock().unwrap());
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|(c, _, _)| *c == asked), "{rows:?}");
+
+        let mut later = ev("checkin_call", "push", "Afternoon. Where did the morning go?");
+        later.event_id = 13;
+        later.wall_time = "15:30".into();
+        deliver_event(&db, &ladder, &later, Lang::En);
+        assert_eq!(push.seen()[1].1.conversation_id, Some(asked));
+        deliver_block_start(&db, &ladder, &ws::ClientHub::new(), &crate::runner::BlockStart { event_id: 14, wall_time: "16:00".into(), ..start }, Lang::En);
+        let rows = thread_rows(&db.lock().unwrap());
+        assert_eq!(rows[0], (asked, Some("2026-08-31".to_string()), "Afternoon. Where did the morning go?".to_string()));
+        assert_eq!(rows.len(), 2, "the next block's line follows the question it asked again: {rows:?}");
+        assert!(rows.iter().all(|(c, _, _)| *c == asked), "{rows:?}");
     }
 
     #[test]
-    fn a_checkin_opens_a_thread_of_its_own_that_the_message_names() {
+    fn a_checkin_opens_a_thread_that_the_message_names_and_the_next_asks_again_in() {
         let (db, _uid) = env();
         let push = Arc::new(MockChannel::new("push"));
         let ladder: Vec<Arc<dyn Channel>> = vec![push.clone()];
@@ -654,7 +665,7 @@ mod tests {
         let seen = push.seen();
         assert_eq!(seen.len(), 2);
         let id = seen[1].1.conversation_id.unwrap();
-        assert_ne!(id, first, "an unanswered check-in gives its place to the next");
+        assert_eq!(id, first, "an unanswered check-in asks again in its own thread");
         let conn = db.lock().unwrap();
         let rows = thread_rows(&conn);
         assert_eq!(rows, vec![(id, Some("2026-08-31".to_string()), "Afternoon. Where did the morning go?".to_string())]);

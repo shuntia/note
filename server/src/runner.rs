@@ -512,11 +512,16 @@ pub fn sweep(state: &AppState) -> Vec<std::thread::JoinHandle<()>> {
         let lang = crate::text::Lang::for_user(&state.config_dir, &ev.username);
         if ev.kind == crate::triggers::KIND {
             wakes.entry(ev.user_id).or_default().push(ev);
-        } else if ev.channel == crate::channels::RING_CHANNEL {
+            continue;
+        }
+        if ev.channel == crate::channels::RING_CHANNEL {
             let msg = crate::channels::prepare_event(&state.db, &ev, lang);
             crate::channels::calling::ring_if_free(state, ev.user_id, &ev.username, &msg);
         } else {
             crate::channels::deliver_event(&state.db, &state.channels, &ev, lang);
+        }
+        if crate::channels::is_checkin(&ev.kind) {
+            state.hub.broadcast_changed(ev.user_id);
         }
     }
     crate::outage::tell_all_pending(state, now);

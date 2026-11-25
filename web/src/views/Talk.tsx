@@ -593,6 +593,16 @@ export function Talk({
     listed.current = true
   }, [refresh, loadList])
 
+  // The open thread is read again when told something changed, as a check-in asking again in it.
+  const seenRefresh = useRef(refresh)
+  useEffect(() => {
+    if (seenRefresh.current === refresh) return
+    seenRefresh.current = refresh
+    if (current === null || onTriggers || busy || inFlight.current) return
+    void loadMessages(current, true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refresh])
+
   const loadTriggers = useCallback(async (quiet = false) => {
     if (!quiet) setMsgState('loading')
     try {

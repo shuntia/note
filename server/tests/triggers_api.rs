@@ -1222,14 +1222,13 @@ async fn a_wake_up_after_an_unanswered_checkin_starts_fresh_and_names_it_as_igno
     );
 
     let thread = w.push.seen()[0].1.conversation_id.unwrap();
-    assert_ne!(thread, old);
-    assert!(rows::<i64>(&w, &format!("SELECT id FROM conversations WHERE id = {old}")).is_empty(), "the ignored thread is gone");
+    assert_eq!(thread, old, "the ignored thread asks again in place");
     let said: Vec<String> = rows(&w, &format!("SELECT content FROM talk_messages WHERE conversation_id = {thread}"));
-    assert_eq!(said, ["lunch soon?"]);
+    assert_eq!(said, ["lunch soon?"], "the ignored question is taken out");
 }
 
 #[tokio::test]
-async fn a_parked_wait_follows_its_checkin_into_the_thread_that_replaced_it() {
+async fn a_parked_wait_keeps_its_thread_when_a_checkin_asks_again_in_it() {
     let w = world(vec![call("c1", "say", WAIT), call("c2", "say", r#"{"text":"still on for the essay?"}"#)]).await;
     lay_plain(&w);
     note_server::runner::sweep_once(&w.state);
@@ -1239,9 +1238,8 @@ async fn a_parked_wait_follows_its_checkin_into_the_thread_that_replaced_it() {
         note_server::talk::checkin_thread(&conn, 1, &today(), "12:00", "Lunch?", note_server::text::Lang::En, jiff::Timestamp::now())
             .unwrap()
     };
-    assert_ne!(second, first);
-    assert!(rows::<i64>(&w, &format!("SELECT id FROM conversations WHERE id = {first}")).is_empty());
-    assert_eq!(rows::<Option<i64>>(&w, "SELECT conversation_id FROM events WHERE status = 'pending'"), [Some(second)]);
+    assert_eq!(second, first);
+    assert_eq!(rows::<Option<i64>>(&w, "SELECT conversation_id FROM events WHERE status = 'pending'"), [Some(first)]);
     assert_eq!(rows::<i64>(&w, "SELECT COUNT(*) FROM paused_sessions"), [1]);
 
     make_due(&w);
