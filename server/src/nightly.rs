@@ -29,11 +29,13 @@ pub(crate) fn plan_date(local: &jiff::Zoned, nightly_time: &str) -> jiff::civil:
 /// the agent is involved, so a provider outage still leaves a usable morning
 /// plan. The debrief row doubles as the idempotency marker, which is why a
 /// failed session writes the fallback text instead of retrying every sweep.
+/// Without `thinks` (no AI key) only the pure-code stages run.
 pub fn run_for_user(
     deps: &SessionDeps,
     user_id: i64,
     username: &str,
     now: jiff::Timestamp,
+    thinks: bool,
 ) -> Result<()> {
     let ucfg = UserConfig::load(deps.config_dir, username)?;
     let tz = crate::zone::named(&ucfg.timezone);
@@ -54,7 +56,7 @@ pub fn run_for_user(
         }
     }
     let mut report = Report::new(date);
-    let result = run_stages(deps, user_id, username, &ucfg, date, now, &mut report);
+    let result = run_stages(deps, user_id, username, &ucfg, date, now, thinks, &mut report);
     {
         let conn = crate::db_guard(deps.db);
         let _ = crate::log::record(&conn, Some(user_id), "nightly_run", &report.line());
@@ -64,6 +66,7 @@ pub fn run_for_user(
 
 /// Every stage of one run, in order. Its caller writes the report whether this
 /// returns or fails partway, so a run that dies still says where it died.
+#[allow(clippy::too_many_arguments)]
 fn run_stages(
     deps: &SessionDeps,
     user_id: i64,
@@ -71,6 +74,7 @@ fn run_stages(
     ucfg: &UserConfig,
     date: jiff::civil::Date,
     now: jiff::Timestamp,
+    thinks: bool,
     report: &mut Report,
 ) -> Result<()> {
     let tz = crate::zone::named(&ucfg.timezone);
@@ -88,9 +92,11 @@ fn run_stages(
     };
     // Monday's run looks back before it looks forward, so the planning session
     // already reads the new strategy.
-    let at = std::time::Instant::now();
-    let reviewed = crate::review::run_for_user(deps, user_id, username, &tz, date, now);
-    report.stage("review", at, reviewed.as_ref().err().inspect(|e| note("review_error", e)));
+    if thinks {
+        let at = std::time::Instant::now();
+        let reviewed = crate::review::run_for_user(deps, user_id, username, &tz, date, now);
+        report.stage("review", at, reviewed.as_ref().err().inspect(|e| note("review_error", e)));
+    }
     let at = std::time::Instant::now();
     let learned = {
         let conn = crate::db_guard(deps.db);
@@ -133,16 +139,12 @@ fn run_stages(
         }
     }
     let at = std::time::Instant::now();
-    let outcome = crate::agent::run_session(
-        deps,
-        user_id,
-        username,
-        crate::tools::SessionKind::Nightly,
-        now,
-        &[],
-        &opening,
-    );
-    report.stage("session", at, outcome.as_ref().err());
+    let outcome = thinks.then(|| {
+        crate::agent::run_session(deps, user_id, username, crate::tools::SessionKind::Nightly, now, &[], &opening)
+    });
+    if let Some(outcome) = &outcome {
+        report.stage("session", at, outcome.as_ref().err());
+    }
     let at = std::time::Instant::now();
     let settled = {
         let conn = crate::db_guard(deps.db);
@@ -151,7 +153,11 @@ fn run_stages(
     report.stage("notes", at, settled.as_ref().err().inspect(|e| note("notes_settle_error", e)));
     let fallback = crate::text::fallback_debrief(lang);
     let content = match outcome {
-        Ok(out) => {
+        None => {
+            report.debrief("keyless");
+            crate::text::failure_reason(lang, crate::failure::Reason::NoKey)
+        }
+        Some(Ok(out)) => {
             if !out.steps.iter().any(|s| s.name == NOTES_TOOL && !s.is_error) {
                 let conn = crate::db_guard(deps.db);
                 let _ = crate::log::record_throttled(
@@ -163,16 +169,18 @@ fn run_stages(
                     crate::log::ERROR_LOG_WINDOW_MINS,
                 );
             }
-            if out.reply.trim().is_empty() { fallback.clone() } else { out.reply }
+            let content = if out.reply.trim().is_empty() { fallback.clone() } else { out.reply };
+            report.debrief(if content == fallback { "fallback" } else { "written" });
+            content
         }
-        Err(e) => {
+        Some(Err(e)) => {
             crate::failure::noted(&e);
             let conn = crate::db_guard(deps.db);
             let _ = crate::log::record(&conn, Some(user_id), "nightly_fallback", &format!("{e:#}"));
+            report.debrief("fallback");
             fallback.clone()
         }
     };
-    report.debrief(content != fallback);
     let conn = crate::db_guard(deps.db);
     conn.execute(
         "INSERT OR IGNORE INTO debriefs (user_id, date, content, created_at) VALUES (?1, ?2, ?3, ?4)",
@@ -203,8 +211,8 @@ impl Report {
         self.stages.push(format!("{name}={status} {:.1}s", at.elapsed().as_secs_f64()));
     }
 
-    fn debrief(&mut self, written: bool) {
-        self.debrief = Some(if written { "written" } else { "fallback" });
+    fn debrief(&mut self, how: &'static str) {
+        self.debrief = Some(how);
     }
 
     fn line(&self) -> String {
@@ -309,11 +317,13 @@ pub fn spawn(state: crate::AppState) {
                 }
                 let st = state.clone();
                 let result = tokio::task::spawn_blocking(move || {
+                    let thinks = !st.skip_keyless(user_id, "nightly");
+                    let llm = st.llm_for(user_id);
                     let deps = SessionDeps {
                         db: &st.db,
                         config_dir: &st.config_dir,
                         data_dir: &st.data_dir,
-                        llm: st.llm.as_ref(),
+                        llm: llm.as_ref(),
                         embeddings: st.embeddings.as_deref(),
                         search: st.search.as_deref(),
                         task_scope: None,
@@ -325,7 +335,7 @@ pub fn spawn(state: crate::AppState) {
                         caller: Some(&st),
                         conversation_id: None,
                     };
-                    let (r, failures) = crate::failure::gather(|| run_for_user(&deps, user_id, &username, now));
+                    let (r, failures) = crate::failure::gather(|| run_for_user(&deps, user_id, &username, now, thinks));
                     for failure in &failures {
                         crate::failure::tell(&st, user_id, &username, failure, now);
                     }
@@ -412,6 +422,22 @@ mod tests {
     }
 
     #[test]
+    fn without_a_key_the_night_lays_tomorrow_in_code_and_asks_for_one() {
+        let (db, tmp) = env("UTC", "03:00");
+        let llm = MockLLM::scripted(vec![]);
+        let now: jiff::Timestamp = "2026-08-31T03:05:00Z".parse().unwrap();
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now, false).unwrap();
+        assert!(llm.seen().is_empty());
+        let conn = db.lock().unwrap();
+        let content: String = conn.query_row("SELECT content FROM debriefs WHERE user_id = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(content, crate::text::failure_reason(crate::text::Lang::En, crate::failure::Reason::NoKey));
+        let events: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
+        assert!(events > 0, "the plan is laid without a model");
+        let line: String = conn.query_row("SELECT detail FROM event_log WHERE kind = 'nightly_run'", [], |r| r.get(0)).unwrap();
+        assert!(line.contains("debrief=keyless") && !line.contains("session="), "{line}");
+    }
+
+    #[test]
     fn nightly_generates_plan_and_stores_debrief_idempotently() {
         let (db, tmp) = env("UTC", "03:00");
         let llm = MockLLM::scripted(vec![
@@ -419,7 +445,7 @@ mod tests {
             ChatResponse { text: "should never be consumed".into(), tool_calls: vec![] },
         ]);
         let now: jiff::Timestamp = "2026-08-31T04:00:00Z".parse().unwrap();
-        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now, true).unwrap();
         {
             let conn = db.lock().unwrap();
             let n: i64 = conn
@@ -439,7 +465,7 @@ mod tests {
                 .unwrap();
             assert!(content.contains("light day"));
         }
-        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now, true).unwrap();
         assert_eq!(llm.seen().len(), 1);
         let conn = db.lock().unwrap();
         let counts = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
@@ -472,7 +498,7 @@ mod tests {
         let (db, tmp) = env("UTC", "03:00");
         let llm = MockLLM::scripted(vec![ChatResponse { text: "ok".into(), tool_calls: vec![] }]);
         let now: jiff::Timestamp = "2026-08-31T04:00:00Z".parse().unwrap();
-        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now, true).unwrap();
         {
             let conn = db.lock().unwrap();
             let rows = close_day_rows(&conn);
@@ -481,7 +507,7 @@ mod tests {
             assert!(rows[0].1.contains("carry: true"));
             conn.execute("DELETE FROM debriefs", []).unwrap();
         }
-        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now, true).unwrap();
         let conn = db.lock().unwrap();
         assert_eq!(close_day_rows(&conn).len(), 1);
         let spent = crate::triggers::spent(&conn, 1, "2026-08-31".parse().unwrap()).unwrap();
@@ -496,7 +522,7 @@ mod tests {
         std::fs::write(&path, format!("{raw}close_day_time = \"\"\n")).unwrap();
         let llm = MockLLM::scripted(vec![ChatResponse { text: "ok".into(), tool_calls: vec![] }]);
         let now: jiff::Timestamp = "2026-08-31T04:00:00Z".parse().unwrap();
-        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now, true).unwrap();
         let conn = db.lock().unwrap();
         assert!(close_day_rows(&conn).is_empty());
     }
@@ -530,7 +556,7 @@ mod tests {
             ChatResponse { text: "good morning".into(), tool_calls: vec![] },
         ]);
         let now: jiff::Timestamp = "2026-09-21T04:00:00Z".parse().unwrap();
-        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now, true).unwrap();
 
         let (week, strategy) = crate::context::read_strategy(tmp.path(), "aki").unwrap();
         assert_eq!((week.as_str(), strategy.as_str()), ("2026-09-14", "Essay first."));
@@ -550,7 +576,7 @@ mod tests {
         let (db, tmp) = env("UTC", "03:00");
         let llm = MockLLM::scripted(vec![ChatResponse { text: "   \n".into(), tool_calls: vec![] }]);
         let now: jiff::Timestamp = "2026-08-31T04:00:00Z".parse().unwrap();
-        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now, true).unwrap();
         let conn = db.lock().unwrap();
         let content: String = conn
             .query_row("SELECT content FROM debriefs WHERE user_id=1", [], |r| r.get(0))
@@ -588,7 +614,7 @@ mod tests {
             tool_calls: vec![],
         }]);
         let now: jiff::Timestamp = "2026-08-31T04:00:00Z".parse().unwrap();
-        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now, true).unwrap();
         let line = nightly_run_row(&db.lock().unwrap());
         assert_eq!(
             without_timings(&line),
@@ -611,7 +637,7 @@ mod tests {
         }
         let (db, tmp) = env("UTC", "03:00");
         let now: jiff::Timestamp = "2026-08-31T04:00:00Z".parse().unwrap();
-        run_for_user(&deps(&db, &tmp, &Failing), 1, "aki", now).unwrap();
+        run_for_user(&deps(&db, &tmp, &Failing), 1, "aki", now, true).unwrap();
         let conn = db.lock().unwrap();
         let plans: i64 = conn.query_row("SELECT COUNT(*) FROM plans", [], |r| r.get(0)).unwrap();
         assert_eq!(plans, 1);
@@ -705,7 +731,7 @@ mod tests {
         ]);
         // 2026-08-31T14:00Z = 23:00 JST on 2026-08-31 — past a 22:00 nightly_time
         let now: jiff::Timestamp = "2026-08-31T14:00:00Z".parse().unwrap();
-        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now, true).unwrap();
         let conn = db.lock().unwrap();
         let plan_date: String = conn
             .query_row("SELECT date FROM plans WHERE user_id=1", [], |r| r.get(0))
@@ -754,7 +780,7 @@ mod tests {
             ChatResponse { text: "good morning! light day ahead".into(), tool_calls: vec![] },
         ]);
         let now: jiff::Timestamp = "2026-08-31T04:00:00Z".parse().unwrap();
-        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now, true).unwrap();
 
         let notes =
             std::fs::read_to_string(crate::context::nightly_notes_path(tmp.path(), "aki")).unwrap();
@@ -776,7 +802,7 @@ mod tests {
             ChatResponse { text: "good morning! light day ahead".into(), tool_calls: vec![] },
         ]);
         let now: jiff::Timestamp = "2026-08-31T04:00:00Z".parse().unwrap();
-        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now, true).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(crate::context::nightly_notes_path(tmp.path(), "aki")).unwrap(),
@@ -821,7 +847,7 @@ mod tests {
             },
             ChatResponse { text: "good morning".into(), tool_calls: vec![] },
         ]);
-        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now).unwrap();
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", now, true).unwrap();
 
         let opening = format!("{:?}", llm.seen()[0].messages.last().unwrap());
         for id in [&ended, &stale, &left] {
@@ -866,7 +892,7 @@ mod tests {
             crate::notes::add(&conn, tmp.path(), "aki", "milk", None, None, "2026-08-27T00:00:00Z".parse().unwrap())
                 .unwrap();
         }
-        run_for_user(&deps(&db, &tmp, &Failing), 1, "aki", "2026-08-31T04:00:00Z".parse().unwrap()).unwrap();
+        run_for_user(&deps(&db, &tmp, &Failing), 1, "aki", "2026-08-31T04:00:00Z".parse().unwrap(), true).unwrap();
         let conn = db.lock().unwrap();
         assert!(crate::notes::all(&conn, tmp.path(), "aki").unwrap().is_empty());
         assert_eq!(crate::memory::list(&conn, "aki", None, 10).unwrap()[0].summary, "milk");

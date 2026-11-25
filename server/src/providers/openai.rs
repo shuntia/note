@@ -22,6 +22,8 @@ pub struct OpenAILLM {
     extra: serde_json::Map<String, serde_json::Value>,
     /// `OpenRouter` takes `usage.include`, which a strict OpenAI-compatible server would refuse.
     openrouter: bool,
+    /// `OpenAI`'s own API: `max_completion_tokens` and a flat `reasoning_effort`.
+    openai_shape: bool,
 }
 
 impl OpenAILLM {
@@ -44,7 +46,14 @@ impl OpenAILLM {
             choice_refused: std::sync::Mutex::default(),
             extra: serde_json::Map::new(),
             openrouter: base_url.contains("openrouter.ai"),
+            openai_shape: false,
         }
+    }
+
+    #[must_use]
+    pub fn with_openai_shape(mut self) -> Self {
+        self.openai_shape = true;
+        self
     }
 
     /// Top-level fields of `extra` go into every request body.
@@ -151,6 +160,9 @@ impl OpenAILLM {
         for (k, field) in &self.extra {
             v[k] = field.clone();
         }
+        if self.openai_shape {
+            reshape_for_openai(&mut v);
+        }
         v
     }
 
@@ -211,6 +223,17 @@ impl OpenAILLM {
         let v = self.agents.post_json(req.background, "openai", &body, |agent| self.authorized(agent.post(&url)))?;
         crate::usage::record(crate::usage::Usage::openai_call(&v["usage"]));
         Ok(v)
+    }
+}
+
+/// Reasoning switched off is `OpenAI`'s default, so only an effort survives.
+fn reshape_for_openai(v: &mut serde_json::Value) {
+    let Some(body) = v.as_object_mut() else { return };
+    if let Some(n) = body.remove("max_tokens") {
+        body.insert("max_completion_tokens".into(), n);
+    }
+    if let Some(effort) = body.remove("reasoning").and_then(|r| r.get("effort").cloned()) {
+        body.insert("reasoning_effort".into(), effort);
     }
 }
 

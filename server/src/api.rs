@@ -52,6 +52,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/conversations/{id}/model", put(conversation_model_put))
         .route("/api/models", get(models_get))
         .route("/api/settings", get(settings_get).put(settings_put))
+        .route("/api/settings/llm-key", get(llm_key_get).put(llm_key_put).delete(llm_key_delete))
         .route("/api/presence", post(presence))
         .route("/api/voice/link", post(voice_link).delete(voice_unlink))
         .route("/api/voice/test", post(voice_test))
@@ -477,12 +478,95 @@ async fn me(user: CurrentUser, State(state): State<AppState>, headers: HeaderMap
         .db()
         .query_row("SELECT onboarding FROM users WHERE id = ?1", [user.id], |r| r.get(0))
         .unwrap_or(false);
-    Json(serde_json::json!({ "username": user.username, "admin": user.admin, "onboarding": onboarding, "voice": state.voice.is_some() }))
+    Json(serde_json::json!({
+        "username": user.username,
+        "admin": user.admin,
+        "onboarding": onboarding,
+        "voice": state.voice.is_some(),
+        "needs_key": needs_key(&state, user.id),
+    }))
 }
 
-async fn onboarding_done(user: CurrentUser, State(state): State<AppState>) -> StatusCode {
+/// Whether the user has to save a key of their own before Note can answer them.
+fn needs_key(state: &AppState, user_id: i64) -> bool {
+    state.own_keys.required() && !matches!(crate::own_keys::OwnKeys::info(&state.db(), user_id), Ok(Some(_)))
+}
+
+/// Refused while the user still has to save a key.
+async fn onboarding_done(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    if needs_key(&state, user.id) {
+        return (StatusCode::CONFLICT, Json(serde_json::json!({ "error": "an AI key is needed first" }))).into_response();
+    }
     match state.db().execute("UPDATE users SET onboarding = 0 WHERE id = ?1", [user.id]) {
-        Ok(_) => StatusCode::NO_CONTENT,
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn llm_key_get(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    match crate::own_keys::OwnKeys::info(&state.db(), user.id) {
+        Ok(info) => Json(serde_json::json!(info)).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LlmKeyReq {
+    kind: String,
+    key: String,
+    model: String,
+}
+
+/// Saves the key once the provider has taken it and offers the model.
+async fn llm_key_put(user: CurrentUser, State(state): State<AppState>, Json(req): Json<LlmKeyReq>) -> impl IntoResponse {
+    use crate::own_keys::{Refusal, MAX_KEY_LEN, MAX_MODEL_LEN};
+    let Some(kind) = crate::own_keys::KeyKind::parse(&req.kind) else {
+        return invalid_field("kind", "must be openrouter or openai");
+    };
+    let key = req.key.trim().to_string();
+    if key.is_empty() || key.len() > MAX_KEY_LEN || key.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return invalid_field("key", "must be one word");
+    }
+    let model = req.model.trim().to_string();
+    if model.is_empty() || model.len() > MAX_MODEL_LEN || model.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return invalid_field("model", "must be a model id");
+    }
+    let keys = state.own_keys.clone();
+    let (k, m) = (key.clone(), model.clone());
+    let verified = tokio::task::spawn_blocking(move || keys.verify(kind, &k, &m)).await;
+    let models = match verified {
+        Ok(Ok(models)) => models,
+        Ok(Err(Refusal::Key)) => return unprocessable_field("key", "was refused by the provider"),
+        Ok(Err(Refusal::Model)) => return unprocessable_field("model", "is not offered by the provider"),
+        Ok(Err(Refusal::Unreachable(_))) | Err(_) => {
+            return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": "the provider could not be reached" }))).into_response();
+        }
+    };
+    let conn = state.db();
+    let saved = state.own_keys.store(&conn, user.id, kind, &key, &model, &models, jiff::Timestamp::now()).and_then(|()| {
+        for reason in [crate::failure::Reason::NoKey, crate::failure::Reason::AuthInvalid] {
+            crate::outage::clear(&conn, user.id, crate::outage::Outage::Ai(reason))?;
+        }
+        crate::own_keys::OwnKeys::info(&conn, user.id)
+    });
+    match saved {
+        Ok(info) => {
+            drop(conn);
+            state.hub.broadcast_changed(user.id);
+            Json(serde_json::json!(info)).into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn llm_key_delete(user: CurrentUser, State(state): State<AppState>) -> StatusCode {
+    let removed = state.own_keys.remove(&state.db(), user.id);
+    match removed {
+        Ok(_) => {
+            state.hub.broadcast_changed(user.id);
+            StatusCode::NO_CONTENT
+        }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
@@ -1002,11 +1086,12 @@ async fn task_agent(
         // held here, not in the handler future, so a cancelled request still
         // holds the slot until the session it orphaned actually finishes
         let _permit = permit;
+        let llm = state.llm_for(user.id);
         let deps = crate::agent::SessionDeps {
             db: &state.db,
             config_dir: &state.config_dir,
             data_dir: &state.data_dir,
-            llm: state.llm.as_ref(),
+            llm: llm.as_ref(),
             embeddings: state.embeddings.as_deref(),
             search: state.search.as_deref(),
             task_scope: Some(id),
@@ -1221,11 +1306,12 @@ async fn agent_inbox(
                 })
         };
         let opening = crate::inbox::opening(&req.source_id, &req.kind, &related, &req.context);
+        let llm = state.llm_for(user.id);
         let deps = crate::agent::SessionDeps {
             db: &state.db,
             config_dir: &state.config_dir,
             data_dir: &state.data_dir,
-            llm: state.llm.as_ref(),
+            llm: llm.as_ref(),
             embeddings: state.embeddings.as_deref(),
             search: state.search.as_deref(),
             task_scope: None,
@@ -1529,6 +1615,7 @@ async fn triggers_log(user: CurrentUser, State(state): State<AppState>) -> impl 
 }
 
 async fn conversations_list(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    let llm = state.llm_for(user.id);
     let conn = state.db();
     let Ok(mut stmt) = conn.prepare(
         "SELECT id, title, updated_at, summary, via, title_kind, model, effort FROM conversations
@@ -1547,7 +1634,7 @@ async fn conversations_list(user: CurrentUser, State(state): State<AppState>) ->
                 "summary": r.get::<_, Option<String>>(3)?,
                 "via": r.get::<_, String>(4)?,
                 "title_kind": r.get::<_, String>(5)?,
-                "model": crate::models::still_offered(state.llm.as_ref(), r.get(6)?),
+                "model": crate::models::still_offered(llm.as_ref(), r.get(6)?),
                 "effort": r.get::<_, Option<String>>(7)?.as_deref().and_then(crate::providers::Effort::parse),
             }))
         })
@@ -1558,12 +1645,13 @@ async fn conversations_list(user: CurrentUser, State(state): State<AppState>) ->
     }
 }
 
-async fn models_get(_user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+async fn models_get(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    let llm = state.llm_for(user.id);
     Json(serde_json::json!({
-        "default": state.llm.model(),
-        "models": state.llm.catalogue(),
+        "default": llm.model(),
+        "models": llm.catalogue(),
         "efforts": crate::providers::Effort::ALL,
-        "effort_default": state.llm.effort(),
+        "effort_default": llm.effort(),
     }))
 }
 
@@ -1581,7 +1669,7 @@ async fn conversation_model_put(
     Path(id): Path<i64>,
     Json(req): Json<ModelPickReq>,
 ) -> impl IntoResponse {
-    let pick = match crate::models::parse(state.llm.as_ref(), req.model, req.effort) {
+    let pick = match crate::models::parse(state.llm_for(user.id).as_ref(), req.model, req.effort) {
         Ok(pick) => pick,
         Err(field) => return unprocessable_field(field, "is not on offer"),
     };
@@ -1717,6 +1805,7 @@ const IDLE_NUDGE_MIN: std::ops::RangeInclusive<u32> = 0..=240;
 /// write path.
 fn settings_body(
     state: &AppState,
+    llm: &dyn crate::providers::LLMProvider,
     cfg: &crate::config::UserConfig,
     user: &CurrentUser,
     schedule: &[crate::templates::ScheduleRow],
@@ -1756,7 +1845,7 @@ fn settings_body(
         "matrix_send": cfg.matrix_send(),
         "matrix_ping": cfg.matrix_ping(),
         "language": cfg.language(),
-        "model": crate::models::still_offered(state.llm.as_ref(), cfg.model.clone()),
+        "model": crate::models::still_offered(llm, cfg.model.clone()),
         "effort": cfg.effort(),
         "schedule": schedule,
     })
@@ -1808,7 +1897,8 @@ async fn settings_get(user: CurrentUser, State(state): State<AppState>) -> impl 
         let conn = state.db();
         crate::voice::links::get(&conn, user.id).unwrap_or(None)
     };
-    let mut body = settings_body(&state, &cfg, &user, &schedule, voice_link);
+    let llm = state.llm_for(user.id);
+    let mut body = settings_body(&state, llm.as_ref(), &cfg, &user, &schedule, voice_link);
     body["templates"] = serde_json::json!(templates);
     body["timezones"] = serde_json::json!(*ZONES);
     Json(body).into_response()
@@ -1836,6 +1926,7 @@ async fn settings_put(
     headers: HeaderMap,
     Json(req): Json<SettingsPatch>,
 ) -> impl IntoResponse {
+    let llm = state.llm_for(user.id);
     if let Some(voice) = req.voice_voice.as_deref().filter(|v| !v.is_empty()) {
         let lang = request_lang(&state, &user, &headers);
         if let Err(refused) = check_voice(&state, &user, voice, lang).await {
@@ -2007,7 +2098,7 @@ async fn settings_put(
         cfg.language = (!language.is_empty()).then_some(language);
     }
     if let Some(model) = req.model {
-        if crate::models::parse(state.llm.as_ref(), model.clone(), None).is_err() {
+        if crate::models::parse(llm.as_ref(), model.clone(), None).is_err() {
             return invalid_field("model", "is not on offer");
         }
         cfg.model = model;
@@ -2050,7 +2141,7 @@ async fn settings_put(
                 state.hub.broadcast_changed(user.id);
             }
             let voice_link = crate::voice::links::get(&conn, user.id).unwrap_or(None);
-            Json(settings_body(&state, &cfg, &user, &schedule, voice_link)).into_response()
+            Json(settings_body(&state, llm.as_ref(), &cfg, &user, &schedule, voice_link)).into_response()
         }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
@@ -2385,11 +2476,12 @@ async fn debug_prompt(
         _ => return invalid_field("kind", "must be talk, trigger, nightly or call"),
     };
     let built = tokio::task::spawn_blocking(move || {
+        let llm = state.llm_for(user.id);
         let deps = crate::agent::SessionDeps {
             db: &state.db,
             config_dir: &state.config_dir,
             data_dir: &state.data_dir,
-            llm: state.llm.as_ref(),
+            llm: llm.as_ref(),
             embeddings: None,
             search: state.search.as_deref(),
             task_scope: None,

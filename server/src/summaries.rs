@@ -180,6 +180,7 @@ pub fn spawn(state: crate::AppState) {
             for candidate in candidates {
                 if backed_off(&failures, candidate.conversation_id, now)
                     || crate::api::background_capped(&state, candidate.user_id, "summary")
+                    || state.skip_keyless(candidate.user_id, "summary")
                 {
                     continue;
                 }
@@ -189,11 +190,12 @@ pub fn spawn(state: crate::AppState) {
                 let st = state.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     let _permit = permit;
+                    let llm = st.llm_for(candidate.user_id);
                     let deps = SessionDeps {
                         db: &st.db,
                         config_dir: &st.config_dir,
                         data_dir: &st.data_dir,
-                        llm: st.llm.as_ref(),
+                        llm: llm.as_ref(),
                         embeddings: st.embeddings.as_deref(),
                         search: st.search.as_deref(),
                         task_scope: None,

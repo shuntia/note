@@ -6,10 +6,11 @@ import { reducedMotion } from '../motion'
 import type { Me, SecurityState, Settings } from '../types'
 import { deviceZone } from '../zone'
 import { SecuritySection } from './Settings'
+import { KeyForm } from './settings/KeySection'
 import '../styles/settings.css'
 import '../styles/onboarding.css'
 
-type Step = 'lang' | 'factor' | 'name' | 'zone' | 'done'
+type Step = 'lang' | 'key' | 'factor' | 'name' | 'zone' | 'done'
 
 const WELCOME_MS = 1800
 
@@ -26,8 +27,9 @@ function Next({ disabled }: { disabled?: boolean }) {
   )
 }
 
-/** The first run after joining by invite: language, a second factor where the
- * admin panel will ask for one, a name, a time zone; then the app. */
+/** The first run after joining by invite: language, an AI key while there is
+ * none, a second factor where the admin panel will ask for one, a name, a time
+ * zone; then the app. */
 export function Onboarding({
   me,
   notify,
@@ -59,7 +61,14 @@ export function Onboarding({
     void Promise.allSettled([loading, gate]).then(() => setReady(true))
   }, [me.admin])
 
-  const steps: Step[] = ['lang', ...(needsFactor ? (['factor'] as const) : []), 'name', 'zone']
+  const [needsKey] = useState(me.needs_key === true)
+  const steps: Step[] = [
+    'lang',
+    ...(needsKey ? (['key'] as const) : []),
+    ...(needsFactor ? (['factor'] as const) : []),
+    'name',
+    'zone',
+  ]
 
   const save = async (patch: Parameters<typeof api.saveSettings>[0], next: Step) => {
     setBusy(true)
@@ -116,6 +125,13 @@ export function Onboarding({
             <button type="button" lang="en" className="ob-lang" disabled={busy} onClick={() => chooseLanguage('en')}>
               {t('settings.language.en')}
             </button>
+          </div>
+        )}
+
+        {step === 'key' && (
+          <div className="ob-form">
+            <span className="ob-ask">{t('onboard.key')}</span>
+            <KeyForm notify={notify} onSaved={() => setStep(after('key'))} submit={(disabled) => <Next disabled={disabled} />} />
           </div>
         )}
 

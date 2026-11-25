@@ -440,9 +440,10 @@ pub fn set_title_unless_renamed(
 /// never held across the provider call. Without a real LLM there is nothing to
 /// ask, so the draft title stands.
 pub fn generate_title(state: &AppState, user_id: i64, username: &str, conversation_id: i64) {
-    if state.providers_info.llm.is_none() {
+    if state.providers_info.llm.is_none() || state.skip_keyless(user_id, "title") {
         return;
     }
+    let llm = state.llm_for(user_id);
     let lang = Lang::for_user(&state.config_dir, username);
     let exchange = {
         let conn = state.db();
@@ -457,7 +458,7 @@ pub fn generate_title(state: &AppState, user_id: i64, username: &str, conversati
         Ok(Some(exchange)) => crate::prompts::load_in(&state.config_dir, "title", lang)
             .map(|system| crate::agent::with_language_line(system, &state.config_dir, username))
             .and_then(|system| {
-                crate::usage::metered(&state.db, user_id, "Title", || ask_for_title(state.llm.as_ref(), &system, &exchange))
+                crate::usage::metered(&state.db, user_id, "Title", || ask_for_title(llm.as_ref(), &system, &exchange))
             })
             .and_then(|title| {
                 let conn = state.db();
@@ -818,11 +819,12 @@ async fn turn(
     let session_user = username.to_string();
     let said = message.clone();
     let result = tokio::task::spawn_blocking(move || {
+        let llm = st.llm_for(user_id);
         let mut deps = SessionDeps {
             db: &st.db,
             config_dir: &st.config_dir,
             data_dir: &st.data_dir,
-            llm: st.llm.as_ref(),
+            llm: llm.as_ref(),
             embeddings: st.embeddings.as_deref(),
             search: st.search.as_deref(),
             task_scope: None,
@@ -849,7 +851,7 @@ async fn turn(
             } else {
                 let id = create(&conn, user_id, &title_from(&said), now)?;
                 let pick = crate::models::Pick {
-                    model: crate::models::still_offered(st.llm.as_ref(), opens_with.model),
+                    model: crate::models::still_offered(llm.as_ref(), opens_with.model),
                     effort: opens_with.effort,
                 };
                 if pick != crate::models::Pick::default() {

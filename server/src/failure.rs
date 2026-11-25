@@ -6,6 +6,7 @@ use serde::Serialize;
 #[serde(rename_all = "snake_case")]
 pub enum Reason {
     ModelUnavailable,
+    NoKey,
     AuthInvalid,
     OutOfCredits,
     RateLimited,
@@ -19,6 +20,7 @@ impl Reason {
     pub fn code(self) -> &'static str {
         match self {
             Reason::ModelUnavailable => "model_unavailable",
+            Reason::NoKey => "no_key",
             Reason::AuthInvalid => "auth_invalid",
             Reason::OutOfCredits => "out_of_credits",
             Reason::RateLimited => "rate_limited",
@@ -34,7 +36,7 @@ impl Reason {
     pub fn lasts(self) -> bool {
         matches!(
             self,
-            Reason::ModelUnavailable | Reason::AuthInvalid | Reason::OutOfCredits | Reason::ContextTooLong
+            Reason::ModelUnavailable | Reason::NoKey | Reason::AuthInvalid | Reason::OutOfCredits | Reason::ContextTooLong
         )
     }
 

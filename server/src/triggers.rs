@@ -1327,7 +1327,13 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     if crate::api::background_capped(state, fired.user_id, "wake-up") {
         crate::outage::tell_pending(state, fired.user_id, &fired.username, now);
         for id in std::iter::once(fired.event_id).chain(fired.folded.iter().copied()) {
-            fire_capped(state, &crate::runner::FiredEvent { event_id: id, folded: Vec::new(), ..fired.clone() }, now);
+            fire_capped(state, &crate::runner::FiredEvent { event_id: id, folded: Vec::new(), ..fired.clone() }, now, "the day's AI sessions are spent");
+        }
+        return;
+    }
+    if state.skip_keyless(fired.user_id, "wake-up") {
+        for id in &all {
+            fire_capped(state, &crate::runner::FiredEvent { event_id: *id, folded: Vec::new(), ..fired.clone() }, now, "no AI key is saved");
         }
         return;
     }
@@ -1368,11 +1374,12 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         (ev, opening, history, note, parked, also, linked, fence)
     };
     let resumed = parked.map(|p| resumed(state, fired, &ev, p, now));
+    let llm = state.llm_for(fired.user_id);
     let deps = crate::agent::SessionDeps {
         db: &state.db,
         config_dir: &state.config_dir,
         data_dir: &state.data_dir,
-        llm: state.llm.as_ref(),
+        llm: llm.as_ref(),
         embeddings: state.embeddings.as_deref(),
         search: state.search.as_deref(),
         task_scope: None,
@@ -1630,7 +1637,9 @@ fn said_message(
 /// user laid or the server keeps goes out as a plain reminder of what it was
 /// laid for, and one Note laid for its own looking (idleness, laying the day,
 /// a wait for an answer) settles without a word, its parked session with it.
-fn fire_capped(state: &crate::AppState, fired: &crate::runner::FiredEvent, now: jiff::Timestamp) {
+/// Settles a wake-up with no session: one of Note's own goes quietly, a
+/// reminder is sent as written.
+fn fire_capped(state: &crate::AppState, fired: &crate::runner::FiredEvent, now: jiff::Timestamp, why: &str) {
     let lang = Lang::for_user(&state.config_dir, &fired.username);
     let conn = state.db();
     let Ok(Some(ev)) = read(&conn, fired.event_id) else {
@@ -1643,7 +1652,7 @@ fn fire_capped(state: &crate::AppState, fired: &crate::runner::FiredEvent, now: 
             "UPDATE events SET status = 'dropped', decided_at = ?1 WHERE id = ?2",
             (now.to_string(), ev.event_id),
         );
-        let _ = crate::log::record(&conn, Some(fired.user_id), "trigger_quiet", &format!("event {}: the day's AI sessions are spent", ev.event_id));
+        let _ = crate::log::record(&conn, Some(fired.user_id), "trigger_quiet", &format!("event {}: {why}", ev.event_id));
         return;
     }
     let text = if is_close_day(&ev.prompt) {
@@ -1702,6 +1711,26 @@ mod tests {
 
     fn check_at<'a>(tmp: &'a tempfile::TempDir, uid: i64, when: &'a str) -> Lay<'a> {
         Lay { session_check: true, ..lay_at(tmp, uid, when) }
+    }
+
+    #[test]
+    fn without_a_key_a_wake_up_settles_with_no_session_and_the_skip_is_logged_once_a_day() {
+        let (conn, tmp, uid) = env();
+        let ids: Vec<i64> = ["09:05", "09:10"].iter().map(|t| lay(&conn, &Lay { system: true, ..lay_at(&tmp, uid, t) }).unwrap().event_id).collect();
+        conn.execute("UPDATE events SET origin = 'chores', status = 'fired'", []).unwrap();
+        let llm = std::sync::Arc::new(crate::providers::mock::MockLLM::scripted(vec![]));
+        let mut state = crate::AppState::new(conn, tmp.path().into(), tmp.path().into()).with_providers(llm.clone(), None);
+        state.own_keys = std::sync::Arc::new(crate::own_keys::OwnKeys::ephemeral());
+        for id in &ids {
+            let fired = crate::runner::FiredEvent { event_id: *id, user_id: uid, username: "aki".into(), kind: KIND.into(), ..Default::default() };
+            fire(&state, &fired);
+        }
+        assert!(llm.seen().is_empty());
+        let conn = state.db();
+        let dropped: i64 = conn.query_row("SELECT COUNT(*) FROM events WHERE status = 'dropped'", [], |r| r.get(0)).unwrap();
+        assert_eq!(dropped, 2);
+        let skips: i64 = conn.query_row("SELECT COUNT(*) FROM event_log WHERE kind = 'no_llm_key'", [], |r| r.get(0)).unwrap();
+        assert_eq!(skips, 1);
     }
 
     #[test]

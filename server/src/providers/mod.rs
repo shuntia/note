@@ -447,13 +447,19 @@ pub fn build_voice(
     };
     let model = voice.model.clone().or_else(|| main.model()).unwrap_or_else(|| p.model.clone());
     let key = read_key(p, false)?;
-    let mut llm = openai::OpenAILLM::new(
-        &p.base_url,
-        &model,
-        &key,
-        ChatAgents::new(p.timeout_secs, p.background_timeout_secs),
-        None,
-    );
+    let agents = ChatAgents::new(p.timeout_secs, p.background_timeout_secs);
+    Ok(Arc::new(voice_llm(&p.base_url, &model, &key, agents, voice)?))
+}
+
+/// An OpenAI-compatible reply model for calls, on `[voice]`'s reasoning and provider sort.
+pub(crate) fn voice_llm(
+    base_url: &str,
+    model: &str,
+    key: &str,
+    agents: ChatAgents,
+    voice: &crate::config::VoiceConfig,
+) -> Result<openai::OpenAILLM> {
+    let mut llm = openai::OpenAILLM::new(base_url, model, key, agents, None);
     llm = match voice.reasoning.as_str() {
         "off" => llm.without_reasoning(),
         e @ ("low" | "medium" | "high") => llm.with_effort(e),
@@ -462,7 +468,7 @@ pub fn build_voice(
     if let Some(sort) = &voice.provider_sort {
         llm = llm.with_extra(serde_json::json!({"provider": {"sort": sort}}));
     }
-    Ok(Arc::new(llm))
+    Ok(llm)
 }
 
 /// The configured reasoning effort, or `None` for the default "none".
@@ -478,7 +484,7 @@ fn reasoning_effort(p: &crate::config::ProviderConfig) -> Result<Option<&str>> {
 /// unreadable or blank is always an error), then `api_key_env`. `required`
 /// distinguishes Anthropic (key mandatory) from OpenAI-compatible local
 /// endpoints that accept no key.
-fn read_key(p: &crate::config::ProviderConfig, required: bool) -> Result<String> {
+pub(crate) fn read_key(p: &crate::config::ProviderConfig, required: bool) -> Result<String> {
     if !p.api_key_file.as_os_str().is_empty() {
         let key = std::fs::read_to_string(&p.api_key_file)
             .with_context(|| format!("reading api key file {}", p.api_key_file.display()))?

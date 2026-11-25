@@ -60,6 +60,8 @@ import type {
   TaskUpdate,
   TaskUrgency,
   VoiceChoice,
+  KeyKind,
+  LlmKey,
   Token,
   TokenCreated,
   TotpEnrolment,
@@ -282,6 +284,10 @@ export const api = {
       body: JSON.stringify({ current, new: next }),
       quiet401: true,
     }),
+  llmKey: () => request<LlmKey | null>('/api/settings/llm-key'),
+  saveLlmKey: (kind: KeyKind, key: string, model: string) =>
+    request<LlmKey>('/api/settings/llm-key', { method: 'PUT', body: JSON.stringify({ kind, key, model }) }),
+  removeLlmKey: () => request<void>('/api/settings/llm-key', { method: 'DELETE' }),
   tokens: () => request<Token[]>('/api/tokens'),
   createToken: (name: string) =>
     request<TokenCreated>('/api/tokens', { method: 'POST', body: JSON.stringify({ name }) }),

@@ -159,6 +159,7 @@ function pretty(raw: string): string {
 
 const FAILURE_KEYS: Record<FailureReason, Key> = {
   model_unavailable: 'failure.modelUnavailable',
+  no_key: 'failure.noKey',
   auth_invalid: 'failure.authInvalid',
   out_of_credits: 'failure.outOfCredits',
   rate_limited: 'failure.rateLimited',

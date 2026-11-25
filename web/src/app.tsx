@@ -168,6 +168,11 @@ export function App() {
       () => navigator.onLine && location.reload(),
     )
   }, [turnTo])
+  const [settingsFold, setSettingsFold] = useState<string | null>(null)
+  const openKey = useCallback(() => {
+    setSettingsFold('key')
+    go('settings')
+  }, [go])
 
   useLayoutEffect(() => {
     if (!leaving) return
@@ -455,6 +460,8 @@ export function App() {
           {...views}
           onSignedOut={() => setMe(null)}
           openAdmin={() => go('admin')}
+          opening={settingsFold}
+          onOpened={() => setSettingsFold(null)}
         />
       )
     return <Admin.View me={me} notify={notify} onBack={() => go('settings')} />
@@ -471,7 +478,7 @@ export function App() {
           <Jot openTalk={openTalk} openConversation={openConversation} tab={tab} />
         </header>
       )}
-      <OutageBanner refresh={refresh} />
+      <OutageBanner refresh={refresh} openKey={openKey} />
       {layers.map((l) => (
         <main
           key={l.id}

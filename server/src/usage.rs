@@ -13,6 +13,14 @@ pub struct Usage {
     pub completion: u64,
     pub reasoning: u64,
     pub cost: f64,
+    /// Of `calls`, those made on the user's own key.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub byok: u64,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl Usage {
@@ -27,6 +35,7 @@ impl Usage {
         self.completion += other.completion;
         self.reasoning += other.reasoning;
         self.cost += other.cost;
+        self.byok += other.byok;
     }
 
     /// One call, read from an OpenAI-shaped `usage` object; zero tokens where it is absent.
@@ -39,6 +48,7 @@ impl Usage {
             completion: n(&usage["completion_tokens"]),
             reasoning: n(&usage["completion_tokens_details"]["reasoning_tokens"]),
             cost: usage["cost"].as_f64().unwrap_or(0.0),
+            byok: 0,
         }
     }
 
@@ -68,6 +78,20 @@ pub fn record(usage: Usage) {
             open.set(Some(total));
         }
     });
+}
+
+/// Runs `f` under a meter of its own and passes what it spent to the meter
+/// outside, marked as spent on the user's own key.
+pub fn on_own_key<T>(f: impl FnOnce() -> T) -> T {
+    let meter = Meter::open();
+    let out = f();
+    let mut spent = take();
+    drop(meter);
+    spent.byok = spent.calls;
+    if spent.calls > 0 {
+        record(spent);
+    }
+    out
 }
 
 /// What this thread's open meter counted since it opened or was last taken from.
@@ -131,7 +155,8 @@ pub fn summary(conn: &Connection, user_id: Option<i64>, days: u32, now: jiff::Ti
         "SELECT substr(ts, 1, 10) AS day, json_extract(detail, '$.kind') AS k,
                 SUM(json_extract(detail, '$.calls')), SUM(json_extract(detail, '$.prompt')),
                 SUM(json_extract(detail, '$.cached')), SUM(json_extract(detail, '$.completion')),
-                SUM(json_extract(detail, '$.reasoning')), SUM(json_extract(detail, '$.cost')), COUNT(*)
+                SUM(json_extract(detail, '$.reasoning')), SUM(json_extract(detail, '$.cost')), COUNT(*),
+                SUM(COALESCE(json_extract(detail, '$.byok'), 0))
          FROM event_log
          WHERE kind = ?1 AND ts > ?2 AND (?3 IS NULL OR user_id = ?3)
          GROUP BY day, k ORDER BY day DESC, k",
@@ -144,6 +169,7 @@ pub fn summary(conn: &Connection, user_id: Option<i64>, days: u32, now: jiff::Ti
             completion: r.get::<_, i64>(5)?.unsigned_abs(),
             reasoning: r.get::<_, i64>(6)?.unsigned_abs(),
             cost: r.get(7)?,
+            byok: r.get::<_, i64>(9)?.unsigned_abs(),
         };
         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(8)?, usage))
     })?;
@@ -176,7 +202,7 @@ mod tests {
             "prompt_tokens_details": {"cached_tokens": 8000},
             "completion_tokens_details": {"reasoning_tokens": 40}
         }));
-        assert_eq!(u, Usage { calls: 1, prompt: 9000, cached: 8000, completion: 120, reasoning: 40, cost: 0.0021 });
+        assert_eq!(u, Usage { calls: 1, prompt: 9000, cached: 8000, completion: 120, reasoning: 40, cost: 0.0021, byok: 0 });
         assert_eq!(Usage::openai_call(&serde_json::Value::Null), Usage { calls: 1, ..Usage::default() });
     }
 
@@ -200,7 +226,7 @@ mod tests {
     #[test]
     fn summary_sums_per_day_and_kind() {
         let conn = crate::db::open_memory().unwrap();
-        let call = Usage { calls: 2, prompt: 1000, cached: 800, completion: 50, reasoning: 0, cost: 0.001 };
+        let call = Usage { calls: 2, prompt: 1000, cached: 800, completion: 50, reasoning: 0, cost: 0.001, byok: 0 };
         log(&conn, 1, "Talk", &call).unwrap();
         log(&conn, 1, "Talk", &call).unwrap();
         log(&conn, 1, "Trigger", &call).unwrap();

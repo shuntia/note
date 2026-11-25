@@ -517,7 +517,23 @@ const MIGRATIONS: &[&str] = &[
     MICS,
     "ALTER TABLE tasks ADD COLUMN progress_set INTEGER NOT NULL DEFAULT 0;",
     CHORES,
+    LLM_KEYS,
 ];
+
+/// v71: each user's own LLM key, sealed with the server's key file; `models`
+/// is what an `OpenAI` key may pick from, as a JSON list.
+const LLM_KEYS: &str = "
+    CREATE TABLE llm_keys (
+        user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('openrouter','openai')),
+        model TEXT NOT NULL,
+        models TEXT NOT NULL DEFAULT '[]',
+        nonce BLOB NOT NULL,
+        sealed BLOB NOT NULL,
+        hint TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+";
 
 /// v70: the tidy-up wake-ups get an origin of their own, and each user a
 /// cursor for the slice of long-term memory the next one looks over.
@@ -809,7 +825,7 @@ mod tests {
     fn v70_gives_tidy_ups_their_origin_and_keeps_the_rest() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
-        apply_migrations(&conn, BASELINE, &MIGRATIONS[..MIGRATIONS.len() - 1]).unwrap();
+        apply_migrations(&conn, BASELINE, &MIGRATIONS[..69 - BASELINE_VERSION]).unwrap();
         conn.execute_batch(
             "INSERT INTO users (username, pass_hash, role) VALUES ('a','h','member');
              INSERT INTO plans (user_id, date, created_at) VALUES (1, '2026-10-29', 'x');
@@ -822,6 +838,24 @@ mod tests {
         assert_eq!(origin, "await_reply");
         conn.execute("INSERT INTO events (plan_id, kind, wall_time, origin) VALUES (1, 'trigger', '11:00', 'chores')", []).unwrap();
         conn.execute("INSERT INTO memory_rounds (user_id, after) VALUES (1, 'm1')", []).unwrap();
+    }
+
+    #[test]
+    fn v71_keeps_one_key_per_user_of_a_known_kind_and_drops_it_with_them() {
+        let conn = open_memory().unwrap();
+        conn.execute_batch("INSERT INTO users (username, pass_hash, role) VALUES ('aitest','h','member');").unwrap();
+        let add = |kind: &str| {
+            conn.execute(
+                "INSERT INTO llm_keys (user_id, kind, model, nonce, sealed, hint, created_at) VALUES (1, ?1, 'm', x'00', x'00', 'abcd', 'x')",
+                [kind],
+            )
+        };
+        assert!(add("anthropic").is_err());
+        add("openai").unwrap();
+        assert!(add("openrouter").is_err(), "one key per user");
+        conn.execute("DELETE FROM users WHERE id = 1", []).unwrap();
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM llm_keys", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0);
     }
 
     #[test]

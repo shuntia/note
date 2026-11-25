@@ -345,6 +345,10 @@ pub fn failure_reason(l: Lang, reason: crate::failure::Reason) -> String {
             "The AI model isn't available. Check the model setting.",
             "AIモデルが見つかりません。モデルの設定を確認してください。",
         ),
+        R::NoKey => l.pick(
+            "Add your AI key in Settings to use Note.",
+            "設定でAIキーを追加してください。",
+        ),
         R::AuthInvalid => l.pick(
             "The AI service rejected the API key. Check the key.",
             "APIキーが拒否されました。キーを確認してください。",
@@ -377,6 +381,10 @@ pub fn failure_spoken(l: Lang, reason: crate::failure::Reason) -> String {
         R::ModelUnavailable => l.pick(
             "Sorry, the AI model isn't available right now; check the model setting.",
             "すみません、AIモデルが見つかりません。設定を確認してください。",
+        ),
+        R::NoKey => l.pick(
+            "Sorry, there's no AI key saved yet; add one in Settings.",
+            "すみません、AIキーがまだ登録されていません。設定で追加してください。",
         ),
         R::AuthInvalid => l.pick(
             "Sorry, the AI service won't accept my key; check the API key.",

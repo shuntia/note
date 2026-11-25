@@ -9,7 +9,7 @@ import { prefsFrom, writePrefs } from '../prefs'
 import type { CounterMode } from '../session'
 import '../styles/settings.css'
 import { applyTheme, paintSky, savePlace, saveTheme, storedPlace, storedTheme, type ThemeChoice } from '../theme'
-import type { Language, Me, ScheduleRow, Settings as UserSettings, VoiceChoice } from '../types'
+import type { Language, LlmKey, Me, ScheduleRow, Settings as UserSettings, VoiceChoice } from '../types'
 import { Chevron, FoldRow, Group, Status, ToggleRow } from '../ui/rows'
 import { previewPlayer } from '../voicePreview'
 import { VoiceSheet } from '../voiceSheet'
@@ -28,6 +28,7 @@ import { SharesSection } from './settings/SharesSection'
 import { SkyStrip } from './settings/SkyStrip'
 import { SettingsContext, ToggleSetting, type SaveSettings } from './settings/ToggleSetting'
 import { TokensSection } from './settings/TokensSection'
+import { KeySection, keyHint } from './settings/KeySection'
 import { MAX_TRIGGERS_PER_DAY, triggersFromInput, triggersLabel, UNLIMITED } from './settings/triggers'
 
 export { RingChoices, SecuritySection }
@@ -107,7 +108,15 @@ export function Settings({
   onChanged,
   onSignedOut,
   openAdmin,
-}: ViewProps & { me: Me; onSignedOut: () => void; openAdmin: () => void }) {
+  opening,
+  onOpened,
+}: ViewProps & {
+  me: Me
+  onSignedOut: () => void
+  openAdmin: () => void
+  opening?: string | null
+  onOpened?: () => void
+}) {
   const [state, reload, setState] = useLoad(
     () => api.settings().then((s): Loaded => ({ settings: s, draft: draftOf(s) })),
     [],
@@ -119,10 +128,25 @@ export function Settings({
   const [place, setPlace] = useState(storedPlace)
   const [mxid, setMxid] = useState('')
   const [offer, setOffer] = useState<ModelOffer | null>(null)
+  const [llmKey, setLlmKey] = useState<LlmKey | null>(null)
+
+  const loadOffer = () => api.models().then(setOffer, () => setOffer(null))
+  useEffect(() => {
+    void loadOffer()
+    api.llmKey().then(setLlmKey, () => setLlmKey(null))
+  }, [])
 
   useEffect(() => {
-    api.models().then(setOffer, () => setOffer(null))
-  }, [])
+    if (!opening) return
+    setOpen(opening)
+    onOpened?.()
+  }, [opening, onOpened])
+
+  const keyChanged = (k: LlmKey | null) => {
+    setLlmKey(k)
+    void loadOffer()
+    onChanged()
+  }
 
   const loaded = state !== undefined && state !== 'error' ? state : null
   const settings = loaded?.settings
@@ -952,6 +976,14 @@ export function Settings({
         </Group>
 
         <Group head={t('settings.advanced')}>
+          <FoldRow
+            label={t('settings.aiKey')}
+            value={llmKey ? keyHint(llmKey) : undefined}
+            open={open === 'key'}
+            onToggle={fold('key')}
+          >
+            {open === 'key' && <KeySection notify={notify} current={llmKey} onChange={keyChanged} />}
+          </FoldRow>
           {/* Stays mounted and renders nothing while closed, so an unsaved draft
               survives a detour through another row. */}
           <FoldRow label={t('settings.about')} open={open === 'about'} onToggle={fold('about')}>

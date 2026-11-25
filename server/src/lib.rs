@@ -30,6 +30,7 @@ pub mod nightly;
 pub mod notes;
 pub mod order;
 pub mod outage;
+pub mod own_keys;
 pub mod plan;
 pub mod presence;
 pub mod prompts;
@@ -172,7 +173,9 @@ pub struct AppState {
     pub db: Arc<Mutex<Connection>>,
     pub config_dir: PathBuf,
     pub data_dir: PathBuf,
+    /// The server's own provider. A user's sessions run on `llm_for`.
     pub llm: Arc<dyn LLMProvider>,
+    pub own_keys: Arc<crate::own_keys::OwnKeys>,
     pub embeddings: Option<Arc<dyn EmbeddingsProvider>>,
     /// Set when a search instance is configured; without one no session is
     /// offered the `web_search` tool.
@@ -253,6 +256,7 @@ impl AppState {
             config_dir,
             data_dir,
             llm: Arc::new(crate::providers::mock::MockLLM::empty()),
+            own_keys: Arc::new(crate::own_keys::OwnKeys::server_stands_in()),
             embeddings: None,
             search: None,
             vapid_public_key: None,
@@ -307,6 +311,27 @@ impl AppState {
 
     pub fn db(&self) -> MutexGuard<'_, Connection> {
         db_guard(&self.db)
+    }
+
+    /// What `user_id`'s sessions run on. Locks `db` the first time, so the
+    /// caller must not hold it.
+    pub fn llm_for(&self, user_id: i64) -> Arc<dyn LLMProvider> {
+        self.own_keys.llm(&self.db, user_id, &self.llm)
+    }
+
+    /// Whether `user_id` has a model to run on; `llm_for`'s lock applies.
+    pub fn has_llm(&self, user_id: i64) -> bool {
+        self.own_keys.usable(&self.db, user_id, self.llm.as_ref())
+    }
+
+    /// True when `user_id` has no model, after logging, once a day per `what`,
+    /// that the background `what` passed them by.
+    pub fn skip_keyless(&self, user_id: i64, what: &str) -> bool {
+        if self.has_llm(user_id) {
+            return false;
+        }
+        let _ = crate::log::record_throttled(&self.db(), Some(user_id), "no_llm_key", what, jiff::Timestamp::now(), 24 * 60);
+        true
     }
 
     /// Embeds, off the async runtime, every live fact still missing a vector.
@@ -401,6 +426,13 @@ impl AppState {
         self
     }
 
+    /// Must come before `with_voice`.
+    #[must_use]
+    pub fn with_own_keys(mut self, keys: crate::own_keys::OwnKeys) -> Self {
+        self.own_keys = Arc::new(keys);
+        self
+    }
+
     #[must_use]
     pub fn with_search(mut self, search: Arc<dyn SearchProvider>) -> Self {
         self.search = Some(search);
@@ -446,6 +478,7 @@ impl AppState {
             data_dir: self.data_dir.clone(),
             llm: self.llm.clone(),
             voice_llm: self.voice_llm.clone().unwrap_or_else(|| self.llm.clone()),
+            own_keys: self.own_keys.clone(),
             embeddings: self.embeddings.clone(),
             search: self.search.clone(),
             settings: self.call_settings.clone(),

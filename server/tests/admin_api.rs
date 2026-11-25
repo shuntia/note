@@ -294,7 +294,7 @@ fn seed_traces(state: &AppState) {
     auth::create_user(&conn, "kid", "pw", false).unwrap();
 
     let mut talk = note_server::trace::Builder::new(SessionKind::Talk, "add buy milk");
-    talk.round(120, Usage { calls: 1, prompt: 9000, cached: 8000, completion: 40, reasoning: 0, cost: 0.002 });
+    talk.round(120, Usage { calls: 1, prompt: 9000, cached: 8000, completion: 40, reasoning: 0, cost: 0.002, byok: 0 });
     talk.call("task_create", r#"{"title":"buy milk"}"#, r#"{"task_id":1}"#, false, 4);
     talk.call("task_update", "{}", r#"{"kind":"not_found","message":"no task"}"#, true, 2);
     talk.round(60, Usage::default());

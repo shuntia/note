@@ -2817,7 +2817,7 @@ mod tests {
     #[test]
     fn a_session_records_what_each_round_spent_and_logs_the_total() {
         let (db, tmp) = env();
-        let spent = crate::usage::Usage { calls: 1, prompt: 5000, cached: 4000, completion: 30, reasoning: 0, cost: 0.001 };
+        let spent = crate::usage::Usage { calls: 1, prompt: 5000, cached: 4000, completion: 30, reasoning: 0, cost: 0.001, byok: 0 };
         let llm = MockLLM::scripted(vec![
             ChatResponse {
                 text: String::new(),
