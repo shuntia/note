@@ -518,6 +518,7 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE tasks ADD COLUMN progress_set INTEGER NOT NULL DEFAULT 0;",
     CHORES,
     LLM_KEYS,
+    "ALTER TABLE users ADD COLUMN last_external_at TEXT;",
 ];
 
 /// v71: each user's own LLM key, sealed with the server's key file; `models`

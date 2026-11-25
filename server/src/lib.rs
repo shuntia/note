@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod activity;
 pub mod admin;
 pub mod agent;
 pub mod api;

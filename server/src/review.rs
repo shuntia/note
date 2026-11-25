@@ -378,6 +378,18 @@ pub fn run_for_user(
     if digest.is_empty() {
         return Ok(());
     }
+    {
+        let conn = crate::db_guard(deps.db);
+        let last: Option<String> = conn.query_row(
+            "SELECT MAX(ts) FROM event_log WHERE user_id = ?1 AND kind = ?2",
+            (user_id, WRITTEN_KIND),
+            |r| r.get(0),
+        )?;
+        if crate::activity::quiet_since(&conn, user_id, last.and_then(|s| s.parse().ok()))? {
+            crate::log::record(&conn, Some(user_id), "review_quiet", &format!("{week}: nothing changed since the last review"))?;
+            return Ok(());
+        }
+    }
     let deps = SessionDeps {
         db: deps.db,
         config_dir: deps.config_dir,
@@ -414,8 +426,12 @@ pub fn run_for_user(
         .and_then(|v| v["text"].as_str().map(str::to_string))
         .ok_or_else(|| anyhow::anyhow!("the session wrote no strategy"))?;
     crate::context::write_strategy(deps.config_dir, username, &text, week_start)?;
+    crate::log::record(&crate::db_guard(deps.db), Some(user_id), WRITTEN_KIND, &week)?;
     Ok(())
 }
+
+/// The event-log kind of a review that wrote its strategy.
+const WRITTEN_KIND: &str = "review_written";
 
 #[cfg(test)]
 mod tests {
@@ -660,6 +676,33 @@ mod tests {
 
         run_for_user(&deps(&db, &tmp, &llm), 1, "aki", &tokyo(), date("2026-09-21"), now).unwrap();
         assert_eq!(llm.seen().len(), 1, "the same week is never read twice");
+    }
+
+    #[test]
+    fn a_week_with_nothing_new_since_the_last_review_is_not_read_again() {
+        let (db, tmp) = env();
+        {
+            let conn = db.lock().unwrap();
+            a_week_of_work(&conn);
+            conn.execute("UPDATE users SET last_active_at = '2026-09-18T10:00:00Z'", []).unwrap();
+            conn.execute(
+                "INSERT INTO event_log (ts, user_id, kind, detail) VALUES ('2026-09-19T00:00:00Z', 1, 'review_written', '2026-09-07')",
+                [],
+            )
+            .unwrap();
+        }
+        let llm = scripted_review();
+        let now = at("2026-09-20T18:00:00Z");
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", &tokyo(), date("2026-09-21"), now).unwrap();
+        assert!(llm.seen().is_empty());
+        let quiet: i64 = db.lock().unwrap().query_row("SELECT COUNT(*) FROM event_log WHERE kind = 'review_quiet'", [], |r| r.get(0)).unwrap();
+        assert_eq!(quiet, 1);
+
+        db.lock().unwrap().execute("UPDATE users SET last_active_at = '2026-09-20T09:00:00Z'", []).unwrap();
+        run_for_user(&deps(&db, &tmp, &llm), 1, "aki", &tokyo(), date("2026-09-21"), now).unwrap();
+        assert_eq!(llm.seen().len(), 1, "something new is read");
+        let written: i64 = db.lock().unwrap().query_row("SELECT COUNT(*) FROM event_log WHERE kind = 'review_written'", [], |r| r.get(0)).unwrap();
+        assert_eq!(written, 2);
     }
 
     #[test]

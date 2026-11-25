@@ -443,6 +443,11 @@ pub fn capped_reminder(l: Lang, prompt: &str) -> String {
     }
 }
 
+/// The debrief of a night that found nothing new since the last.
+pub fn quiet_debrief(l: Lang) -> String {
+    l.pick("Nothing new since last night.", "前回から変化はありません。")
+}
+
 /// The close of the day, when no session could write it.
 pub fn capped_close_day(l: Lang) -> String {
     l.pick("The day is closing. Carry what's left to tomorrow?", "一日の終わりです。残りは明日に延期しますか？")

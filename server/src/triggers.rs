@@ -1337,6 +1337,12 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         }
         return;
     }
+    if crate::chores::nothing_new(&state.db(), fired.user_id, &all).unwrap_or(false) {
+        for id in &all {
+            fire_capped(state, &crate::runner::FiredEvent { event_id: *id, folded: Vec::new(), ..fired.clone() }, now, "nothing changed since the last tidy-up");
+        }
+        return;
+    }
     let tz = timezone(&state.config_dir, &fired.username);
     let l = Lang::for_user(&state.config_dir, &fired.username);
     let (ev, opening, history, thread_note, parked, also, linked, fence) = {
@@ -1731,6 +1737,39 @@ mod tests {
         assert_eq!(dropped, 2);
         let skips: i64 = conn.query_row("SELECT COUNT(*) FROM event_log WHERE kind = 'no_llm_key'", [], |r| r.get(0)).unwrap();
         assert_eq!(skips, 1);
+    }
+
+    #[test]
+    fn a_tidy_up_after_nothing_new_settles_without_a_session() {
+        let (conn, tmp, uid) = env();
+        for (rel, text) in [("defaults/prompts/persona.md", "persona"), ("defaults/prompts/trigger.md", "say one thing or stay_quiet")] {
+            let p = tmp.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        }
+        let ids: Vec<i64> = ["09:05", "09:10", "09:15"].iter().map(|t| lay(&conn, &Lay { system: true, ..lay_at(&tmp, uid, t) }).unwrap().event_id).collect();
+        conn.execute("UPDATE events SET origin = 'chores'", []).unwrap();
+        conn.execute("UPDATE events SET status = 'done', decided_at = '2026-09-17T08:00:00Z' WHERE id = ?1", [ids[0]]).unwrap();
+        conn.execute("UPDATE events SET status = 'fired' WHERE id != ?1", [ids[0]]).unwrap();
+        crate::presence::touch(&conn, uid, at("2026-09-17T07:00:00Z")).unwrap();
+        let quiet = crate::providers::ChatResponse {
+            text: String::new(),
+            tool_calls: vec![crate::providers::ToolCall { id: "q".into(), name: "stay_quiet".into(), args: r#"{"reason":"tidy"}"#.into() }],
+        };
+        let llm = std::sync::Arc::new(crate::providers::mock::MockLLM::scripted(vec![quiet]));
+        let state = crate::AppState::new(conn, tmp.path().into(), tmp.path().into()).with_providers(llm.clone(), None);
+        let fire_one = |id: i64| fire(&state, &crate::runner::FiredEvent { event_id: id, user_id: uid, username: "aki".into(), kind: KIND.into(), ..Default::default() });
+
+        fire_one(ids[1]);
+        assert!(llm.seen().is_empty(), "nothing happened since the last tidy-up");
+        let status: String = state.db().query_row("SELECT status FROM events WHERE id = ?1", [ids[1]], |r| r.get(0)).unwrap();
+        assert_eq!(status, "dropped");
+        let said: String = state.db().query_row("SELECT detail FROM event_log WHERE kind = 'trigger_quiet'", [], |r| r.get(0)).unwrap();
+        assert!(said.contains("nothing changed since the last tidy-up"), "{said}");
+
+        state.db().execute("UPDATE users SET last_active_at = '2026-09-17T08:30:00Z'", []).unwrap();
+        fire_one(ids[2]);
+        assert_eq!(llm.seen().len(), 1, "the user moved, so the tidy-up looks");
     }
 
     #[test]
