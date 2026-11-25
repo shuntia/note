@@ -66,7 +66,7 @@ async fn a_saved_key_is_shown_by_its_last_four_and_never_given_back() {
     let (status, body) = send(&app, Method::PUT, "/api/settings/llm-key", &cookie, Some(put)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(fake.took().contains("Bearer sk-or-v1-TOPSECRET-wxyz"), "the key is checked with the provider");
-    assert_eq!(json(&body), serde_json::json!({"kind": "openrouter", "model": "mine/model", "key_hint": "wxyz", "base_url": null}));
+    assert_eq!(json(&body), serde_json::json!({"kind": "openrouter", "model": "mine/model", "server_default": false, "key_hint": "wxyz", "base_url": null}));
 
     for path in ["/api/settings/llm-key", "/api/settings", "/api/me", "/api/models"] {
         let (_, body) = send(&app, Method::GET, path, &cookie, None).await;
@@ -173,4 +173,40 @@ async fn onboarding_cannot_finish_until_a_verified_key_is_saved() {
     assert_eq!(send(&app, Method::PUT, "/api/settings/llm-key", &cookie, Some(put)).await.0, StatusCode::OK);
     assert_eq!(json(&send(&app, Method::GET, "/api/me", &cookie, None).await.1)["needs_key"], false);
     assert_eq!(send(&app, Method::POST, "/api/onboarding/done", &cookie, None).await.0, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn an_openrouter_key_may_leave_the_model_to_the_server_and_an_openai_one_may_not() {
+    use note_server::providers::{openai::OpenAILLM, ChatAgents};
+    let fake = common::fake_http();
+    let server: Arc<dyn LLMProvider> =
+        Arc::new(OpenAILLM::new("https://openrouter.ai/api/v1", "admin/model", "sk-or-server", ChatAgents::new(5, 5), None));
+    let (app, cookie, _state, _cfg) = strict(server.clone(), &fake.base).await;
+    let (_, default) = send(&app, Method::GET, "/api/settings/llm-key/default", &cookie, None).await;
+    assert_eq!(json(&default), serde_json::json!({"model": "admin/model"}));
+
+    let put = r#"{"kind":"openai","key":"sk-proj-abcd","model":" "}"#;
+    let (status, body) = send(&app, Method::PUT, "/api/settings/llm-key", &cookie, Some(put)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(json(&body)["error"].as_str().unwrap().starts_with("model "), "{body}");
+
+    fake.answer(r#"{"data":{"label":"k"}}"#);
+    let put = r#"{"kind":"openrouter","key":"sk-or-v1-abcd","model":""}"#;
+    let (status, body) = send(&app, Method::PUT, "/api/settings/llm-key", &cookie, Some(put)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(json(&body)["model"], "admin/model");
+    assert_eq!(json(&body)["server_default"], true);
+    server.set_model("switched/model");
+    let (_, got) = send(&app, Method::GET, "/api/settings/llm-key", &cookie, None).await;
+    assert_eq!((json(&got)["model"].clone(), json(&got)["server_default"].clone()), ("switched/model".into(), true.into()));
+    assert_eq!(json(&send(&app, Method::GET, "/api/models", &cookie, None).await.1)["default"], "switched/model");
+}
+
+#[tokio::test]
+async fn without_a_server_model_to_follow_an_openrouter_key_names_its_own() {
+    let fake = common::fake_http();
+    let (app, cookie, _state, _cfg) = strict(server_llm(), &fake.base).await;
+    assert_eq!(json(&send(&app, Method::GET, "/api/settings/llm-key/default", &cookie, None).await.1)["model"], serde_json::Value::Null);
+    let put = r#"{"kind":"openrouter","key":"sk-or-v1-abcd"}"#;
+    assert_eq!(send(&app, Method::PUT, "/api/settings/llm-key", &cookie, Some(put)).await.0, StatusCode::BAD_REQUEST);
 }

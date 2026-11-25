@@ -521,7 +521,32 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE users ADD COLUMN last_external_at TEXT;",
     "ALTER TABLE llm_keys ADD COLUMN base_url TEXT;
      ALTER TABLE llm_keys ADD COLUMN seeded INTEGER NOT NULL DEFAULT 0 CHECK (seeded IN (0, 1));",
+    LLM_KEYS_FOLLOW,
 ];
+
+/// v74: an `OpenRouter` key may name no model, and runs on the admin's switch;
+/// seeded ones are made to.
+const LLM_KEYS_FOLLOW: &str = "
+    CREATE TABLE llm_keys_new (
+        user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('openrouter','openai')),
+        model TEXT CHECK (model IS NOT NULL OR kind = 'openrouter'),
+        models TEXT NOT NULL DEFAULT '[]',
+        nonce BLOB NOT NULL,
+        sealed BLOB NOT NULL,
+        hint TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        base_url TEXT,
+        seeded INTEGER NOT NULL DEFAULT 0 CHECK (seeded IN (0, 1))
+    );
+    INSERT INTO llm_keys_new (user_id, kind, model, models, nonce, sealed, hint, created_at, base_url, seeded)
+        SELECT user_id, kind, CASE WHEN seeded = 1 AND kind = 'openrouter' THEN NULL ELSE model END,
+               CASE WHEN seeded = 1 AND kind = 'openrouter' THEN '[]' ELSE models END,
+               nonce, sealed, hint, created_at, base_url, seeded
+        FROM llm_keys;
+    DROP TABLE llm_keys;
+    ALTER TABLE llm_keys_new RENAME TO llm_keys;
+";
 
 /// v71: each user's own LLM key, sealed with the server's key file; `models`
 /// is what an `OpenAI` key may pick from, as a JSON list.
@@ -859,6 +884,33 @@ mod tests {
         conn.execute("DELETE FROM users WHERE id = 1", []).unwrap();
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM llm_keys", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn v74_lets_only_an_openrouter_key_name_no_model_and_frees_the_seeded_ones() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        apply_migrations(&conn, BASELINE, &MIGRATIONS[..73 - BASELINE_VERSION]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO users (username, pass_hash, role) VALUES ('aitest','h','member'), ('shuntia','h','member');
+             INSERT INTO llm_keys (user_id, kind, model, models, nonce, sealed, hint, created_at, seeded)
+                 VALUES (1, 'openrouter', 'cfg/model', '[\"cfg/model\"]', x'00', x'00', 'abcd', 'x', 1),
+                        (2, 'openrouter', 'mine/model', '[]', x'00', x'00', 'efgh', 'x', 0);",
+        )
+        .unwrap();
+        apply_migrations(&conn, BASELINE, MIGRATIONS).unwrap();
+        let models: Vec<Option<String>> =
+            conn.prepare("SELECT model FROM llm_keys ORDER BY user_id").unwrap().query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+        assert_eq!(models, [None, Some("mine/model".to_string())]);
+        conn.execute("DELETE FROM llm_keys WHERE user_id = 2", []).unwrap();
+        let add = |kind: &str| {
+            conn.execute("INSERT INTO llm_keys (user_id, kind, nonce, sealed, hint, created_at) VALUES (2, ?1, x'00', x'00', 'abcd', 'x')", [kind])
+        };
+        assert!(add("openai").is_err(), "an OpenAI-compatible key names its model");
+        add("openrouter").unwrap();
+        conn.execute("DELETE FROM users WHERE id = 2", []).unwrap();
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM llm_keys", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1, "a key still goes with its user");
     }
 
     #[test]

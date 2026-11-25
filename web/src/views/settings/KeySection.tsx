@@ -1,4 +1,4 @@
-import { useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { api, ApiError } from '../../api'
 import { t, type Key } from '../../i18n'
 import type { KeyKind, LlmKey } from '../../types'
@@ -27,8 +27,9 @@ function refusal(err: unknown): string {
   return t('key.saveFailed')
 }
 
-/** Kind, key and model, saved once the provider takes the key. `submit`
- * renders the form's submit control. */
+/** Kind, key and model, saved once the provider takes the key; an OpenRouter
+ * key's model may be left blank to run on the server's. `submit` renders the
+ * form's submit control. */
 export function KeyForm({
   notify,
   onSaved,
@@ -42,11 +43,20 @@ export function KeyForm({
 }) {
   const [kind, setKind] = useState<KeyKind>(initial?.kind ?? 'openrouter')
   const [key, setKey] = useState('')
-  const [model, setModel] = useState(initial?.model ?? '')
+  const [model, setModel] = useState(initial && !initial.server_default ? initial.model : '')
   const [base, setBase] = useState(initial?.base_url && initial.base_url !== OPENAI_BASE ? initial.base_url : '')
   const [busy, setBusy] = useState(false)
+  const [serverModel, setServerModel] = useState<string | null>(null)
 
-  const ready = !busy && key.trim() !== '' && model.trim() !== ''
+  useEffect(() => {
+    api.llmKeyDefault().then(
+      (d) => setServerModel(d.model),
+      () => setServerModel(null),
+    )
+  }, [])
+
+  const follows = kind === 'openrouter' && serverModel !== null
+  const ready = !busy && key.trim() !== '' && (follows || model.trim() !== '')
 
   const save = async (e: FormEvent) => {
     e.preventDefault()
@@ -97,7 +107,7 @@ export function KeyForm({
       <div className="set-key-row">
         <input
           aria-label={t('key.model')}
-          placeholder={MODEL_HINT[kind]}
+          placeholder={follows ? serverModel : MODEL_HINT[kind]}
           autoComplete="off"
           spellCheck={false}
           maxLength={200}

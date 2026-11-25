@@ -114,8 +114,7 @@ impl LLMProvider for AnthropicLLM {
     }
 
     fn set_model(&self, model: &str) -> bool {
-        self.model.set(model);
-        true
+        self.model.set(model)
     }
 
     fn offered(&self) -> Vec<String> {

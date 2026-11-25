@@ -285,6 +285,8 @@ export const api = {
       quiet401: true,
     }),
   llmKey: () => request<LlmKey | null>('/api/settings/llm-key'),
+  // The model an OpenRouter key saved without one runs on; null when it must name one.
+  llmKeyDefault: () => request<{ model: string | null }>('/api/settings/llm-key/default'),
   saveLlmKey: (kind: KeyKind, key: string, model: string, base_url: string) =>
     request<LlmKey>('/api/settings/llm-key', { method: 'PUT', body: JSON.stringify({ kind, key, model, base_url }) }),
   removeLlmKey: () => request<void>('/api/settings/llm-key', { method: 'DELETE' }),

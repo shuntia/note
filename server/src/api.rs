@@ -53,6 +53,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/models", get(models_get))
         .route("/api/settings", get(settings_get).put(settings_put))
         .route("/api/settings/llm-key", get(llm_key_get).put(llm_key_put).delete(llm_key_delete))
+        .route("/api/settings/llm-key/default", get(llm_key_default))
         .route("/api/presence", post(presence))
         .route("/api/voice/link", post(voice_link).delete(voice_unlink))
         .route("/api/voice/test", post(voice_test))
@@ -489,7 +490,7 @@ async fn me(user: CurrentUser, State(state): State<AppState>, headers: HeaderMap
 
 /// Whether the user has to save a key of their own before Note can answer them.
 fn needs_key(state: &AppState, user_id: i64) -> bool {
-    state.own_keys.required() && !matches!(state.own_keys.info(&state.db(), user_id), Ok(Some(_)))
+    state.own_keys.required() && !matches!(state.own_keys.info(&state.db(), user_id, state.llm.as_ref()), Ok(Some(_)))
 }
 
 /// Refused while the user still has to save a key.
@@ -504,10 +505,15 @@ async fn onboarding_done(user: CurrentUser, State(state): State<AppState>) -> im
 }
 
 async fn llm_key_get(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
-    match state.own_keys.info(&state.db(), user.id) {
+    match state.own_keys.info(&state.db(), user.id, state.llm.as_ref()) {
         Ok(info) => Json(serde_json::json!(info)).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+/// The model an `OpenRouter` key saved without one runs on; null when such a key must name its own.
+async fn llm_key_default(_user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
+    Json(serde_json::json!({ "model": crate::own_keys::OwnKeys::server_model(state.llm.as_ref()) }))
 }
 
 #[derive(Deserialize)]
@@ -515,6 +521,8 @@ async fn llm_key_get(user: CurrentUser, State(state): State<AppState>) -> impl I
 struct LlmKeyReq {
     kind: String,
     key: String,
+    /// Blank on an `openrouter` key follows the admin's model switch.
+    #[serde(default)]
     model: String,
     /// An `openai` key's endpoint; blank is `OpenAI`'s own.
     #[serde(default)]
@@ -532,9 +540,14 @@ async fn llm_key_put(user: CurrentUser, State(state): State<AppState>, Json(req)
     if key.is_empty() || key.len() > MAX_KEY_LEN || key.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return invalid_field("key", "must be one word");
     }
-    let model = req.model.trim().to_string();
-    if model.is_empty() || model.len() > MAX_MODEL_LEN || model.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return invalid_field("model", "must be a model id");
+    let model = Some(req.model.trim().to_string()).filter(|m| !m.is_empty());
+    let follows = kind == crate::own_keys::KeyKind::Openrouter && crate::own_keys::OwnKeys::server_model(state.llm.as_ref()).is_some();
+    match &model {
+        None if !follows => return invalid_field("model", "must be a model id"),
+        Some(m) if m.len() > MAX_MODEL_LEN || m.chars().any(|c| c.is_whitespace() || c.is_control()) => {
+            return invalid_field("model", "must be a model id");
+        }
+        _ => {}
     }
     let base_url = req
         .base_url
@@ -545,7 +558,7 @@ async fn llm_key_put(user: CurrentUser, State(state): State<AppState>, Json(req)
     }
     let keys = state.own_keys.clone();
     let (k, m, b) = (key.clone(), model.clone(), base_url.clone());
-    let verified = tokio::task::spawn_blocking(move || keys.verify(kind, &k, &m, b.as_deref())).await;
+    let verified = tokio::task::spawn_blocking(move || keys.verify(kind, &k, m.as_deref(), b.as_deref())).await;
     let models = match verified {
         Ok(Ok(models)) => models,
         Ok(Err(Refusal::Key)) => return unprocessable_field("key", "was refused by the provider"),
@@ -556,12 +569,12 @@ async fn llm_key_put(user: CurrentUser, State(state): State<AppState>, Json(req)
         }
     };
     let conn = state.db();
-    let new = NewKey { kind, key: &key, model: &model, base_url: base_url.as_deref(), models: &models };
+    let new = NewKey { kind, key: &key, model: model.as_deref(), base_url: base_url.as_deref(), models: &models };
     let saved = state.own_keys.store(&conn, user.id, &new, jiff::Timestamp::now()).and_then(|()| {
         for reason in [crate::failure::Reason::NoKey, crate::failure::Reason::AuthInvalid] {
             crate::outage::clear(&conn, user.id, crate::outage::Outage::Ai(reason))?;
         }
-        state.own_keys.info(&conn, user.id)
+        state.own_keys.info(&conn, user.id, state.llm.as_ref())
     });
     match saved {
         Ok(info) => {

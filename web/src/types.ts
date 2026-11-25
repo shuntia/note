@@ -150,7 +150,7 @@ export type KeyKind = 'openrouter' | 'openai'
 
 // The user's own AI key as the server shows it: never the key, only its last four.
 // `base_url` is an OpenAI-compatible key's endpoint.
-export type LlmKey = { kind: KeyKind; model: string; key_hint: string; base_url: string | null }
+export type LlmKey = { kind: KeyKind; model: string; server_default: boolean; key_hint: string; base_url: string | null }
 
 export type Token = {
   id: number

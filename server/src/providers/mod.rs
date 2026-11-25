@@ -196,27 +196,53 @@ pub trait LLMProvider: Send + Sync {
     fn effort(&self) -> Option<Effort> {
         None
     }
+
+    /// The `OpenRouter` model name the admin's switch changes, for a user's
+    /// `OpenRouter` key that names no model to follow.
+    fn openrouter_model(&self) -> Option<SharedModel> {
+        None
+    }
 }
 
+/// The name a `LiveModel` reads, shared with the providers that follow it.
+pub type SharedModel = std::sync::Arc<std::sync::RwLock<String>>;
+
 /// A model name the admin can swap while calls are in flight, and the others
-/// a request may ask for instead.
-pub(crate) struct LiveModel(std::sync::RwLock<String>, Vec<crate::config::ModelInfo>);
+/// a request may ask for instead. A follower reads another's name and cannot set it.
+pub(crate) struct LiveModel {
+    name: SharedModel,
+    follows: bool,
+    offers: Vec<crate::config::ModelInfo>,
+}
 
 impl LiveModel {
     pub(crate) fn new(model: &str) -> Self {
-        Self(std::sync::RwLock::new(model.to_string()), Vec::new())
+        Self { name: std::sync::Arc::new(std::sync::RwLock::new(model.to_string())), follows: false, offers: Vec::new() }
+    }
+
+    pub(crate) fn follow(&mut self, name: SharedModel) {
+        self.name = name;
+        self.follows = true;
+    }
+
+    pub(crate) fn shared(&self) -> SharedModel {
+        self.name.clone()
     }
 
     pub(crate) fn get(&self) -> String {
-        self.0.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+        self.name.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
-    pub(crate) fn set(&self, model: &str) {
-        *self.0.write().unwrap_or_else(std::sync::PoisonError::into_inner) = model.to_string();
+    pub(crate) fn set(&self, model: &str) -> bool {
+        if self.follows {
+            return false;
+        }
+        *self.name.write().unwrap_or_else(std::sync::PoisonError::into_inner) = model.to_string();
+        true
     }
 
     pub(crate) fn offer(&mut self, models: &[crate::config::ModelInfo]) {
-        self.1 = models
+        self.offers = models
             .iter()
             .map(|m| crate::config::ModelInfo { id: m.id.trim().to_string(), ..m.clone() })
             .filter(|m| !m.id.is_empty())
@@ -231,9 +257,9 @@ impl LiveModel {
         let live = self.get();
         let mut all: Vec<crate::config::ModelInfo> = Vec::new();
         if !live.is_empty() {
-            all.push(self.1.iter().find(|m| m.id == live).cloned().unwrap_or(crate::config::ModelInfo { id: live, ..Default::default() }));
+            all.push(self.offers.iter().find(|m| m.id == live).cloned().unwrap_or(crate::config::ModelInfo { id: live, ..Default::default() }));
         }
-        for m in &self.1 {
+        for m in &self.offers {
             if !all.iter().any(|a| a.id == m.id) {
                 all.push(m.clone());
             }

@@ -62,6 +62,13 @@ impl OpenAILLM {
         self
     }
 
+    /// Reads its model from `name`, which only its owner can switch.
+    #[must_use]
+    pub fn following(mut self, name: super::SharedModel) -> Self {
+        self.model.follow(name);
+        self
+    }
+
     #[must_use]
     pub fn with_models(mut self, models: &[crate::config::ModelInfo]) -> Self {
         self.model.offer(models);
@@ -595,8 +602,7 @@ impl LLMProvider for OpenAILLM {
     }
 
     fn set_model(&self, model: &str) -> bool {
-        self.model.set(model);
-        true
+        self.model.set(model)
     }
 
     fn offered(&self) -> Vec<String> {
@@ -612,6 +618,10 @@ impl LLMProvider for OpenAILLM {
             return Some(super::Effort::Off);
         }
         self.reasoning.as_deref().and_then(super::Effort::parse)
+    }
+
+    fn openrouter_model(&self) -> Option<super::SharedModel> {
+        self.openrouter.then(|| self.model.shared())
     }
 }
 
