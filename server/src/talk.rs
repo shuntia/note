@@ -136,6 +136,27 @@ pub fn checkin_thread(
     }
 }
 
+/// Puts `line`, which asks nothing, in the plan date's unanswered check-in
+/// thread without taking its place, or opens one with it.
+pub fn join_checkin(
+    conn: &Connection,
+    user_id: i64,
+    date: &str,
+    at: &str,
+    line: &str,
+    lang: crate::text::Lang,
+    now: jiff::Timestamp,
+) -> Result<i64> {
+    match unanswered_checkin(conn, user_id, None, date)? {
+        Some(id) => {
+            append_text(conn, id, "assistant", line, now)?;
+            touch(conn, id, now)?;
+            Ok(id)
+        }
+        None => open_checkin(conn, user_id, date, at, line, lang, now),
+    }
+}
+
 fn open_checkin(
     conn: &Connection,
     user_id: i64,

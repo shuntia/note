@@ -277,7 +277,7 @@ pub fn deliver_block_start(
     if start.notify == "chat" {
         let conn = crate::db_guard(db);
         let line = text::block_start_line(lang, &start.task, &start.end_wall_time);
-        if let Err(e) = crate::talk::checkin_thread(
+        if let Err(e) = crate::talk::join_checkin(
             &conn,
             start.user_id,
             &start.date,
@@ -605,6 +605,29 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap()
+    }
+
+    #[test]
+    fn a_block_start_line_joins_the_unanswered_checkin_and_leaves_its_question() {
+        let (db, _uid) = env();
+        let push = Arc::new(MockChannel::new("push"));
+        let ladder: Vec<Arc<dyn Channel>> = vec![push.clone()];
+        deliver_event(&db, &ladder, &ev("checkin", "push", ""), Lang::En);
+        let asked = push.seen()[0].1.conversation_id.unwrap();
+        let start = crate::runner::BlockStart {
+            event_id: 12,
+            user_id: 1,
+            username: "aki".into(),
+            date: "2026-08-31".into(),
+            wall_time: "09:30".into(),
+            task: "essay".into(),
+            end_wall_time: "10:30".into(),
+            notify: "chat".into(),
+        };
+        deliver_block_start(&db, &ladder, &ws::ClientHub::new(), &start, Lang::En);
+        let rows = thread_rows(&db.lock().unwrap());
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|(c, _, _)| *c == asked), "{rows:?}");
     }
 
     #[test]

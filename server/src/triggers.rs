@@ -903,19 +903,23 @@ fn thread_context(
     (history, note)
 }
 
-/// Where a trigger's words land: the thread it was laid against, else the
-/// day's check-in thread, either replaced by a new one while it is an
-/// unanswered check-in, unless the words come from a `resumed` session. The
-/// text is written there whether or not a channel takes it.
+/// Where a trigger's words land: the thread it is laid against now, which a
+/// check-in may have moved it to while its session ran, else the day's
+/// check-in thread, either replaced by a new one while it is an unanswered
+/// check-in, unless the words come from a `resumed` session. The text is
+/// written there whether or not a channel takes it.
 fn record_said(
     conn: &Connection,
     fired: &crate::runner::FiredEvent,
     lang: crate::text::Lang,
-    conversation_id: Option<i64>,
     text: &str,
     now: jiff::Timestamp,
     resumed: bool,
 ) -> Result<i64> {
+    let conversation_id: Option<i64> = conn
+        .query_row("SELECT conversation_id FROM events WHERE id = ?1", [fired.event_id], |r| r.get(0))
+        .optional()?
+        .flatten();
     if let (Some(id), false) = (conversation_id, resumed) {
         if let Some(old) = crate::talk::unanswered_checkin(conn, fired.user_id, Some(id), &fired.date)? {
             return crate::talk::renew_checkin(conn, fired.user_id, old, &fired.date, &fired.wall_time, text, lang, now);
@@ -1519,7 +1523,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     settle_all("done");
     let conversation_id = {
         let conn = state.db();
-        let landed = record_said(&conn, fired, lang, ev.conversation_id, &text, now, resumed.is_some());
+        let landed = record_said(&conn, fired, lang, &text, now, resumed.is_some());
         if let (Ok(thread), Some((min, paused))) = (&landed, waits) {
             match pause(&conn, &state.config_dir, fired, *thread, &text, min, rings || held.is_some(), paused, parked_at) {
                 Ok(Some(id)) => {
@@ -1681,7 +1685,7 @@ fn fire_capped(state: &crate::AppState, fired: &crate::runner::FiredEvent, now: 
     } else {
         crate::text::capped_reminder(lang, &ev.prompt)
     };
-    let landed = record_said(&conn, fired, lang, ev.conversation_id, &text, now, false).ok();
+    let landed = record_said(&conn, fired, lang, &text, now, false).ok();
     let _ = close(&conn, ev.event_id, "done", now);
     let _ = crate::log::record(&conn, Some(fired.user_id), "trigger_said", &format!("event {}: {text}", ev.event_id));
     drop(conn);
@@ -1752,6 +1756,30 @@ mod tests {
         assert_eq!(dropped, 2);
         let skips: i64 = conn.query_row("SELECT COUNT(*) FROM event_log WHERE kind = 'no_llm_key'", [], |r| r.get(0)).unwrap();
         assert_eq!(skips, 1);
+    }
+
+    #[test]
+    fn words_land_where_the_wake_up_was_moved_while_its_session_ran() {
+        let (conn, tmp, uid) = env();
+        let first = crate::talk::checkin_thread(&conn, uid, "2026-09-17", "09:00", "How did you sleep?", Lang::En, at("2026-09-17T09:00:00Z")).unwrap();
+        let laid = lay(&conn, &Lay { conversation_id: Some(first), ..lay_at(&tmp, uid, "09:30") }).unwrap();
+        let fired = crate::runner::FiredEvent {
+            event_id: laid.event_id,
+            user_id: uid,
+            username: "aki".into(),
+            date: "2026-09-17".into(),
+            wall_time: "09:30".into(),
+            ..Default::default()
+        };
+        let moved = crate::talk::checkin_thread(&conn, uid, "2026-09-17", "09:20", "Started yet?", Lang::En, at("2026-09-17T09:20:00Z")).unwrap();
+        assert!(!crate::talk::owned(&conn, uid, first).unwrap());
+        let landed = record_said(&conn, &fired, Lang::En, "How did the essay go?", at("2026-09-17T09:30:00Z"), false).unwrap();
+        assert_ne!(landed, first);
+        let said: String = conn
+            .query_row("SELECT content FROM talk_messages WHERE conversation_id = ?1 ORDER BY id DESC LIMIT 1", [landed], |r| r.get(0))
+            .unwrap();
+        assert_eq!(said, "How did the essay go?");
+        assert!(landed == moved || !crate::talk::owned(&conn, uid, moved).unwrap());
     }
 
     #[test]
