@@ -27,8 +27,8 @@ pub struct ChatRequest<'a> {
     /// Nobody is waiting on the reply, so the call may take the provider's
     /// longer `background_timeout_secs`.
     pub background: bool,
-    /// Asks for no reasoning whatever effort the provider is configured with:
-    /// the call condenses text and thinking first buys nothing.
+    /// Asks for the model's least reasoning, hidden, whatever effort the provider
+    /// is configured with: the call condenses text and needs little thought.
     pub plain: bool,
     pub must_call: Option<MustCall<'a>>,
     /// Asks for this model over the provider's own.
@@ -632,7 +632,7 @@ mod tests {
         let low = sent("socket = \"/run/v.sock\"");
         assert_eq!(low["reasoning"], serde_json::json!({"effort": "low"}));
         let off = sent("socket = \"/run/v.sock\"\nreasoning = \"off\"");
-        assert_eq!(off["reasoning"], serde_json::json!({"enabled": false}));
+        assert_eq!(off["reasoning"], serde_json::json!({"effort": "low", "exclude": true}));
         let junk: crate::config::VoiceConfig = toml::from_str("socket = \"/run/v.sock\"\nreasoning = \"max\"").unwrap();
         let cfg = crate::config::ProvidersConfig { llm: Some(file_key_config(std::path::PathBuf::new())), embeddings: None };
         assert!(build_voice(&cfg, &junk, &main).is_err());

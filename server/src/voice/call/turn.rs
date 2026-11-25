@@ -1,5 +1,5 @@
 use super::clauses::{speakable, Clauses};
-use crate::providers::{ChatRequest, LLMProvider, Message, StreamOpts, StreamSink, ToolCall};
+use crate::providers::{ChatRequest, Effort, LLMProvider, Message, StreamOpts, StreamSink, ToolCall};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -41,6 +41,7 @@ pub fn spawn(
     messages: Vec<Message>,
     tools: Arc<Vec<serde_json::Value>>,
     spec: TurnSpec,
+    effort: Option<Effort>,
     opts: StreamOpts,
     stop: Arc<AtomicBool>,
     tx: impl Fn(TurnEvent) + Send + 'static,
@@ -55,7 +56,7 @@ pub fn spawn(
             plain: false,
             must_call: None,
             model: None,
-            effort: None,
+            effort,
         };
         let mut sink = TurnSink::new(spec.reply, &stop, &tx);
         let mut result = llm.chat_stream(&req, &opts, &mut sink);
@@ -178,6 +179,7 @@ mod tests {
                 reply: 7,
                 draft: false,
             },
+            None,
             StreamOpts::spoken(Duration::from_secs(1)),
             stop,
             move |e| {

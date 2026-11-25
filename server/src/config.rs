@@ -52,7 +52,7 @@ pub struct VoiceConfig {
     #[serde(default = "default_first_token_ms")]
     pub first_token_ms: u64,
     /// Reasoning effort on a call: "low" (the default), "medium", "high", or
-    /// "off" for `reasoning: {enabled: false}`.
+    /// "off" for the model's least effort, hidden.
     #[serde(default = "default_voice_reasoning")]
     pub reasoning: String,
 }

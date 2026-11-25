@@ -502,6 +502,9 @@ impl Driver {
         let mut request = self.messages.clone();
         push_user(&mut request, input.clone());
         let (tx, flag) = (self.tx.clone(), end_sent.clone());
+        let effort = crate::models::conversation_pick(&crate::db_guard(&self.deps.db), self.deps.conversation_id)
+            .ok()
+            .and_then(|p| p.effort);
         let handle = turn::spawn(
             self.deps.llm.clone(),
             self.deps.system.clone(),
@@ -511,6 +514,7 @@ impl Driver {
                 reply,
                 draft: draft.is_some(),
             },
+            effort,
             StreamOpts::spoken(self.deps.cfg.first_token),
             stop.clone(),
             move |event| {
@@ -1182,6 +1186,23 @@ mod tests {
             })
             .unwrap();
         assert_eq!(kind, "Call");
+    }
+
+    #[test]
+    fn a_turn_thinks_at_the_effort_picked_for_its_chat() {
+        let mut h = start(vec![vec![Text("Sure.")], vec![Text("Done.")]], &[], None, "");
+        let turn = |h: &mut Harness, n: u64, reply: u64, text: &str| {
+            h.frame(CallBody::Commit { turn: n, text: "hi".into(), language: None });
+            h.tx.send(DriverIn::Tick).unwrap();
+            h.tick_until(&speak(reply, 0, text));
+            h.frame(CallBody::Floor { floor: Floor::Drained });
+        };
+        turn(&mut h, 1, 2, "Sure.");
+        crate::db_guard(&h.db).execute("UPDATE conversations SET effort = 'high'", []).unwrap();
+        turn(&mut h, 2, 3, "Done.");
+        let efforts: Vec<_> = h.llm.seen().iter().map(|r| r.effort).collect();
+        assert_eq!(efforts, vec![None, Some(crate::providers::Effort::High)], "a change mid-call takes the next turn");
+        h.stop();
     }
 
     #[test]

@@ -19,7 +19,8 @@ impl Pick {
 
 /// What a session of `kind` asks for: the conversation's pick, else the
 /// user's, each model only while the provider still offers it. Calls and
-/// share visitors run on the provider's own.
+/// share visitors run on the provider's own; a call's turns take their chat's
+/// effort in the call driver.
 pub fn resolve(llm: &dyn LLMProvider, kind: SessionKind, conversation: &Pick, user: &Pick) -> Pick {
     if matches!(kind, SessionKind::Call | SessionKind::Share) {
         return Pick::default();

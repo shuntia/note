@@ -11,10 +11,8 @@ pub struct OpenAILLM {
     model: super::LiveModel,
     api_key: String,
     reasoning: Option<String>,
-    /// Sends `OpenRouter`'s explicit off switch rather than leaving reasoning to the model's default.
+    /// Asks every request for the model's least reasoning, hidden, rather than leaving it to the model's default.
     reasoning_off: bool,
-    /// Models that refused the off switch; they are asked for the least reasoning instead.
-    reasoning_mandatory: std::sync::Mutex<std::collections::HashSet<String>>,
     /// What each model's reasoning accepts, as `OpenRouter`'s catalogue lists it.
     caps: std::sync::RwLock<std::collections::HashMap<String, ReasoningCaps>>,
     /// Models that refused a forced tool; they are asked without one from then on.
@@ -39,7 +37,6 @@ impl OpenAILLM {
             api_key: api_key.to_string(),
             reasoning: reasoning.map(String::from),
             reasoning_off: false,
-            reasoning_mandatory: std::sync::Mutex::default(),
             caps: std::sync::RwLock::default(),
             choice_refused: std::sync::Mutex::default(),
             extra: serde_json::Map::new(),
@@ -83,7 +80,7 @@ impl OpenAILLM {
         req.model.map_or_else(|| self.model.get(), String::from)
     }
 
-    /// Whether `req` goes out with reasoning switched off.
+    /// Whether `req` goes out with the least, hidden reasoning: a model given none at all can lose the thread.
     fn off(&self, req: &ChatRequest) -> bool {
         match req.effort {
             Some(super::Effort::Off) => true,
@@ -116,7 +113,7 @@ impl OpenAILLM {
         let caps = models.iter().filter_map(|m| {
             let r = &m["reasoning"];
             let efforts: Vec<String> = r["supported_efforts"].as_array()?.iter().filter_map(|e| e.as_str().map(String::from)).collect();
-            Some((m["id"].as_str()?.to_string(), ReasoningCaps { mandatory: r["mandatory"].as_bool() == Some(true), efforts }))
+            Some((m["id"].as_str()?.to_string(), ReasoningCaps { efforts }))
         });
         self.caps.write().unwrap_or_else(std::sync::PoisonError::into_inner).extend(caps);
     }
@@ -141,12 +138,8 @@ impl OpenAILLM {
             };
         }
         if self.off(req) {
-            v["reasoning"] = if self.mandatory(&model) || caps.as_ref().is_some_and(|c| c.mandatory) {
-                let least = caps.as_ref().map_or_else(|| "low".to_string(), ReasoningCaps::least);
-                serde_json::json!({"effort": least, "exclude": true})
-            } else {
-                serde_json::json!({"enabled": false})
-            };
+            let least = caps.as_ref().map_or_else(|| "low".to_string(), ReasoningCaps::least);
+            v["reasoning"] = serde_json::json!({"effort": least, "exclude": true});
         }
         for (k, field) in &self.extra {
             v[k] = field.clone();
@@ -154,18 +147,10 @@ impl OpenAILLM {
         v
     }
 
-    fn mandatory(&self, model: &str) -> bool {
-        lock(&self.reasoning_mandatory).contains(model)
-    }
-
-    /// True when `error` refused something `req` asked for that the model can
-    /// do without: the off switch or a forced tool. The refusal is remembered
-    /// for the model, so the call is worth sending again.
+    /// True when `error` refused a forced tool, which the model can do without.
+    /// The refusal is remembered for the model, so the call is worth sending again.
     fn refused(&self, req: &ChatRequest, error: &str) -> bool {
         let model = self.model_for(req);
-        if self.off(req) && !self.mandatory(&model) && error.contains("Reasoning is mandatory") {
-            return lock(&self.reasoning_mandatory).insert(model);
-        }
         if req.must_call.is_some() && error.contains("status 400") && error.contains("tool_choice") {
             return lock(&self.choice_refused).insert(model);
         }
@@ -216,7 +201,6 @@ impl OpenAILLM {
 
 #[derive(Debug, Clone, PartialEq)]
 struct ReasoningCaps {
-    mandatory: bool,
     efforts: Vec<String>,
 }
 
@@ -824,7 +808,7 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_call_switches_reasoning_off_and_a_forced_tool_is_dropped_once_refused() {
+    fn a_plain_call_asks_for_the_least_hidden_reasoning_and_a_forced_tool_is_dropped_once_refused() {
         const REFUSED: &str = r#"{"error":{"message":"tool_choice is not supported","code":400}}"#;
         const REPLY: &str = r#"{"choices":[{"message":{"content":"ok"}}]}"#;
         let (base, rx) = crate::testhttp::serve(vec![("200 OK", REPLY), ("400 Bad Request", REFUSED), ("200 OK", REPLY), ("200 OK", REPLY)]);
@@ -833,7 +817,7 @@ mod tests {
         let plain = ChatRequest { system: "s", messages: &msgs, tools: &[], background: true, plain: true, must_call: None, model: None, effort: None };
         llm.chat(&plain).unwrap();
         let sent = crate::testhttp::body_json(&rx.recv().unwrap());
-        assert_eq!(sent["reasoning"], serde_json::json!({"enabled": false}));
+        assert_eq!(sent["reasoning"], serde_json::json!({"effort": "low", "exclude": true}));
         let forced = ChatRequest { must_call: Some(crate::providers::MustCall::Tool("summary_write")), plain: false, ..plain };
         llm.chat(&forced).unwrap();
         let first = crate::testhttp::body_json(&rx.recv().unwrap());
@@ -919,21 +903,7 @@ mod tests {
         let sent = crate::testhttp::body_json(&rx.recv().unwrap());
         assert_eq!(sent["provider"]["sort"], "latency");
         assert_eq!(sent["stream"], true);
-        assert_eq!(sent["reasoning"], serde_json::json!({"enabled": false}), "reasoning is switched off outright");
-    }
-
-    #[test]
-    fn a_model_that_must_reason_is_asked_for_the_least_from_then_on() {
-        const MANDATORY: &str = r#"{"error":{"message":"Reasoning is mandatory for this endpoint and cannot be disabled.","code":400}}"#;
-        let (base, rx) = crate::testhttp::serve(vec![("400 Bad Request", MANDATORY), ("200 OK", SSE), ("200 OK", SSE)]);
-        let llm = OpenAILLM::new(&base, "m", "", ChatAgents::new(30, 30), None).without_reasoning();
-        let o = opts(Duration::from_secs(5));
-        let resp = llm.chat_stream(&req(), &o, &mut Collect::default()).unwrap();
-        assert!(resp.text.starts_with("On it"));
-        llm.chat_stream(&req(), &o, &mut Collect::default()).unwrap();
-        let sent: Vec<_> = rx.try_iter().map(|raw| crate::testhttp::body_json(&raw)["reasoning"].clone()).collect();
-        let least = serde_json::json!({"effort": "low", "exclude": true});
-        assert_eq!(sent, vec![serde_json::json!({"enabled": false}), least.clone(), least]);
+        assert_eq!(sent["reasoning"], serde_json::json!({"effort": "low", "exclude": true}));
     }
 
     #[test]
@@ -969,10 +939,11 @@ mod tests {
         assert_eq!((b["model"].as_str(), &b["reasoning"]), (Some("m"), &serde_json::json!({"effort": "low"})));
         let b = sent(&ChatRequest { model: Some("other/x"), effort: Some(crate::providers::Effort::High), ..plain.clone() });
         assert_eq!((b["model"].as_str(), &b["reasoning"]), (Some("other/x"), &serde_json::json!({"effort": "high"})));
+        let least = serde_json::json!({"effort": "low", "exclude": true});
         let b = sent(&ChatRequest { effort: Some(crate::providers::Effort::Off), ..plain.clone() });
-        assert_eq!(b["reasoning"], serde_json::json!({"enabled": false}));
+        assert_eq!(b["reasoning"], least, "off still lets the model think a little, unseen");
         let b = sent(&ChatRequest { effort: Some(crate::providers::Effort::High), plain: true, ..plain.clone() });
-        assert_eq!(b["reasoning"], serde_json::json!({"enabled": false}), "plain still wins");
+        assert_eq!(b["reasoning"], least, "plain still wins");
         let none = OpenAILLM::new(&base, "m", "", ChatAgents::new(30, 30), None);
         none.chat(&ChatRequest { effort: Some(crate::providers::Effort::Medium), ..plain }).unwrap();
         assert_eq!(crate::testhttp::body_json(&rx.recv().unwrap())["reasoning"], serde_json::json!({"effort": "medium"}));
@@ -980,7 +951,7 @@ mod tests {
 
     #[test]
     fn an_effort_is_rounded_to_the_nearest_one_the_model_takes() {
-        let caps = |e: &[&str]| ReasoningCaps { mandatory: false, efforts: e.iter().map(ToString::to_string).collect() };
+        let caps = |e: &[&str]| ReasoningCaps { efforts: e.iter().map(ToString::to_string).collect() };
         let deepseek = caps(&["max", "high", "low", "none"]);
         assert_eq!(deepseek.nearest("medium"), "high", "a tie goes up");
         assert_eq!(deepseek.nearest("low"), "low");
@@ -997,7 +968,7 @@ mod tests {
         let llm = OpenAILLM::new(&base, "deepseek/flash", "", ChatAgents::new(30, 30), Some("low"));
         llm.learn_caps_from(&serde_json::json!({"data": [
             {"id": "deepseek/flash", "reasoning": {"mandatory": false, "supported_efforts": ["max", "high", "low", "none"]}},
-            {"id": "z-ai/glm", "reasoning": {"mandatory": true, "supported_efforts": ["max", "high", "low"]}},
+            {"id": "z-ai/glm", "reasoning": {"mandatory": true, "supported_efforts": ["high", "minimal"]}},
             {"id": "plain/model"},
         ]}));
         let msgs = vec![Message::User("hi".into())];
@@ -1008,30 +979,16 @@ mod tests {
         };
         use crate::providers::Effort;
         assert_eq!(sent(&ChatRequest { effort: Some(Effort::Medium), ..base_req.clone() }), serde_json::json!({"effort": "high"}));
-        assert_eq!(sent(&ChatRequest { effort: Some(Effort::Off), ..base_req.clone() }), serde_json::json!({"enabled": false}));
+        assert_eq!(
+            sent(&ChatRequest { effort: Some(Effort::Off), ..base_req.clone() }),
+            serde_json::json!({"effort": "low", "exclude": true}),
+            "off is the model's least effort, never none"
+        );
         assert_eq!(
             sent(&ChatRequest { model: Some("z-ai/glm"), effort: Some(Effort::Off), ..base_req.clone() }),
-            serde_json::json!({"effort": "low", "exclude": true}),
-            "a model that must reason is asked for its least, never switched off"
+            serde_json::json!({"effort": "minimal", "exclude": true})
         );
         assert_eq!(sent(&ChatRequest { model: Some("plain/model"), effort: Some(Effort::Medium), ..base_req }), serde_json::json!({"effort": "medium"}));
-    }
-
-    #[test]
-    fn effort_off_falls_back_to_the_least_for_a_model_that_must_reason() {
-        const MANDATORY: &str = r#"{"error":{"message":"Reasoning is mandatory for this endpoint and cannot be disabled.","code":400}}"#;
-        let (base, rx) = crate::testhttp::serve(vec![("400 Bad Request", MANDATORY), ("200 OK", SSE), ("200 OK", SSE)]);
-        let llm = OpenAILLM::new(&base, "m", "", ChatAgents::new(30, 30), Some("high"));
-        let off = ChatRequest { model: Some("must/reason"), effort: Some(crate::providers::Effort::Off), ..req() };
-        let o = opts(Duration::from_secs(5));
-        llm.chat_stream(&off, &o, &mut Collect::default()).unwrap();
-        llm.chat_stream(&off, &o, &mut Collect::default()).unwrap();
-        let sent: Vec<_> = rx.try_iter().map(|raw| crate::testhttp::body_json(&raw)).collect();
-        assert!(sent.iter().all(|b| b["model"] == "must/reason"), "the retry keeps the model");
-        let least = serde_json::json!({"effort": "low", "exclude": true});
-        let reasoning: Vec<_> = sent.iter().map(|b| b["reasoning"].clone()).collect();
-        assert_eq!(reasoning, vec![serde_json::json!({"enabled": false}), least.clone(), least]);
-        assert!(!llm.mandatory("m"), "only the model that refused is remembered");
     }
 
     #[test]
