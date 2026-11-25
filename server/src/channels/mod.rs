@@ -608,12 +608,21 @@ mod tests {
     }
 
     #[test]
-    fn a_checkin_opens_the_days_thread_and_the_message_names_it() {
+    fn a_checkin_opens_a_thread_of_its_own_that_the_message_names() {
         let (db, _uid) = env();
         let push = Arc::new(MockChannel::new("push"));
         let ladder: Vec<Arc<dyn Channel>> = vec![push.clone()];
 
         deliver_event(&db, &ladder, &ev("checkin", "push", ""), Lang::En);
+        let first = push.seen()[0].1.conversation_id.expect("the first check-in opened a thread");
+        {
+            let conn = db.lock().unwrap();
+            let rows = thread_rows(&conn);
+            assert!(rows[0].2.contains("09:00"), "the opener is the rendered question: {}", rows[0].2);
+            let title: String =
+                conn.query_row("SELECT title FROM conversations WHERE id = ?1", [first], |r| r.get(0)).unwrap();
+            assert!(title.contains("09:00"), "{title}");
+        }
         let mut later = ev("checkin_call", "push", "Afternoon. Where did the morning go?");
         later.event_id = 12;
         later.wall_time = "15:30".into();
@@ -621,18 +630,11 @@ mod tests {
 
         let seen = push.seen();
         assert_eq!(seen.len(), 2);
-        let id = seen[0].1.conversation_id.expect("the first check-in opened a thread");
-        assert_eq!(seen[1].1.conversation_id, Some(id), "the same day joins the same thread");
-
+        let id = seen[1].1.conversation_id.unwrap();
+        assert_ne!(id, first, "an unanswered check-in gives its place to the next");
         let conn = db.lock().unwrap();
         let rows = thread_rows(&conn);
-        assert_eq!(rows.len(), 2);
-        assert!(rows.iter().all(|(c, date, _)| *c == id && date.as_deref() == Some("2026-08-31")));
-        assert!(rows[0].2.contains("09:00"), "the opener is the rendered question: {}", rows[0].2);
-        assert_eq!(rows[1].2, "Afternoon. Where did the morning go?");
-        let title: String =
-            conn.query_row("SELECT title FROM conversations WHERE id = ?1", [id], |r| r.get(0)).unwrap();
-        assert!(title.contains("09:00"), "{title}");
+        assert_eq!(rows, vec![(id, Some("2026-08-31".to_string()), "Afternoon. Where did the morning go?".to_string())]);
     }
 
     #[test]

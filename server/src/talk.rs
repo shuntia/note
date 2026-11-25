@@ -82,10 +82,45 @@ pub fn stamp_matrix(conn: &Connection, id: i64, now: jiff::Timestamp) -> Result<
     Ok(())
 }
 
-/// The thread a check-in's question lands in: the plan date's check-in thread
-/// until the user writes in it, when it becomes their conversation and the next
-/// check-in opens another; the next day starts afresh. The question is stored
-/// as an assistant row.
+/// A check-in thread of the user's they have not written in: `laid_on` when it
+/// is one, else the newest of the plan date's.
+pub fn unanswered_checkin(conn: &Connection, user_id: i64, laid_on: Option<i64>, date: &str) -> Result<Option<i64>> {
+    const UNANSWERED: &str = "user_id = ?1 AND checkin_date IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM talk_messages m WHERE m.conversation_id = c.id AND m.role = 'user')";
+    let found = match laid_on {
+        Some(id) => conn
+            .query_row(&format!("SELECT id FROM conversations c WHERE {UNANSWERED} AND id = ?2"), (user_id, id), |r| r.get(0))
+            .optional()?,
+        None => conn
+            .query_row(
+                &format!("SELECT id FROM conversations c WHERE {UNANSWERED} AND checkin_date = ?2 ORDER BY id DESC LIMIT 1"),
+                (user_id, date),
+                |r| r.get(0),
+            )
+            .optional()?,
+    };
+    Ok(found)
+}
+
+/// What Note said in thread `id`, each line with its local time.
+pub fn said_in(conn: &Connection, id: i64, tz: &jiff::tz::TimeZone) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT created_at, content FROM talk_messages
+         WHERE conversation_id = ?1 AND role = 'assistant' AND content != '' ORDER BY id",
+    )?;
+    let rows = stmt.query_map([id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (at, text) = row?;
+        let at = at.parse::<jiff::Timestamp>().map_or(at, |t| t.to_zoned(tz.clone()).strftime("%H:%M").to_string());
+        out.push((at, text));
+    }
+    Ok(out)
+}
+
+/// The thread a check-in's question lands in: a new one for the plan date,
+/// which takes the place of the date's check-in thread the user left
+/// unanswered. A thread the user writes in becomes their conversation.
 pub fn checkin_thread(
     conn: &Connection,
     user_id: i64,
@@ -95,26 +130,78 @@ pub fn checkin_thread(
     lang: crate::text::Lang,
     now: jiff::Timestamp,
 ) -> Result<i64> {
-    let existing: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM conversations c WHERE user_id = ?1 AND checkin_date = ?2
-               AND NOT EXISTS (SELECT 1 FROM talk_messages m WHERE m.conversation_id = c.id AND m.role = 'user')
-             ORDER BY id DESC LIMIT 1",
-            (user_id, date),
-            |r| r.get(0),
-        )
-        .optional()?;
-    let id = if let Some(id) = existing { id } else {
-        conn.execute(
-            "INSERT INTO conversations (user_id, title, created_at, updated_at, checkin_date)
-             VALUES (?1, ?2, ?3, ?3, ?4)",
-            (user_id, crate::text::checkin_thread_title(lang, date.parse().ok(), at), now.to_string(), date),
-        )?;
-        conn.last_insert_rowid()
-    };
+    match unanswered_checkin(conn, user_id, None, date)? {
+        Some(old) => renew_checkin(conn, user_id, old, date, at, question, lang, now),
+        None => open_checkin(conn, user_id, date, at, question, lang, now),
+    }
+}
+
+fn open_checkin(
+    conn: &Connection,
+    user_id: i64,
+    date: &str,
+    at: &str,
+    question: &str,
+    lang: crate::text::Lang,
+    now: jiff::Timestamp,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO conversations (user_id, title, created_at, updated_at, checkin_date)
+         VALUES (?1, ?2, ?3, ?3, ?4)",
+        (user_id, crate::text::checkin_thread_title(lang, date.parse().ok(), at), now.to_string(), date),
+    )?;
+    let id = conn.last_insert_rowid();
     append_text(conn, id, "assistant", question, now)?;
     touch(conn, id, now)?;
     Ok(id)
+}
+
+/// Puts `question` in a new check-in thread in place of the unanswered `old`:
+/// what pointed at `old` points at the new thread and `old` is removed. While
+/// a call is on `old` or about to be, the question joins `old` instead.
+#[allow(clippy::too_many_arguments)]
+pub fn renew_checkin(
+    conn: &Connection,
+    user_id: i64,
+    old: i64,
+    date: &str,
+    at: &str,
+    question: &str,
+    lang: crate::text::Lang,
+    now: jiff::Timestamp,
+) -> Result<i64> {
+    let called: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM voice_calls WHERE state != 'ended'
+           AND (conversation_id = ?1 OR thread_id = ?1 OR json_extract(message, '$.conversation_id') = ?1))",
+        [old],
+        |r| r.get(0),
+    )?;
+    if called {
+        append_text(conn, old, "assistant", question, now)?;
+        touch(conn, old, now)?;
+        return Ok(old);
+    }
+    conn.execute_batch("SAVEPOINT renew_checkin")?;
+    let moved = (|| -> Result<i64> {
+        let id = open_checkin(conn, user_id, date, at, question, lang, now)?;
+        conn.execute("UPDATE events SET conversation_id = ?1 WHERE conversation_id = ?2", (id, old))?;
+        conn.execute("UPDATE work_sessions SET conversation_id = ?1 WHERE conversation_id = ?2", (id, old))?;
+        conn.execute("UPDATE voice_calls SET conversation_id = ?1 WHERE conversation_id = ?2", (id, old))?;
+        conn.execute("UPDATE voice_calls SET thread_id = ?1 WHERE thread_id = ?2", (id, old))?;
+        conn.execute("DELETE FROM conversations WHERE id = ?1 AND user_id = ?2", (old, user_id))?;
+        crate::log::record(conn, Some(user_id), "checkin_renewed", &format!("thread {old} went unanswered; {id} takes its place"))?;
+        Ok(id)
+    })();
+    match moved {
+        Ok(id) => {
+            conn.execute_batch("RELEASE renew_checkin")?;
+            Ok(id)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK TO renew_checkin; RELEASE renew_checkin");
+            Err(e)
+        }
+    }
 }
 
 /// The plan date whose check-in opened the conversation; None for a thread the
@@ -1094,37 +1181,72 @@ mod tests {
     }
 
     #[test]
-    fn a_days_checkins_share_one_thread_and_the_next_day_opens_another() {
+    fn an_unanswered_checkin_gives_its_thread_and_what_pointed_at_it_to_the_next() {
         let conn = conn_with_conversation();
         let morning: jiff::Timestamp = "2026-09-17T00:00:00Z".parse().unwrap();
         let noon: jiff::Timestamp = "2026-09-17T03:00:00Z".parse().unwrap();
         let first =
             checkin_thread(&conn, 1, "2026-09-17", "08:00", "Morning — how did you sleep?", crate::text::Lang::En, morning)
                 .unwrap();
-        let again =
+        assert_ne!(first, 1, "the user's own thread is never reused");
+        conn.execute_batch(&format!(
+            "INSERT INTO plans (user_id, date, created_at) VALUES (1, '2026-09-17', 'x');
+             INSERT INTO events (plan_id, kind, wall_time, status, conversation_id) VALUES (1, 'trigger', '08:15', 'done', {first});
+             INSERT INTO events (plan_id, kind, wall_time, status, conversation_id) VALUES (1, 'trigger', '08:30', 'pending', {first});
+             INSERT INTO work_sessions (user_id, title, started_at, conversation_id) VALUES (1, 'essay', 'x', {first});
+             INSERT INTO voice_calls (id, user_id, direction, state, ring_by, created_at, conversation_id, thread_id)
+                 VALUES ('ended', 1, 'outbound', 'ended', 'x', 'x', {first}, {first});"
+        ))
+        .unwrap();
+        let next =
             checkin_thread(&conn, 1, "2026-09-17", "11:00", "Midday. How is it going?", crate::text::Lang::En, noon)
                 .unwrap();
-        assert_eq!(first, again);
-        assert_ne!(first, 1, "the user's own thread is never reused");
-
-        let rows = messages_json(&conn, first).unwrap();
-        assert_eq!(rows.len(), 2);
-        assert!(rows.iter().all(|r| r["role"] == "assistant"));
-        assert_eq!(rows[1]["content"], "Midday. How is it going?");
+        assert_ne!(next, first);
+        assert!(!owned(&conn, 1, first).unwrap(), "the unanswered thread is gone");
+        let rows = messages_json(&conn, next).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["content"], "Midday. How is it going?");
+        let pointing: i64 = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM events WHERE conversation_id = ?1)
+                      + (SELECT COUNT(*) FROM work_sessions WHERE conversation_id = ?1)
+                      + (SELECT COUNT(*) FROM voice_calls WHERE conversation_id = ?1 AND thread_id = ?1)",
+                [next],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pointing, 4, "everything that named the old thread names the new one");
 
         let (title, updated): (String, String) = conn
-            .query_row("SELECT title, updated_at FROM conversations WHERE id = ?1", [first], |r| {
+            .query_row("SELECT title, updated_at FROM conversations WHERE id = ?1", [next], |r| {
                 Ok((r.get(0)?, r.get(1)?))
             })
             .unwrap();
-        assert_eq!(title, "Thursday's 08:00 check-in", "the opener names the day, not the question");
+        assert_eq!(title, "Thursday's 11:00 check-in", "the opener names the day, not the question");
         assert_eq!(updated, noon.to_string());
-        assert_eq!(checkin_date(&conn, first).unwrap().as_deref(), Some("2026-09-17"));
+        assert_eq!(checkin_date(&conn, next).unwrap().as_deref(), Some("2026-09-17"));
         assert_eq!(checkin_date(&conn, 1).unwrap(), None);
         assert_eq!(checkin_date(&conn, 99).unwrap(), None);
 
-        let next = checkin_thread(&conn, 1, "2026-09-18", "08:00", "Morning again", crate::text::Lang::En, noon).unwrap();
-        assert_ne!(next, first);
+        let tomorrow = checkin_thread(&conn, 1, "2026-09-18", "08:00", "Morning again", crate::text::Lang::En, noon).unwrap();
+        assert!(owned(&conn, 1, next).unwrap(), "another day's check-in leaves this one be");
+        assert_ne!(tomorrow, next);
+    }
+
+    #[test]
+    fn a_checkin_with_a_call_on_its_thread_keeps_the_thread() {
+        let conn = conn_with_conversation();
+        let at: jiff::Timestamp = "2026-09-17T00:00:00Z".parse().unwrap();
+        let first = checkin_thread(&conn, 1, "2026-09-17", "08:00", "How did you sleep?", crate::text::Lang::En, at).unwrap();
+        conn.execute(
+            "INSERT INTO voice_calls (id, user_id, direction, state, ring_by, created_at, message)
+             VALUES ('c', 1, 'outbound', 'ringing', 'x', 'x', ?1)",
+            [format!(r#"{{"conversation_id":{first}}}"#)],
+        )
+        .unwrap();
+        let next = checkin_thread(&conn, 1, "2026-09-17", "11:00", "Midday?", crate::text::Lang::En, at).unwrap();
+        assert_eq!(next, first);
+        assert_eq!(messages_json(&conn, first).unwrap().len(), 2);
     }
 
     #[test]
@@ -1136,7 +1258,8 @@ mod tests {
         let next = checkin_thread(&conn, 1, "2026-09-17", "11:00", "Midday. How is it going?", crate::text::Lang::En, at).unwrap();
         assert_ne!(next, first, "a check-in never lands in the middle of a conversation");
         let again = checkin_thread(&conn, 1, "2026-09-17", "14:00", "Afternoon.", crate::text::Lang::En, at).unwrap();
-        assert_eq!(again, next, "an unanswered one is still the day's to share");
+        assert_ne!(again, next, "an unanswered one gives its place to the next");
+        assert!(owned(&conn, 1, first).unwrap(), "a thread the user wrote in is never removed");
         assert_eq!(messages_json(&conn, first).unwrap().len(), 2);
     }
 

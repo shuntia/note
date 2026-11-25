@@ -70,27 +70,27 @@ fn fire_checkins(state: &AppState, mock: &Arc<MockChannel>) -> Vec<runner::Fired
 }
 
 #[tokio::test]
-async fn the_days_checkins_land_in_one_thread_the_api_lists() {
+async fn an_unanswered_checkin_gives_its_place_to_the_next_in_the_list() {
     let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
     let mock = Arc::new(MockChannel::new("mock"));
     let fired = fire_checkins(&state, &mock);
     assert_eq!(fired.len(), 2);
 
     let seen = mock.seen();
-    let id = seen[0].1.conversation_id.expect("the morning check-in opened a thread");
-    assert_eq!(seen[1].1.conversation_id, Some(id));
+    let morning = seen[0].1.conversation_id.expect("the morning check-in opened a thread");
+    let id = seen[1].1.conversation_id.expect("the afternoon one opened its own");
+    assert_ne!(morning, id);
 
     let list = json(get(&app, "/api/conversations", &cookie).await).await;
     assert_eq!(list.as_array().unwrap().len(), 1);
     assert_eq!(list[0]["id"], id);
-    assert!(list[0]["title"].as_str().unwrap().contains("09:00"), "{}", list[0]["title"]);
+    assert!(list[0]["title"].as_str().unwrap().contains("15:30"), "{}", list[0]["title"]);
+    assert_eq!(get(&app, &format!("/api/conversations/{morning}/messages"), &cookie).await.status(), StatusCode::NOT_FOUND);
 
     let rows = json(get(&app, &format!("/api/conversations/{id}/messages"), &cookie).await).await;
     let rows = rows.as_array().unwrap();
-    assert_eq!(rows.len(), 2);
-    assert!(rows.iter().all(|r| r["role"] == "assistant"));
-    assert!(rows[0]["content"].as_str().unwrap().contains("09:00"));
-    assert_eq!(rows[1]["content"], "Afternoon. Where did the morning go?");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["content"], "Afternoon. Where did the morning go?");
 }
 
 #[tokio::test]
@@ -103,7 +103,7 @@ async fn a_reply_continues_the_thread_and_the_session_knows_it_was_a_checkin() {
         common::app_with_logged_in_user_llm_and_state(llm.clone()).await;
     let mock = Arc::new(MockChannel::new("mock"));
     fire_checkins(&state, &mock);
-    let id = mock.seen()[0].1.conversation_id.unwrap();
+    let id = mock.seen()[1].1.conversation_id.unwrap();
 
     let res = talk(
         &app,
@@ -118,17 +118,18 @@ async fn a_reply_continues_the_thread_and_the_session_knows_it_was_a_checkin() {
 
     let seen = llm.seen();
     assert_eq!(seen.len(), 1);
-    let Message::User(context) = &seen[0].messages[2] else { panic!("{:?}", seen[0].messages) };
+    let Message::User(context) = &seen[0].messages[1] else { panic!("{:?}", seen[0].messages) };
     assert!(context.contains("# This conversation"), "{context}");
     assert!(context.contains("check-in on 2026-09-17"), "{context}");
     assert!(context.find("# Today's plan") < context.find("# This conversation"), "the standing context still comes first");
-    assert_eq!(seen[0].n_messages, 4, "both questions precede the context and the reply");
-    assert!(matches!(&seen[0].messages[0], Message::Assistant { text, .. } if text.contains("09:00")));
-    assert!(matches!(&seen[0].messages[3], Message::User(t) if t == "went fine, finished the essay"));
+    assert_eq!(seen[0].n_messages, 3, "only the latest check-in precedes the context and the reply");
+    assert!(matches!(&seen[0].messages[0], Message::Assistant { text, .. } if text == "Afternoon. Where did the morning go?"));
+    assert!(!seen[0].messages.iter().any(|m| matches!(m, Message::Assistant { text, .. } if text.contains("09:00"))), "the ignored morning question is not answered again");
+    assert!(matches!(&seen[0].messages[2], Message::User(t) if t == "went fine, finished the essay"));
 
     let rows = json(get(&app, &format!("/api/conversations/{id}/messages"), &cookie).await).await;
     let roles: Vec<&str> = rows.as_array().unwrap().iter().map(|r| r["role"].as_str().unwrap()).collect();
-    assert_eq!(roles, ["assistant", "assistant", "user", "assistant"]);
+    assert_eq!(roles, ["assistant", "user", "assistant"]);
 }
 
 #[tokio::test]

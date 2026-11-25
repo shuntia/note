@@ -779,6 +779,16 @@ pub fn call_await_prompt(l: Lang, said: &str) -> String {
     }
 }
 
+/// The day's earlier check-ins the user left unanswered, for a session that
+/// starts without their thread.
+pub fn ignored_messages(l: Lang, said: &[(String, String)]) -> String {
+    let mut s = l.of("\nIgnored messages:\n", "\n返事のないメッセージ:\n").to_string();
+    for (at, text) in said {
+        let _ = writeln!(s, "- {at} {text}");
+    }
+    s
+}
+
 /// The prompts of other wake-ups due at the same moment, which this session
 /// answers too, so the user hears one message rather than several.
 pub fn also_due(l: Lang, prompts: &[String]) -> String {

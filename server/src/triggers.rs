@@ -903,8 +903,10 @@ fn thread_context(
     (history, note)
 }
 
-/// Where a trigger's words land: the thread it was laid against, else the day's
-/// check-in thread. The text is written there whether or not a channel takes it.
+/// Where a trigger's words land: the thread it was laid against, else the
+/// day's check-in thread, either replaced by a new one while it is an
+/// unanswered check-in, unless the words come from a `resumed` session. The
+/// text is written there whether or not a channel takes it.
 fn record_said(
     conn: &Connection,
     fired: &crate::runner::FiredEvent,
@@ -912,7 +914,13 @@ fn record_said(
     conversation_id: Option<i64>,
     text: &str,
     now: jiff::Timestamp,
+    resumed: bool,
 ) -> Result<i64> {
+    if let (Some(id), false) = (conversation_id, resumed) {
+        if let Some(old) = crate::talk::unanswered_checkin(conn, fired.user_id, Some(id), &fired.date)? {
+            return crate::talk::renew_checkin(conn, fired.user_id, old, &fired.date, &fired.wall_time, text, lang, now);
+        }
+    }
     match conversation_id {
         Some(id) => {
             crate::talk::append_text(conn, id, "assistant", text, now)?;
@@ -1376,7 +1384,21 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         });
         opening.push_str(&crate::follow_up::summary(&conn, fired.user_id, &tz, l, now).unwrap_or_default());
         let linked = crate::follow_up::tasks_of_events(&conn, &all).unwrap_or_default();
-        let (history, note) = thread_context(&conn, ev.conversation_id, l);
+        let ignored = if parked.is_some() {
+            None
+        } else {
+            crate::talk::unanswered_checkin(&conn, fired.user_id, ev.conversation_id, &fired.date).unwrap_or_default()
+        };
+        let (history, note) = match ignored {
+            Some(old) => {
+                let said = crate::talk::said_in(&conn, old, &tz).unwrap_or_default();
+                if !said.is_empty() {
+                    opening.push_str(&mt::ignored_messages(l, &said));
+                }
+                (Vec::new(), None)
+            }
+            None => thread_context(&conn, ev.conversation_id, l),
+        };
         (ev, opening, history, note, parked, also, linked, fence)
     };
     let resumed = parked.map(|p| resumed(state, fired, &ev, p, now));
@@ -1497,14 +1519,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     settle_all("done");
     let conversation_id = {
         let conn = state.db();
-        let landed = record_said(
-            &conn,
-            fired,
-            lang,
-            ev.conversation_id,
-            &text,
-            now,
-        );
+        let landed = record_said(&conn, fired, lang, ev.conversation_id, &text, now, resumed.is_some());
         if let (Ok(thread), Some((min, paused))) = (&landed, waits) {
             match pause(&conn, &state.config_dir, fired, *thread, &text, min, rings || held.is_some(), paused, parked_at) {
                 Ok(Some(id)) => {
@@ -1666,7 +1681,7 @@ fn fire_capped(state: &crate::AppState, fired: &crate::runner::FiredEvent, now: 
     } else {
         crate::text::capped_reminder(lang, &ev.prompt)
     };
-    let landed = record_said(&conn, fired, lang, ev.conversation_id, &text, now).ok();
+    let landed = record_said(&conn, fired, lang, ev.conversation_id, &text, now, false).ok();
     let _ = close(&conn, ev.event_id, "done", now);
     let _ = crate::log::record(&conn, Some(fired.user_id), "trigger_said", &format!("event {}: {text}", ev.event_id));
     drop(conn);
