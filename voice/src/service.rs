@@ -1078,8 +1078,8 @@ pub async fn run_with(cfg: VoiceServiceConfig, peer_cfg: PeerConfig, backends: B
     svc.drop_delivered();
     svc.recover().await;
     tokio::spawn(svc.clone().check_unreported());
-    if cfg.stt_idle_unload > 0 {
-        let (engines, idle) = (svc.backends.engines.clone(), Duration::from_secs(cfg.stt_idle_unload));
+    if cfg.idle_unload > 0 {
+        let (engines, idle) = (svc.backends.engines.clone(), Duration::from_secs(cfg.idle_unload));
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(REAP_EVERY.min(idle));
             loop {

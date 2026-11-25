@@ -77,6 +77,17 @@ impl<T: Send + Sync + 'static> Slot<T> {
         self.lock().value.is_some()
     }
 
+    pub fn in_use(&self) -> bool {
+        self.lock().users > 0
+    }
+
+    /// The model, loading it first if it is out; `None` when that load fails.
+    pub fn hold(self: &Arc<Self>) -> Option<(Arc<T>, Lease<T>)> {
+        let lease = self.lease();
+        self.demand();
+        Some((self.wait()?, lease))
+    }
+
     /// Drops the model once no one has used it for `idle`; true when it did.
     pub fn reap(&self, idle: Duration, now: Instant) -> bool {
         let mut st = self.lock();

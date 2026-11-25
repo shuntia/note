@@ -603,7 +603,7 @@ impl<S: Fn(CallBody)> Live<S> {
                     (self.send)(CallBody::Retract { turn });
                 }
                 Action::PausePlayout => self.playout.pause(),
-                Action::ResumePlayout => {
+                Action::DropBarge => {
                     self.playout.resume();
                     let _ = self.stt.send(SttCmd::Reset);
                 }

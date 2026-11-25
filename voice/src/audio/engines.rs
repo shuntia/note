@@ -125,6 +125,7 @@ enum Recognizer {
 struct Language {
     vad_model: String,
     recognizer: Arc<Slot<Recognizer>>,
+    kokoro: Option<Arc<Slot<SherpaTts>>>,
     turn: Arc<OrtTurn>,
     tts: BaseVoice,
 }
@@ -184,15 +185,15 @@ impl Engines {
 
 impl Language {
     fn load(code: &str, set: &ModelSet, device: Device) -> anyhow::Result<Language> {
-        let tts = match (&set.kokoro, &set.tts_sidecar) {
-            (Some(kokoro), _) => {
-                let kokoro = SherpaTts::create(code, kokoro, device, GpuAttempt::Try).context("loading the voice")?;
-                kokoro.render("Hello.", "")?;
-                let voices = kokoro.voices();
-                BaseVoice::Kokoro(Arc::new(ChunkedBackend::new(KOKORO, "Kokoro", Arc::new(kokoro), voices)))
+        let kokoro = set.kokoro.as_ref().map(|model| kokoro_slot(code, model, device));
+        let tts = match (&kokoro, &set.kokoro, &set.tts_sidecar) {
+            (Some(slot), Some(model), _) => {
+                slot.hold().ok_or_else(|| anyhow!("loading the voice failed"))?;
+                let renderer = Arc::new(LazyKokoro(slot.clone()));
+                BaseVoice::Kokoro(Arc::new(ChunkedBackend::new(KOKORO, "Kokoro", renderer, kokoro_voices(code, model))))
             }
-            (None, Some(sidecar)) => BaseVoice::Sidecar(sidecar.clone()),
-            (None, None) => anyhow::bail!("no base voice"),
+            (_, _, Some(sidecar)) => BaseVoice::Sidecar(sidecar.clone()),
+            _ => anyhow::bail!("no base voice"),
         };
         let (code_owned, stt) = (code.to_owned(), set.stt.clone());
         let recognizer = Slot::new(move || {
@@ -211,6 +212,7 @@ impl Language {
         let language = Language {
             vad_model: path_str(&set.vad)?,
             recognizer,
+            kokoro,
             turn: Arc::new(OrtTurn::create(&set.turn).context("loading the turn model")?),
             tts,
         };
@@ -235,6 +237,9 @@ impl SpeechEngines for Engines {
     fn warm(&self, language: &str) {
         if let Some(l) = self.languages.get(language) {
             l.recognizer.demand();
+            if let Some(kokoro) = &l.kokoro {
+                kokoro.demand();
+            }
         }
     }
 
@@ -243,6 +248,10 @@ impl SpeechEngines for Engines {
         for (code, l) in &self.languages {
             if l.recognizer.reap(idle, now) {
                 eprintln!("voice: {code} STT unloaded after {idle:.0?} unused");
+            }
+            let kokoro = l.kokoro.as_ref().filter(|_| !l.recognizer.in_use());
+            if kokoro.is_some_and(|k| k.reap(idle, now)) {
+                eprintln!("voice: {code} Kokoro unloaded after {idle:.0?} unused");
             }
         }
     }
@@ -273,6 +282,41 @@ pub const KOKORO: &str = "kokoro";
 /// The Kokoro speaker id for `voice`, or the model's default for an unknown or empty one.
 pub fn resolve_sid(kokoro: &KokoroModel, voice: &str) -> i32 {
     kokoro.speakers.iter().find(|v| v.id == voice).or(kokoro.speakers.first()).map_or(0, |v| v.sid)
+}
+
+/// Kokoro on `device`, warmed with a first render so a call's first line comes at full speed.
+fn kokoro_slot(code: &str, model: &KokoroModel, device: Device) -> Arc<Slot<SherpaTts>> {
+    let (code, model) = (code.to_owned(), model.clone());
+    Slot::new(move || {
+        let start = std::time::Instant::now();
+        let loaded = SherpaTts::create(&model, device, GpuAttempt::Try).and_then(|tts| {
+            tts.render("Hello.", "")?;
+            Ok(tts)
+        });
+        match &loaded {
+            Ok(tts) => eprintln!("voice: {code} Kokoro loaded on {} in {:.2?}", tts.provider, start.elapsed()),
+            Err(e) => eprintln!("voice: loading the {code} Kokoro failed: {e:#}"),
+        }
+        loaded
+    })
+}
+
+/// Kokoro that loads for the render that needs it, and stays in until the reaper drops it.
+struct LazyKokoro(Arc<Slot<SherpaTts>>);
+
+impl Renderer for LazyKokoro {
+    fn render(&self, text: &str, voice: &str) -> anyhow::Result<Vec<i16>> {
+        let (tts, _lease) = self.0.hold().ok_or_else(|| anyhow!("loading the voice failed"))?;
+        tts.render(text, voice)
+    }
+}
+
+fn kokoro_voices(language: &str, model: &KokoroModel) -> Vec<VoiceInfo> {
+    model
+        .speakers
+        .iter()
+        .map(|v| VoiceInfo { id: v.id.clone(), label: v.label.clone(), languages: vec![language.to_owned()], credit: None })
+        .collect()
 }
 
 fn make_stt(recognizer: &Arc<Recognizer>) -> Box<dyn SpeechToText> {
@@ -505,14 +549,12 @@ enum GpuAttempt {
 
 struct SherpaTts {
     tts: OfflineTts,
-    #[cfg_attr(not(test), allow(dead_code))]
     provider: &'static str,
     model: KokoroModel,
-    language: String,
 }
 
 impl SherpaTts {
-    fn create(language: &str, model: &KokoroModel, device: Device, gpu: GpuAttempt) -> anyhow::Result<Self> {
+    fn create(model: &KokoroModel, device: Device, gpu: GpuAttempt) -> anyhow::Result<Self> {
         let config = |provider: &str| -> anyhow::Result<OfflineTtsConfig> {
             Ok(OfflineTtsConfig {
                 model: OfflineTtsModelConfig {
@@ -550,7 +592,7 @@ impl SherpaTts {
         if tts.sample_rate() != KOKORO_RATE {
             anyhow::bail!("expected {KOKORO_RATE} Hz from the TTS, got {}", tts.sample_rate());
         }
-        Ok(SherpaTts { tts, provider, model: model.clone(), language: language.into() })
+        Ok(SherpaTts { tts, provider, model: model.clone() })
     }
 }
 
@@ -569,16 +611,6 @@ impl SherpaTts {
             .generate_with_config::<fn(&[f32], f32) -> bool>(text, &config, None)
             .ok_or_else(|| anyhow!("synthesizing {text:?} failed"))?;
         Ok(audio.samples().to_vec())
-    }
-}
-
-impl SherpaTts {
-    fn voices(&self) -> Vec<VoiceInfo> {
-        self.model
-            .speakers
-            .iter()
-            .map(|v| VoiceInfo { id: v.id.clone(), label: v.label.clone(), languages: vec![self.language.clone()], credit: None })
-            .collect()
     }
 }
 
@@ -674,7 +706,7 @@ mod tests {
     #[ignore = "needs NOTE_VOICE_MODELS"]
     fn a_failed_cuda_engine_falls_back_to_cpu() {
         let mut m = models().unwrap();
-        let tts = SherpaTts::create("en", m["en"].kokoro.as_ref().unwrap(), Device::Cuda, GpuAttempt::Fail).unwrap();
+        let tts = SherpaTts::create(m["en"].kokoro.as_ref().unwrap(), Device::Cuda, GpuAttempt::Fail).unwrap();
         assert_eq!(tts.provider(), "cpu");
         assert!(!tts.render("Hi.", "").unwrap().is_empty());
         m.clear();
@@ -692,10 +724,10 @@ mod tests {
     }
 
     /// Prints each language's load time and the process's VRAM with only Kokoro in, with a call's
-    /// recognizer in, and after the recognizer is dropped.
+    /// recognizer in, after the recognizer is dropped, and with Kokoro dropped too.
     #[test]
     #[ignore = "needs NOTE_VOICE_MODELS and a GPU"]
-    fn stt_loads_on_demand_and_unloading_frees_its_vram() {
+    fn models_load_on_demand_and_unloading_frees_their_vram() {
         let e = Engines::load(&models().unwrap(), Device::Auto).unwrap();
         println!("idle, Kokoro only: {}", vram_mib());
         for language in ["en", "ja", "en"] {
@@ -710,6 +742,13 @@ mod tests {
             std::thread::sleep(Duration::from_millis(500));
             println!("{language}: unloaded, {}", vram_mib());
         }
+        e.reap(Duration::ZERO);
+        assert!(!e.languages["en"].kokoro.as_ref().unwrap().loaded());
+        std::thread::sleep(Duration::from_millis(500));
+        println!("idle, nothing loaded: {}", vram_mib());
+        let start = std::time::Instant::now();
+        assert!(!kokoro(&e, "en").render("Hi.", "").unwrap().is_empty());
+        println!("Kokoro back for a render in {:.2?}: {}", start.elapsed(), vram_mib());
     }
 
     #[test]
