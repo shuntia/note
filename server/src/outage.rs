@@ -12,8 +12,8 @@ pub enum Outage {
     Voice,
 }
 
-const AI: [Reason; 5] =
-    [Reason::ModelUnavailable, Reason::AuthInvalid, Reason::OutOfCredits, Reason::RateLimited, Reason::ProviderDown];
+const AI: [Reason; 6] =
+    [Reason::ModelUnavailable, Reason::NoKey, Reason::AuthInvalid, Reason::OutOfCredits, Reason::RateLimited, Reason::ProviderDown];
 
 impl Outage {
     pub fn code(self) -> &'static str {

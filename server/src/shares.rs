@@ -1040,6 +1040,9 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
     }
     let share = principal.share.clone();
     let now = jiff::Timestamp::now();
+    if !state.has_llm(principal.owner_id) {
+        return Err(TurnError::Unavailable);
+    }
     let permit = state.share_gate.try_enter(principal.owner_id).map_err(|_| TurnError::Busy)?;
     let Admitted { thread_id, past, question } = admit(&mut state.db(), share.id, share.scope.messages_per_day, visitor_key, thread, &message, now)?;
     let started = thread.is_none();
@@ -1049,11 +1052,12 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
     let visitor = visitor_key.to_string();
     let result = tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        let llm = st.llm_for(owner_id);
         let deps = crate::agent::SessionDeps {
             db: &st.db,
             config_dir: &st.config_dir,
             data_dir: &st.data_dir,
-            llm: st.llm.as_ref(),
+            llm: llm.as_ref(),
             embeddings: None,
             search: None,
             task_scope: None,

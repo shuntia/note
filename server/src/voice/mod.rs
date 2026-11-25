@@ -1273,6 +1273,7 @@ mod tests {
             data_dir: dir.path().to_path_buf(),
             llm: llm.clone(),
             voice_llm: llm.clone(),
+            own_keys: Arc::new(crate::own_keys::OwnKeys::server_stands_in()),
             embeddings: None,
             search: None,
             settings: call::CallSettings { wake_settle: std::time::Duration::from_secs(60), ..Default::default() },

@@ -61,14 +61,24 @@ impl ureq::unversioned::resolver::Resolver for PublicResolver {
 /// An agent for URLs a user supplied: https only, no redirects, no proxy, and
 /// only public addresses.
 pub fn public_agent(connect: std::time::Duration, global: std::time::Duration) -> ureq::Agent {
-    let config = ureq::Agent::config_builder()
-        .https_only(true)
-        .max_redirects(0)
-        .proxy(None)
-        .timeout_connect(Some(connect))
-        .timeout_global(Some(global))
-        .build();
+    guarded(ureq::Agent::config_builder().timeout_connect(Some(connect)).timeout_global(Some(global)))
+}
+
+/// `builder`'s agent held to `public_agent`'s rules, checked as it connects.
+pub fn guarded(builder: ureq::config::ConfigBuilder<ureq::typestate::AgentScope>) -> ureq::Agent {
+    let config = builder.https_only(true).max_redirects(0).proxy(None).build();
     ureq::Agent::with_parts(config, ureq::unversioned::transport::DefaultConnector::new(), PublicResolver::default())
+}
+
+/// Whether a URL a user typed may be called: what `push_endpoint_ok` asks of
+/// a push endpoint. Blocking on DNS: call it off the async executor.
+pub fn public_url_ok(url: &str) -> Result<(), &'static str> {
+    push_endpoint_ok(url)
+}
+
+/// The host of an `https://` URL, when it is one this code vouches for.
+pub fn host_of(url: &str) -> Option<String> {
+    https_host(url)
 }
 
 pub fn blocked_ip(ip: IpAddr) -> bool {

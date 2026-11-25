@@ -7,6 +7,7 @@ const POLL_MS = 60_000
 
 const OUTAGE_KEYS: Record<Outage['code'], Key> = {
   model_unavailable: 'failure.modelUnavailable',
+  no_key: 'failure.noKey',
   auth_invalid: 'failure.authInvalid',
   out_of_credits: 'failure.outOfCredits',
   rate_limited: 'failure.rateLimited',
@@ -24,13 +25,13 @@ export function outageLines(outages: Outage[]): string[] {
 }
 
 // Stands over every view while something Note leans on is failing, and goes
-// once the server says it has cleared.
-export function OutageBanner({ refresh }: { refresh: number }) {
-  const [lines, setLines] = useState<string[]>([])
+// once the server says it has cleared. The missing-key line opens the key setting.
+export function OutageBanner({ refresh, openKey }: { refresh: number; openKey: () => void }) {
+  const [outages, setOutages] = useState<Outage[]>([])
   const look = useCallback(() => {
     api
       .outages()
-      .then((r) => setLines(outageLines(r.outages)))
+      .then((r) => setOutages(r.outages))
       .catch(() => {})
   }, [])
 
@@ -44,12 +45,21 @@ export function OutageBanner({ refresh }: { refresh: number }) {
     }
   }, [look])
 
-  if (lines.length === 0) return null
+  const shown = outages.filter((o) => o.code in OUTAGE_KEYS)
+  if (shown.length === 0) return null
   return (
     <div className="outage" role="status">
-      {lines.map((line) => (
-        <p key={line}>{line}</p>
-      ))}
+      {shown.map((o) =>
+        o.code === 'no_key' ? (
+          <p key={o.code}>
+            <button type="button" className="link" onClick={openKey}>
+              {t(OUTAGE_KEYS[o.code])}
+            </button>
+          </p>
+        ) : (
+          <p key={o.code}>{t(OUTAGE_KEYS[o.code])}</p>
+        ),
+      )}
     </div>
   )
 }

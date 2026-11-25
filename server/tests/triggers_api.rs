@@ -1192,3 +1192,61 @@ async fn a_tidy_up_opens_on_its_brief_lays_nothing_that_stays_and_waits_on_no_qu
     let left: Vec<String> = rows(&w, "SELECT origin || ':' || status FROM events WHERE kind = 'trigger' ORDER BY id");
     assert_eq!(left, vec!["chores:done", "agent:dropped"], "no wait on its question, and no wake-up of its own");
 }
+
+fn today() -> String {
+    jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date().to_string()
+}
+
+#[tokio::test]
+async fn a_wake_up_after_an_unanswered_checkin_starts_fresh_and_names_it_as_ignored() {
+    let w = world(vec![call("c1", "say", r#"{"text":"lunch soon?","await_min":0}"#)]).await;
+    let earlier = jiff::Timestamp::now() - jiff::Span::new().hours(1);
+    let old = {
+        let conn = w.state.db.lock().unwrap();
+        note_server::talk::checkin_thread(&conn, 1, &today(), "09:00", "Morning — how did you sleep?", note_server::text::Lang::En, earlier)
+            .unwrap()
+    };
+    lay_plain(&w);
+    note_server::runner::sweep_once(&w.state);
+
+    let seen = w.llm.seen();
+    assert_eq!(seen.len(), 1);
+    let opening = format!("{:?}", seen[0].messages.last().unwrap());
+    let at = earlier.to_zoned(jiff::tz::TimeZone::UTC).strftime("%H:%M").to_string();
+    assert!(opening.contains("Ignored messages:"), "{opening}");
+    assert!(opening.contains(&format!("- {at} Morning — how did you sleep?")), "{opening}");
+    assert!(
+        !seen[0].messages.iter().any(|m| matches!(m, note_server::providers::Message::Assistant { .. })),
+        "the unanswered thread is not replayed: {:?}",
+        seen[0].messages
+    );
+
+    let thread = w.push.seen()[0].1.conversation_id.unwrap();
+    assert_ne!(thread, old);
+    assert!(rows::<i64>(&w, &format!("SELECT id FROM conversations WHERE id = {old}")).is_empty(), "the ignored thread is gone");
+    let said: Vec<String> = rows(&w, &format!("SELECT content FROM talk_messages WHERE conversation_id = {thread}"));
+    assert_eq!(said, ["lunch soon?"]);
+}
+
+#[tokio::test]
+async fn a_parked_wait_follows_its_checkin_into_the_thread_that_replaced_it() {
+    let w = world(vec![call("c1", "say", WAIT), call("c2", "say", r#"{"text":"still on for the essay?"}"#)]).await;
+    lay_plain(&w);
+    note_server::runner::sweep_once(&w.state);
+    let first = w.push.seen()[0].1.conversation_id.unwrap();
+    let second = {
+        let conn = w.state.db.lock().unwrap();
+        note_server::talk::checkin_thread(&conn, 1, &today(), "12:00", "Lunch?", note_server::text::Lang::En, jiff::Timestamp::now())
+            .unwrap()
+    };
+    assert_ne!(second, first);
+    assert!(rows::<i64>(&w, &format!("SELECT id FROM conversations WHERE id = {first}")).is_empty());
+    assert_eq!(rows::<Option<i64>>(&w, "SELECT conversation_id FROM events WHERE status = 'pending'"), [Some(second)]);
+    assert_eq!(rows::<i64>(&w, "SELECT COUNT(*) FROM paused_sessions"), [1]);
+
+    make_due(&w);
+    note_server::runner::sweep_once(&w.state);
+    assert_eq!(w.push.seen()[1].1.conversation_id, Some(second));
+    let said: Vec<String> = rows(&w, &format!("SELECT content FROM talk_messages WHERE conversation_id = {second} ORDER BY id"));
+    assert_eq!(said, ["Lunch?", "still on for the essay?"]);
+}

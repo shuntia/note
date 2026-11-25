@@ -321,6 +321,19 @@ async fn token_writes_are_user_actor() {
 }
 
 #[tokio::test]
+async fn a_token_write_counts_as_the_users_activity_and_a_read_does_not() {
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    let (_, token) = minted(&app, &cookie, "cli").await;
+    let stamp = || -> Option<String> {
+        state.db().query_row("SELECT last_external_at FROM users WHERE id = 1", [], |r| r.get(0)).unwrap()
+    };
+    with_bearer(&app, &token, Method::GET, "/api/tasks", None).await;
+    assert_eq!(stamp(), None);
+    with_bearer(&app, &token, Method::POST, "/api/tasks", Some(r#"{"title":"from the cli"}"#)).await;
+    assert!(stamp().is_some());
+}
+
+#[tokio::test]
 async fn bearer_token_can_delete_a_task() {
     let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
     let (_, token) = minted(&app, &cookie, "cli").await;

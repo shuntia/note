@@ -82,7 +82,7 @@ fn a_full_simulated_day() {
             conversation_id: None,
         };
         assert_eq!(note_server::nightly::due(&db.lock().unwrap(), tmp.path(), now).unwrap().len(), 1);
-        note_server::nightly::run_for_user(&deps, 1, "aitest", now).unwrap();
+        note_server::nightly::run_for_user(&deps, 1, "aitest", now, true).unwrap();
     }
     {
         let conn = db.lock().unwrap();

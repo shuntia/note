@@ -365,6 +365,26 @@ pub fn opening(
 }
 
 /// The newest event id now: a tidy-up's session lays nothing past it that stays.
+/// Whether every one of `event_ids` is a tidy-up and the user did nothing
+/// since the last tidy-up that ran a session, or the last nightly.
+pub fn nothing_new(conn: &Connection, user_id: i64, event_ids: &[i64]) -> rusqlite::Result<bool> {
+    for id in event_ids {
+        let origin: Option<String> = conn.query_row("SELECT origin FROM events WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+        if origin.as_deref() != Some(ORIGIN) {
+            return Ok(false);
+        }
+    }
+    let tidied: Option<String> = conn.query_row(
+        "SELECT MAX(e.decided_at) FROM events e JOIN plans p ON p.id = e.plan_id
+         WHERE p.user_id = ?1 AND e.origin = ?2 AND e.status = 'done'",
+        (user_id, ORIGIN),
+        |r| r.get(0),
+    )?;
+    let nightly: Option<String> =
+        conn.query_row("SELECT MAX(created_at) FROM debriefs WHERE user_id = ?1", [user_id], |r| r.get(0))?;
+    crate::activity::quiet_since(conn, user_id, crate::activity::newest([tidied, nightly]))
+}
+
 pub fn fence(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row("SELECT COALESCE(MAX(id), 0) FROM events", [], |r| r.get(0))
 }

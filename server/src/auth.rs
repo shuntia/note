@@ -426,6 +426,9 @@ impl FromRequestParts<AppState> for TaskPrincipal {
             let Some(r) = resolved else {
                 return Err(StatusCode::UNAUTHORIZED);
             };
+            if !parts.method.is_safe() {
+                let _ = crate::activity::touch_external(&conn, r.user_id, jiff::Timestamp::now());
+            }
             return Ok(TaskPrincipal {
                 id: r.user_id,
                 username: r.username,

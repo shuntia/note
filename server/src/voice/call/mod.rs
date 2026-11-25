@@ -115,12 +115,19 @@ pub struct CallDeps {
     pub llm: Arc<dyn LLMProvider>,
     /// Speaks on the call.
     pub voice_llm: Arc<dyn LLMProvider>,
+    pub own_keys: Arc<crate::own_keys::OwnKeys>,
     pub embeddings: Option<Arc<dyn EmbeddingsProvider>>,
     pub search: Option<Arc<dyn SearchProvider>>,
     pub settings: CallSettings,
 }
 
 impl CallDeps {
+    /// These deps on `user_id`'s own providers.
+    fn for_user(&self, user_id: i64) -> Self {
+        let (voice_llm, llm) = self.own_keys.voice(&self.db, user_id, &self.llm, &self.voice_llm);
+        Self { llm, voice_llm, ..self.clone() }
+    }
+
     fn session(&self) -> SessionDeps<'_> {
         SessionDeps {
             db: &self.db,
@@ -243,6 +250,7 @@ impl CallManager {
             .ok()
             .flatten();
         let Some((user_id, username, message, conversation_id)) = row else { return false };
+        let d = &d.for_user(user_id);
         let msg = message.and_then(|m| serde_json::from_str::<OutboundMessage>(&m).ok());
         let lang = crate::text::Lang::for_user(&d.config_dir, &username);
         let started = d.prompt(user_id, &username, &reason(msg.as_ref()), None, lang).and_then(|(system, tools)| {
@@ -277,6 +285,7 @@ impl CallManager {
         let (me, msg) = (self.clone(), msg.clone());
         spawn_blocking(move || {
             let Some(d) = me.deps.get() else { return };
+            let d = &d.for_user(user_id);
             d.follow_main_model();
             let username: Option<String> = crate::db_guard(&d.db)
                 .query_row("SELECT username FROM users WHERE id = ?1", [user_id], |r| r.get(0))
@@ -312,6 +321,7 @@ impl CallManager {
             )
             .optional()?;
         let Some((user_id, username, message, thread_id)) = row else { return Ok(()) };
+        let d = &d.for_user(user_id);
         let lang = crate::text::Lang::for_user(&d.config_dir, &username);
         let msg = message.map(|m| serde_json::from_str::<OutboundMessage>(&m)).transpose()?;
         let existing = owned_conversation(&d.db, user_id, msg.as_ref().and_then(|m| m.conversation_id).or(thread_id));
@@ -547,6 +557,7 @@ mod tests {
             data_dir: PathBuf::new(),
             llm: main.clone(),
             voice_llm: voice.clone(),
+            own_keys: Arc::new(crate::own_keys::OwnKeys::server_stands_in()),
             embeddings: None,
             search: None,
             settings: CallSettings { follows_main_model, ..Default::default() },
@@ -615,6 +626,7 @@ mod tests {
             data_dir: tmp.path().to_path_buf(),
             llm: llm.clone(),
             voice_llm: llm,
+            own_keys: Arc::new(crate::own_keys::OwnKeys::server_stands_in()),
             embeddings: None,
             search: None,
             settings: CallSettings::default(),
@@ -652,6 +664,7 @@ mod tests {
             data_dir: dir.to_path_buf(),
             llm: Arc::new(crate::providers::mock::MockLLM::scripted(vec![])),
             voice_llm: voice,
+            own_keys: Arc::new(crate::own_keys::OwnKeys::server_stands_in()),
             embeddings: None,
             search: None,
             settings: CallSettings::default(),

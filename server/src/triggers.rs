@@ -903,16 +903,28 @@ fn thread_context(
     (history, note)
 }
 
-/// Where a trigger's words land: the thread it was laid against, else the day's
-/// check-in thread. The text is written there whether or not a channel takes it.
+/// Where a trigger's words land: the thread it is laid against now, which a
+/// check-in may have moved it to while its session ran, else the day's
+/// check-in thread, either replaced by a new one while it is an unanswered
+/// check-in, unless the words come from a `resumed` session. The text is
+/// written there whether or not a channel takes it.
 fn record_said(
     conn: &Connection,
     fired: &crate::runner::FiredEvent,
     lang: crate::text::Lang,
-    conversation_id: Option<i64>,
     text: &str,
     now: jiff::Timestamp,
+    resumed: bool,
 ) -> Result<i64> {
+    let conversation_id: Option<i64> = conn
+        .query_row("SELECT conversation_id FROM events WHERE id = ?1", [fired.event_id], |r| r.get(0))
+        .optional()?
+        .flatten();
+    if let (Some(id), false) = (conversation_id, resumed) {
+        if let Some(old) = crate::talk::unanswered_checkin(conn, fired.user_id, Some(id), &fired.date)? {
+            return crate::talk::renew_checkin(conn, fired.user_id, old, &fired.date, &fired.wall_time, text, lang, now);
+        }
+    }
     match conversation_id {
         Some(id) => {
             crate::talk::append_text(conn, id, "assistant", text, now)?;
@@ -1327,7 +1339,19 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     if crate::api::background_capped(state, fired.user_id, "wake-up") {
         crate::outage::tell_pending(state, fired.user_id, &fired.username, now);
         for id in std::iter::once(fired.event_id).chain(fired.folded.iter().copied()) {
-            fire_capped(state, &crate::runner::FiredEvent { event_id: id, folded: Vec::new(), ..fired.clone() }, now);
+            fire_capped(state, &crate::runner::FiredEvent { event_id: id, folded: Vec::new(), ..fired.clone() }, now, "the day's AI sessions are spent");
+        }
+        return;
+    }
+    if state.skip_keyless(fired.user_id, "wake-up") {
+        for id in &all {
+            fire_capped(state, &crate::runner::FiredEvent { event_id: *id, folded: Vec::new(), ..fired.clone() }, now, "no AI key is saved");
+        }
+        return;
+    }
+    if crate::chores::nothing_new(&state.db(), fired.user_id, &all).unwrap_or(false) {
+        for id in &all {
+            fire_capped(state, &crate::runner::FiredEvent { event_id: *id, folded: Vec::new(), ..fired.clone() }, now, "nothing changed since the last tidy-up");
         }
         return;
     }
@@ -1364,15 +1388,30 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         });
         opening.push_str(&crate::follow_up::summary(&conn, fired.user_id, &tz, l, now).unwrap_or_default());
         let linked = crate::follow_up::tasks_of_events(&conn, &all).unwrap_or_default();
-        let (history, note) = thread_context(&conn, ev.conversation_id, l);
+        let ignored = if parked.is_some() {
+            None
+        } else {
+            crate::talk::unanswered_checkin(&conn, fired.user_id, ev.conversation_id, &fired.date).unwrap_or_default()
+        };
+        let (history, note) = match ignored {
+            Some(old) => {
+                let said = crate::talk::said_in(&conn, old, &tz).unwrap_or_default();
+                if !said.is_empty() {
+                    opening.push_str(&mt::ignored_messages(l, &said));
+                }
+                (Vec::new(), None)
+            }
+            None => thread_context(&conn, ev.conversation_id, l),
+        };
         (ev, opening, history, note, parked, also, linked, fence)
     };
     let resumed = parked.map(|p| resumed(state, fired, &ev, p, now));
+    let llm = state.llm_for(fired.user_id);
     let deps = crate::agent::SessionDeps {
         db: &state.db,
         config_dir: &state.config_dir,
         data_dir: &state.data_dir,
-        llm: state.llm.as_ref(),
+        llm: llm.as_ref(),
         embeddings: state.embeddings.as_deref(),
         search: state.search.as_deref(),
         task_scope: None,
@@ -1484,14 +1523,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     settle_all("done");
     let conversation_id = {
         let conn = state.db();
-        let landed = record_said(
-            &conn,
-            fired,
-            lang,
-            ev.conversation_id,
-            &text,
-            now,
-        );
+        let landed = record_said(&conn, fired, lang, &text, now, resumed.is_some());
         if let (Ok(thread), Some((min, paused))) = (&landed, waits) {
             match pause(&conn, &state.config_dir, fired, *thread, &text, min, rings || held.is_some(), paused, parked_at) {
                 Ok(Some(id)) => {
@@ -1630,7 +1662,9 @@ fn said_message(
 /// user laid or the server keeps goes out as a plain reminder of what it was
 /// laid for, and one Note laid for its own looking (idleness, laying the day,
 /// a wait for an answer) settles without a word, its parked session with it.
-fn fire_capped(state: &crate::AppState, fired: &crate::runner::FiredEvent, now: jiff::Timestamp) {
+/// Settles a wake-up with no session: one of Note's own goes quietly, a
+/// reminder is sent as written.
+fn fire_capped(state: &crate::AppState, fired: &crate::runner::FiredEvent, now: jiff::Timestamp, why: &str) {
     let lang = Lang::for_user(&state.config_dir, &fired.username);
     let conn = state.db();
     let Ok(Some(ev)) = read(&conn, fired.event_id) else {
@@ -1643,7 +1677,7 @@ fn fire_capped(state: &crate::AppState, fired: &crate::runner::FiredEvent, now: 
             "UPDATE events SET status = 'dropped', decided_at = ?1 WHERE id = ?2",
             (now.to_string(), ev.event_id),
         );
-        let _ = crate::log::record(&conn, Some(fired.user_id), "trigger_quiet", &format!("event {}: the day's AI sessions are spent", ev.event_id));
+        let _ = crate::log::record(&conn, Some(fired.user_id), "trigger_quiet", &format!("event {}: {why}", ev.event_id));
         return;
     }
     let text = if is_close_day(&ev.prompt) {
@@ -1651,7 +1685,7 @@ fn fire_capped(state: &crate::AppState, fired: &crate::runner::FiredEvent, now: 
     } else {
         crate::text::capped_reminder(lang, &ev.prompt)
     };
-    let landed = record_said(&conn, fired, lang, ev.conversation_id, &text, now).ok();
+    let landed = record_said(&conn, fired, lang, &text, now, false).ok();
     let _ = close(&conn, ev.event_id, "done", now);
     let _ = crate::log::record(&conn, Some(fired.user_id), "trigger_said", &format!("event {}: {text}", ev.event_id));
     drop(conn);
@@ -1702,6 +1736,83 @@ mod tests {
 
     fn check_at<'a>(tmp: &'a tempfile::TempDir, uid: i64, when: &'a str) -> Lay<'a> {
         Lay { session_check: true, ..lay_at(tmp, uid, when) }
+    }
+
+    #[test]
+    fn without_a_key_a_wake_up_settles_with_no_session_and_the_skip_is_logged_once_a_day() {
+        let (conn, tmp, uid) = env();
+        let ids: Vec<i64> = ["09:05", "09:10"].iter().map(|t| lay(&conn, &Lay { system: true, ..lay_at(&tmp, uid, t) }).unwrap().event_id).collect();
+        conn.execute("UPDATE events SET origin = 'chores', status = 'fired'", []).unwrap();
+        let llm = std::sync::Arc::new(crate::providers::mock::MockLLM::scripted(vec![]));
+        let mut state = crate::AppState::new(conn, tmp.path().into(), tmp.path().into()).with_providers(llm.clone(), None);
+        state.own_keys = std::sync::Arc::new(crate::own_keys::OwnKeys::ephemeral());
+        for id in &ids {
+            let fired = crate::runner::FiredEvent { event_id: *id, user_id: uid, username: "aki".into(), kind: KIND.into(), ..Default::default() };
+            fire(&state, &fired);
+        }
+        assert!(llm.seen().is_empty());
+        let conn = state.db();
+        let dropped: i64 = conn.query_row("SELECT COUNT(*) FROM events WHERE status = 'dropped'", [], |r| r.get(0)).unwrap();
+        assert_eq!(dropped, 2);
+        let skips: i64 = conn.query_row("SELECT COUNT(*) FROM event_log WHERE kind = 'no_llm_key'", [], |r| r.get(0)).unwrap();
+        assert_eq!(skips, 1);
+    }
+
+    #[test]
+    fn words_land_where_the_wake_up_was_moved_while_its_session_ran() {
+        let (conn, tmp, uid) = env();
+        let first = crate::talk::checkin_thread(&conn, uid, "2026-09-17", "09:00", "How did you sleep?", Lang::En, at("2026-09-17T09:00:00Z")).unwrap();
+        let laid = lay(&conn, &Lay { conversation_id: Some(first), ..lay_at(&tmp, uid, "09:30") }).unwrap();
+        let fired = crate::runner::FiredEvent {
+            event_id: laid.event_id,
+            user_id: uid,
+            username: "aki".into(),
+            date: "2026-09-17".into(),
+            wall_time: "09:30".into(),
+            ..Default::default()
+        };
+        let moved = crate::talk::checkin_thread(&conn, uid, "2026-09-17", "09:20", "Started yet?", Lang::En, at("2026-09-17T09:20:00Z")).unwrap();
+        assert!(!crate::talk::owned(&conn, uid, first).unwrap());
+        let landed = record_said(&conn, &fired, Lang::En, "How did the essay go?", at("2026-09-17T09:30:00Z"), false).unwrap();
+        assert_ne!(landed, first);
+        let said: String = conn
+            .query_row("SELECT content FROM talk_messages WHERE conversation_id = ?1 ORDER BY id DESC LIMIT 1", [landed], |r| r.get(0))
+            .unwrap();
+        assert_eq!(said, "How did the essay go?");
+        assert!(landed == moved || !crate::talk::owned(&conn, uid, moved).unwrap());
+    }
+
+    #[test]
+    fn a_tidy_up_after_nothing_new_settles_without_a_session() {
+        let (conn, tmp, uid) = env();
+        for (rel, text) in [("defaults/prompts/persona.md", "persona"), ("defaults/prompts/trigger.md", "say one thing or stay_quiet")] {
+            let p = tmp.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        }
+        let ids: Vec<i64> = ["09:05", "09:10", "09:15"].iter().map(|t| lay(&conn, &Lay { system: true, ..lay_at(&tmp, uid, t) }).unwrap().event_id).collect();
+        conn.execute("UPDATE events SET origin = 'chores'", []).unwrap();
+        conn.execute("UPDATE events SET status = 'done', decided_at = '2026-09-17T08:00:00Z' WHERE id = ?1", [ids[0]]).unwrap();
+        conn.execute("UPDATE events SET status = 'fired' WHERE id != ?1", [ids[0]]).unwrap();
+        crate::presence::touch(&conn, uid, at("2026-09-17T07:00:00Z")).unwrap();
+        let quiet = crate::providers::ChatResponse {
+            text: String::new(),
+            tool_calls: vec![crate::providers::ToolCall { id: "q".into(), name: "stay_quiet".into(), args: r#"{"reason":"tidy"}"#.into() }],
+        };
+        let llm = std::sync::Arc::new(crate::providers::mock::MockLLM::scripted(vec![quiet]));
+        let state = crate::AppState::new(conn, tmp.path().into(), tmp.path().into()).with_providers(llm.clone(), None);
+        let fire_one = |id: i64| fire(&state, &crate::runner::FiredEvent { event_id: id, user_id: uid, username: "aki".into(), kind: KIND.into(), ..Default::default() });
+
+        fire_one(ids[1]);
+        assert!(llm.seen().is_empty(), "nothing happened since the last tidy-up");
+        let status: String = state.db().query_row("SELECT status FROM events WHERE id = ?1", [ids[1]], |r| r.get(0)).unwrap();
+        assert_eq!(status, "dropped");
+        let said: String = state.db().query_row("SELECT detail FROM event_log WHERE kind = 'trigger_quiet'", [], |r| r.get(0)).unwrap();
+        assert!(said.contains("nothing changed since the last tidy-up"), "{said}");
+
+        state.db().execute("UPDATE users SET last_active_at = '2026-09-17T08:30:00Z'", []).unwrap();
+        fire_one(ids[2]);
+        assert_eq!(llm.seen().len(), 1, "the user moved, so the tidy-up looks");
     }
 
     #[test]

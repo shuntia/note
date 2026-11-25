@@ -251,17 +251,21 @@ pub trait EmbeddingsProvider: Send + Sync {
 /// `timeout` also caps a drip-feeding endpoint that keeps resetting the
 /// per-operation ones. Chat calls hold no locks.
 pub(crate) fn http_agent(timeout_secs: u64) -> ureq::Agent {
+    http_agent_for(timeout_secs, false)
+}
+
+/// `http_agent`, held to `net::guarded`'s rules when `public`.
+pub(crate) fn http_agent_for(timeout_secs: u64, public: bool) -> ureq::Agent {
     let cap = Some(std::time::Duration::from_secs(timeout_secs));
-    ureq::Agent::config_builder()
+    let builder = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_connect(Some(std::time::Duration::from_secs(10)))
         .timeout_send_request(cap)
         .timeout_send_body(cap)
         .timeout_recv_response(cap)
         .timeout_recv_body(cap)
-        .timeout_global(cap)
-        .build()
-        .into()
+        .timeout_global(cap);
+    if public { crate::net::guarded(builder) } else { builder.build().into() }
 }
 
 /// Waits before the second and third attempt of a chat call.
@@ -274,17 +278,29 @@ pub struct ChatAgents {
     background_timeout_secs: u64,
     stream_agents: std::sync::Mutex<std::collections::HashMap<std::time::Duration, ureq::Agent>>,
     retry_delays_ms: &'static [u64],
+    /// Calls a URL a user typed: see `net::guarded`.
+    public: bool,
 }
 
 impl ChatAgents {
     pub fn new(timeout_secs: u64, background_timeout_secs: u64) -> Self {
+        Self::built(timeout_secs, background_timeout_secs, false)
+    }
+
+    /// `new`, for an endpoint a user typed.
+    pub fn public(timeout_secs: u64, background_timeout_secs: u64) -> Self {
+        Self::built(timeout_secs, background_timeout_secs, true)
+    }
+
+    fn built(timeout_secs: u64, background_timeout_secs: u64, public: bool) -> Self {
         let background_timeout_secs = background_timeout_secs.max(timeout_secs);
         Self {
-            interactive: http_agent(timeout_secs),
-            background: http_agent(background_timeout_secs),
+            interactive: http_agent_for(timeout_secs, public),
+            background: http_agent_for(background_timeout_secs, public),
             background_timeout_secs,
             stream_agents: std::sync::Mutex::default(),
             retry_delays_ms: &RETRY_DELAYS_MS,
+            public,
         }
     }
 
@@ -299,15 +315,14 @@ impl ChatAgents {
 
     fn new_stream_agent(&self, first_token: std::time::Duration) -> ureq::Agent {
         let cap = Some(std::time::Duration::from_secs(self.background_timeout_secs));
-        ureq::Agent::config_builder()
+        let builder = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .timeout_connect(Some(std::time::Duration::from_secs(5)))
             .timeout_send_request(cap)
             .timeout_send_body(cap)
             .timeout_recv_response(Some(first_token))
-            .timeout_recv_body(cap)
-            .build()
-            .into()
+            .timeout_recv_body(cap);
+        if self.public { crate::net::guarded(builder) } else { builder.build().into() }
     }
 
     pub(crate) fn get_json(&self, url: &str) -> Result<serde_json::Value> {
@@ -349,6 +364,9 @@ impl ChatAgents {
                 }
                 Err(e) => (crate::failure::transport(&e), e.to_string()),
             };
+            if reason == crate::failure::Reason::Internal {
+                return Err(ProviderError::new(reason, format!("{what} request refused: {failure}")).into());
+            }
             let Some(delay) = self.retry_delays_ms.get(attempt) else {
                 let message = format!("{what} request failed after {} attempts: {failure}", attempt + 1);
                 return Err(ProviderError::new(reason, message).into());
@@ -447,13 +465,19 @@ pub fn build_voice(
     };
     let model = voice.model.clone().or_else(|| main.model()).unwrap_or_else(|| p.model.clone());
     let key = read_key(p, false)?;
-    let mut llm = openai::OpenAILLM::new(
-        &p.base_url,
-        &model,
-        &key,
-        ChatAgents::new(p.timeout_secs, p.background_timeout_secs),
-        None,
-    );
+    let agents = ChatAgents::new(p.timeout_secs, p.background_timeout_secs);
+    Ok(Arc::new(voice_llm(&p.base_url, &model, &key, agents, voice)?))
+}
+
+/// An OpenAI-compatible reply model for calls, on `[voice]`'s reasoning and provider sort.
+pub(crate) fn voice_llm(
+    base_url: &str,
+    model: &str,
+    key: &str,
+    agents: ChatAgents,
+    voice: &crate::config::VoiceConfig,
+) -> Result<openai::OpenAILLM> {
+    let mut llm = openai::OpenAILLM::new(base_url, model, key, agents, None);
     llm = match voice.reasoning.as_str() {
         "off" => llm.without_reasoning(),
         e @ ("low" | "medium" | "high") => llm.with_effort(e),
@@ -462,7 +486,7 @@ pub fn build_voice(
     if let Some(sort) = &voice.provider_sort {
         llm = llm.with_extra(serde_json::json!({"provider": {"sort": sort}}));
     }
-    Ok(Arc::new(llm))
+    Ok(llm)
 }
 
 /// The configured reasoning effort, or `None` for the default "none".
@@ -478,7 +502,7 @@ fn reasoning_effort(p: &crate::config::ProviderConfig) -> Result<Option<&str>> {
 /// unreadable or blank is always an error), then `api_key_env`. `required`
 /// distinguishes Anthropic (key mandatory) from OpenAI-compatible local
 /// endpoints that accept no key.
-fn read_key(p: &crate::config::ProviderConfig, required: bool) -> Result<String> {
+pub(crate) fn read_key(p: &crate::config::ProviderConfig, required: bool) -> Result<String> {
     if !p.api_key_file.as_os_str().is_empty() {
         let key = std::fs::read_to_string(&p.api_key_file)
             .with_context(|| format!("reading api key file {}", p.api_key_file.display()))?

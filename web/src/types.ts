@@ -3,7 +3,8 @@ import type { WritableSetting } from './api'
 import type { AgentFrame } from './ws'
 
 // `onboarding` holds from joining by invite until the first-run flow is finished.
-export type Me = { username: string; admin: boolean; onboarding?: boolean; voice?: boolean }
+// `needs_key` holds while the user has no AI key of their own saved.
+export type Me = { username: string; admin: boolean; onboarding?: boolean; voice?: boolean; needs_key?: boolean }
 
 export type JoinInfo = { username: string | null; expires_at: string }
 
@@ -144,6 +145,12 @@ export type Goal = {
   // Its finished top-level tasks, to weigh against the open ones on screen.
   finished: { id: number; title: string; category: string; duration_min: number | null }[]
 }
+
+export type KeyKind = 'openrouter' | 'openai'
+
+// The user's own AI key as the server shows it: never the key, only its last four.
+// `base_url` is an OpenAI-compatible key's endpoint.
+export type LlmKey = { kind: KeyKind; model: string; key_hint: string; base_url: string | null }
 
 export type Token = {
   id: number
@@ -431,6 +438,7 @@ export type TraceOutcome = 'ok' | 'max_turns' | 'stopped' | 'error'
 // Why the assistant could not finish a request; the server's `failure::Reason`.
 export type FailureReason =
   | 'model_unavailable'
+  | 'no_key'
   | 'auth_invalid'
   | 'out_of_credits'
   | 'rate_limited'
