@@ -84,7 +84,8 @@ fn internal(e: impl std::fmt::Display) -> Refused {
     Refused::Internal(e.to_string())
 }
 
-/// Carries out a pressed button's `data` for the user it was given to.
+/// Carries out a pressed button's `data` for the user it was given to, and
+/// counts the press as the user's doing.
 pub fn perform(
     conn: &Connection,
     config_dir: &std::path::Path,
@@ -95,7 +96,7 @@ pub fn perform(
 ) -> Result<Done, Refused> {
     let parts: Vec<&str> = data.split(':').collect();
     let id = |s: &str| s.parse::<i64>().map_err(|_| Refused::Unknown);
-    match parts.as_slice() {
+    let done = match parts.as_slice() {
         ["ev", "done", ev] => settle(conn, user_id, id(ev)?, "done").map(|()| Done::Done),
         ["ev", "drop", ev] => settle(conn, user_id, id(ev)?, "dropped").map(|()| Done::Dropped),
         ["ev", "snooze", ev, min] => {
@@ -112,7 +113,11 @@ pub fn perform(
         }
         ["block", "start", ev] => start_block(conn, config_dir, user_id, username, id(ev)?, now).map(|()| Done::Started),
         _ => Err(Refused::Unknown),
+    };
+    if done.is_ok() {
+        let _ = crate::activity::touch_external(conn, user_id, now);
     }
+    done
 }
 
 fn settle(conn: &Connection, user_id: i64, event_id: i64, status: &str) -> Result<(), Refused> {
@@ -291,6 +296,8 @@ mod tests {
         let theirs = event(&conn, other, "2026-10-18", "checkin", "09:00", "fired");
         assert_eq!(perform(&conn, tmp.path(), uid, "aitest", &format!("ev:done:{mine}"), now), Ok(Done::Done));
         assert_eq!(row(&conn, mine).0, "done");
+        assert_eq!(crate::activity::last_user_activity(&conn, uid).unwrap(), Some(now), "a press is the user's doing");
+        assert_eq!(crate::activity::last_user_activity(&conn, other).unwrap(), None);
         assert_eq!(
             perform(&conn, tmp.path(), uid, "aitest", &format!("ev:drop:{theirs}"), now),
             Err(Refused::NotFound)

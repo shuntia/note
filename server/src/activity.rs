@@ -4,7 +4,8 @@
 
 use rusqlite::{Connection, OptionalExtension};
 
-/// Records a write made through one of the user's API tokens.
+/// Records a write the user made outside the app: through one of their API
+/// tokens, or a button on a notification or chat message.
 pub fn touch_external(conn: &Connection, user_id: i64, now: jiff::Timestamp) -> rusqlite::Result<()> {
     conn.prepare_cached("UPDATE users SET last_external_at = ?1 WHERE id = ?2")?
         .execute((crate::presence::stamp(now), user_id))
@@ -12,7 +13,7 @@ pub fn touch_external(conn: &Connection, user_id: i64, now: jiff::Timestamp) -> 
 }
 
 /// The newest of the user's presence or writes in the app, their writes
-/// through an API token, and their messages in any thread, calls and chat
+/// from outside it, and their messages in any thread, calls and chat
 /// channels included.
 pub fn last_user_activity(conn: &Connection, user_id: i64) -> rusqlite::Result<Option<jiff::Timestamp>> {
     let stamps: Option<(Option<String>, Option<String>)> = conn
