@@ -149,7 +149,8 @@ export type Goal = {
 export type KeyKind = 'openrouter' | 'openai'
 
 // The user's own AI key as the server shows it: never the key, only its last four.
-export type LlmKey = { kind: KeyKind; model: string; key_hint: string }
+// `base_url` is an OpenAI-compatible key's endpoint.
+export type LlmKey = { kind: KeyKind; model: string; key_hint: string; base_url: string | null }
 
 export type Token = {
   id: number

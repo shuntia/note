@@ -519,6 +519,8 @@ const MIGRATIONS: &[&str] = &[
     CHORES,
     LLM_KEYS,
     "ALTER TABLE users ADD COLUMN last_external_at TEXT;",
+    "ALTER TABLE llm_keys ADD COLUMN base_url TEXT;
+     ALTER TABLE llm_keys ADD COLUMN seeded INTEGER NOT NULL DEFAULT 0 CHECK (seeded IN (0, 1));",
 ];
 
 /// v71: each user's own LLM key, sealed with the server's key file; `models`

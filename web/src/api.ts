@@ -285,8 +285,8 @@ export const api = {
       quiet401: true,
     }),
   llmKey: () => request<LlmKey | null>('/api/settings/llm-key'),
-  saveLlmKey: (kind: KeyKind, key: string, model: string) =>
-    request<LlmKey>('/api/settings/llm-key', { method: 'PUT', body: JSON.stringify({ kind, key, model }) }),
+  saveLlmKey: (kind: KeyKind, key: string, model: string, base_url: string) =>
+    request<LlmKey>('/api/settings/llm-key', { method: 'PUT', body: JSON.stringify({ kind, key, model, base_url }) }),
   removeLlmKey: () => request<void>('/api/settings/llm-key', { method: 'DELETE' }),
   tokens: () => request<Token[]>('/api/tokens'),
   createToken: (name: string) =>

@@ -19,6 +19,7 @@ pub const OPENROUTER_BASE: &str = "https://openrouter.ai/api/v1";
 pub const OPENAI_BASE: &str = "https://api.openai.com/v1";
 pub const MAX_KEY_LEN: usize = 512;
 pub const MAX_MODEL_LEN: usize = 200;
+pub const MAX_BASE_LEN: usize = 300;
 /// How many of an `OpenAI` key's models are offered besides the one it names.
 const OPENAI_MODELS: usize = 11;
 const VERIFY_TIMEOUT_SECS: u64 = 15;
@@ -43,12 +44,23 @@ impl KeyKind {
     }
 }
 
-/// What the API shows of a saved key.
+/// What the API shows of a saved key; `base_url` is an `OpenAI`-compatible key's endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct KeyInfo {
     pub kind: KeyKind,
     pub model: String,
     pub key_hint: String,
+    pub base_url: Option<String>,
+}
+
+/// A key to save. `base_url` is an `OpenAI`-compatible key's endpoint, `None`
+/// for `OPENAI_BASE`; an `OpenRouter` key has none.
+pub struct NewKey<'a> {
+    pub kind: KeyKind,
+    pub key: &'a str,
+    pub model: &'a str,
+    pub base_url: Option<&'a str>,
+    pub models: &'a [String],
 }
 
 /// Why a key was not saved.
@@ -56,6 +68,7 @@ pub struct KeyInfo {
 pub enum Refusal {
     Key,
     Model,
+    Endpoint(&'static str),
     Unreachable(String),
 }
 
@@ -65,8 +78,15 @@ pub struct Own {
     pub voice: Arc<dyn LLMProvider>,
 }
 
-/// kind, model, models, nonce, sealed key
-type SealedRow = (String, String, String, Vec<u8>, Vec<u8>);
+struct SealedRow {
+    kind: String,
+    model: String,
+    models: String,
+    nonce: Vec<u8>,
+    sealed: Vec<u8>,
+    base_url: Option<String>,
+    seeded: bool,
+}
 
 enum Secret {
     File(PathBuf),
@@ -83,6 +103,8 @@ pub struct OwnKeys {
     /// A user with no key runs on the server's provider; only a state built
     /// without `with_own_keys`, as the tests build it, allows this.
     server_stands_in: bool,
+    /// Off only in unit tests, whose providers answer on loopback.
+    guard: bool,
     built: Mutex<HashMap<i64, Option<Arc<Own>>>>,
 }
 
@@ -117,8 +139,15 @@ impl OwnKeys {
             timeouts: (crate::config::DEFAULT_PROVIDER_TIMEOUT_SECS, crate::config::DEFAULT_BACKGROUND_TIMEOUT_SECS),
             voice: None,
             server_stands_in: false,
+            guard: true,
             built: Mutex::default(),
         }
+    }
+
+    #[cfg(test)]
+    fn unguarded(mut self) -> Self {
+        self.guard = false;
+        self
     }
 
     #[must_use]
@@ -128,11 +157,19 @@ impl OwnKeys {
         self
     }
 
-    fn base(&self, kind: KeyKind) -> &str {
-        match kind {
-            KeyKind::Openrouter => &self.openrouter_base,
-            KeyKind::Openai => &self.openai_base,
+    /// Where a key of `kind` is sent: `base_url` for an `OpenAI`-compatible one that names it.
+    fn endpoint(&self, kind: KeyKind, base_url: Option<&str>) -> String {
+        match (kind, base_url) {
+            (KeyKind::Openrouter, _) => self.openrouter_base.clone(),
+            (KeyKind::Openai, Some(base)) => base.trim_end_matches('/').to_string(),
+            (KeyKind::Openai, None) => self.openai_base.clone(),
         }
+    }
+
+    /// Whether calls to `base` skip `net::guarded`: the server's own bases, and
+    /// what the admin configured, which only seeding writes.
+    fn trusted(&self, base: &str, seeded: bool) -> bool {
+        !self.guard || seeded || base == self.openrouter_base || base == self.openai_base
     }
 
     fn secret(&self) -> Result<[u8; 32]> {
@@ -148,25 +185,47 @@ impl OwnKeys {
         Ok(key)
     }
 
-    pub fn info(conn: &Connection, user_id: i64) -> Result<Option<KeyInfo>> {
-        let row: Option<(String, String, String)> = conn
-            .query_row("SELECT kind, model, hint FROM llm_keys WHERE user_id = ?1", [user_id], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+    pub fn info(&self, conn: &Connection, user_id: i64) -> Result<Option<KeyInfo>> {
+        let row: Option<(String, String, String, Option<String>)> = conn
+            .query_row("SELECT kind, model, hint, base_url FROM llm_keys WHERE user_id = ?1", [user_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
             })
             .optional()?;
-        Ok(row.and_then(|(kind, model, key_hint)| Some(KeyInfo { kind: KeyKind::parse(&kind)?, model, key_hint })))
+        Ok(row.and_then(|(kind, model, key_hint, base_url)| {
+            let kind = KeyKind::parse(&kind)?;
+            let base_url = (kind == KeyKind::Openai).then(|| self.endpoint(kind, base_url.as_deref()));
+            Some(KeyInfo { kind, model, key_hint, base_url })
+        }))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn store(&self, conn: &Connection, user_id: i64, kind: KeyKind, key: &str, model: &str, models: &[String], now: jiff::Timestamp) -> Result<()> {
-        let (nonce, sealed) = seal(&self.secret()?, user_id, key)?;
-        let hint: String = key.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    /// Saves a key the user gave; the calls it leads to are held to `net::guarded`
+    /// unless they go to one of the server's own bases.
+    pub fn store(&self, conn: &Connection, user_id: i64, new: &NewKey, now: jiff::Timestamp) -> Result<()> {
+        self.write(conn, user_id, new, false, now)
+    }
+
+    fn write(&self, conn: &Connection, user_id: i64, new: &NewKey, seeded: bool, now: jiff::Timestamp) -> Result<()> {
+        let (nonce, sealed) = seal(&self.secret()?, user_id, new.key)?;
+        let hint: String = new.key.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+        let base_url = new.base_url.filter(|_| new.kind == KeyKind::Openai).map(|b| b.trim_end_matches('/'));
         conn.execute(
-            "INSERT INTO llm_keys (user_id, kind, model, models, nonce, sealed, hint, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO llm_keys (user_id, kind, model, models, nonce, sealed, hint, created_at, base_url, seeded)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT (user_id) DO UPDATE SET kind = excluded.kind, model = excluded.model, models = excluded.models,
-                 nonce = excluded.nonce, sealed = excluded.sealed, hint = excluded.hint, created_at = excluded.created_at",
-            rusqlite::params![user_id, kind.as_str(), model, serde_json::to_string(models)?, nonce, sealed, hint, now.to_string()],
+                 nonce = excluded.nonce, sealed = excluded.sealed, hint = excluded.hint, created_at = excluded.created_at,
+                 base_url = excluded.base_url, seeded = excluded.seeded",
+            rusqlite::params![
+                user_id,
+                new.kind.as_str(),
+                new.model,
+                serde_json::to_string(new.models)?,
+                nonce,
+                sealed,
+                hint,
+                now.to_string(),
+                base_url,
+                seeded
+            ],
         )?;
         self.forget(user_id);
         Ok(())
@@ -227,16 +286,28 @@ impl OwnKeys {
 
     fn build(&self, conn: &Connection, user_id: i64, server: &dyn LLMProvider) -> Option<Own> {
         let row: Option<SealedRow> = conn
-            .query_row("SELECT kind, model, models, nonce, sealed FROM llm_keys WHERE user_id = ?1", [user_id], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-            })
+            .query_row(
+                "SELECT kind, model, models, nonce, sealed, base_url, seeded FROM llm_keys WHERE user_id = ?1",
+                [user_id],
+                |r| {
+                    Ok(SealedRow {
+                        kind: r.get(0)?,
+                        model: r.get(1)?,
+                        models: r.get(2)?,
+                        nonce: r.get(3)?,
+                        sealed: r.get(4)?,
+                        base_url: r.get(5)?,
+                        seeded: r.get(6)?,
+                    })
+                },
+            )
             .optional()
             .ok()
             .flatten();
-        let (kind, model, models, nonce, sealed) = row?;
-        let opened = KeyKind::parse(&kind)
+        let row = row?;
+        let opened = KeyKind::parse(&row.kind)
             .context("unknown key kind")
-            .and_then(|kind| Ok((kind, open(&self.secret()?, user_id, &nonce, &sealed)?)));
+            .and_then(|kind| Ok((kind, open(&self.secret()?, user_id, &row.nonce, &row.sealed)?)));
         let (kind, key) = match opened {
             Ok(opened) => opened,
             Err(e) => {
@@ -245,13 +316,17 @@ impl OwnKeys {
                 return Some(Own { llm: broken.clone(), voice: broken });
             }
         };
-        let models: Vec<String> = serde_json::from_str(&models).unwrap_or_default();
-        Some(self.providers(kind, &key, &model, &models, server))
+        let models: Vec<String> = serde_json::from_str(&row.models).unwrap_or_default();
+        let base = self.endpoint(kind, row.base_url.as_deref());
+        let public = !self.trusted(&base, row.seeded);
+        Some(self.providers(kind, &key, &row.model, &models, &base, public, server))
     }
 
-    fn providers(&self, kind: KeyKind, key: &str, model: &str, models: &[String], server: &dyn LLMProvider) -> Own {
-        let agents = || ChatAgents::new(self.timeouts.0, self.timeouts.1);
-        let base = self.base(kind);
+    #[allow(clippy::too_many_arguments)]
+    fn providers(&self, kind: KeyKind, key: &str, model: &str, models: &[String], base: &str, public: bool, server: &dyn LLMProvider) -> Own {
+        let agents = || {
+            if public { ChatAgents::public(self.timeouts.0, self.timeouts.1) } else { ChatAgents::new(self.timeouts.0, self.timeouts.1) }
+        };
         let built = OpenAILLM::new(base, model, key, agents(), None);
         let llm = match kind {
             KeyKind::Openrouter => match server.effort() {
@@ -263,7 +338,8 @@ impl OwnKeys {
             KeyKind::Openai => {
                 let offered: Vec<crate::config::ModelInfo> =
                     models.iter().map(|id| crate::config::ModelInfo { id: id.clone(), ..Default::default() }).collect();
-                built.with_openai_shape().with_models(&offered)
+                let built = if openai_proper(base) { built.with_openai_shape() } else { built };
+                built.with_models(&offered)
             }
         };
         let llm = Arc::new(llm);
@@ -284,11 +360,16 @@ impl OwnKeys {
         Own { llm: Arc::new(OnOwnKey(llm)), voice }
     }
 
-    /// Checks `key` with the provider, cheaply and without spending, and that
-    /// it offers `model`; returns what an `OpenAI` key may pick from.
-    pub fn verify(&self, kind: KeyKind, key: &str, model: &str) -> Result<Vec<String>, Refusal> {
-        let agent = crate::providers::http_agent(VERIFY_TIMEOUT_SECS);
-        let base = self.base(kind);
+    /// Checks `key` with the provider at `base_url` (see `NewKey`), cheaply and
+    /// without spending, and that it offers `model`; returns what an
+    /// `OpenAI`-compatible key may pick from. Blocking on DNS.
+    pub fn verify(&self, kind: KeyKind, key: &str, model: &str, base_url: Option<&str>) -> Result<Vec<String>, Refusal> {
+        let base = self.endpoint(kind, base_url);
+        let public = !self.trusted(&base, false);
+        if public {
+            crate::net::public_url_ok(&base).map_err(Refusal::Endpoint)?;
+        }
+        let agent = crate::providers::http_agent_for(VERIFY_TIMEOUT_SECS, public);
         let get = |path: &str| -> Result<(u16, serde_json::Value), Refusal> {
             let url = format!("{base}{path}");
             let mut resp = agent
@@ -337,13 +418,15 @@ impl OwnKeys {
             if !key.is_empty() {
                 let kind = if p.base_url.contains("openrouter.ai") { KeyKind::Openrouter } else { KeyKind::Openai };
                 let model = live_model.unwrap_or_else(|| p.model.clone());
+                let models = std::slice::from_ref(&model);
+                let new = NewKey { kind, key: &key, model: &model, base_url: Some(&p.base_url), models };
                 let users: Vec<i64> = conn
                     .prepare("SELECT id FROM users WHERE id NOT IN (SELECT user_id FROM llm_keys)")?
                     .query_map([], |r| r.get(0))?
                     .collect::<rusqlite::Result<_>>()?;
                 let tx = conn.unchecked_transaction()?;
                 for user_id in users {
-                    self.store(&tx, user_id, kind, &key, &model, std::slice::from_ref(&model), now)?;
+                    self.write(&tx, user_id, &new, true, now)?;
                     seeded += 1;
                 }
                 tx.commit()?;
@@ -352,6 +435,11 @@ impl OwnKeys {
         crate::db::set_server_setting(conn, SEEDED_SETTING, "1")?;
         Ok(seeded)
     }
+}
+
+/// Whether `base` is `OpenAI`'s own API, which takes its own request shape.
+fn openai_proper(base: &str) -> bool {
+    crate::net::host_of(base).as_deref() == Some("api.openai.com")
 }
 
 fn ids(catalogue: &serde_json::Value) -> Vec<String> {
@@ -526,7 +614,7 @@ mod tests {
         }
         let keys = OwnKeys::new(&dir, &crate::config::ProvidersConfig::default(), None);
         let conn = db();
-        keys.store(&crate::db_guard(&conn), 1, KeyKind::Openai, "sk-proj-1234", "gpt-5", &["gpt-5".into()], now()).unwrap();
+        keys.store(&crate::db_guard(&conn), 1, &NewKey { kind: KeyKind::Openai, key: "sk-proj-1234", model: "gpt-5", base_url: None, models: &["gpt-5".into()] }, now()).unwrap();
         let reread = OwnKeys::new(&dir, &crate::config::ProvidersConfig::default(), None);
         let server: Arc<dyn LLMProvider> = Arc::new(crate::providers::mock::NullLLM);
         assert_eq!(reread.llm(&conn, 1, &server).model().as_deref(), Some("gpt-5"));
@@ -537,7 +625,7 @@ mod tests {
         let keys = OwnKeys::ephemeral();
         let conn = db();
         let server: Arc<dyn LLMProvider> = Arc::new(crate::providers::mock::MockLLM::empty().offering(&["server/model", "other/model"]));
-        keys.store(&crate::db_guard(&conn), 1, KeyKind::Openrouter, "sk-or-1234", "mine/model", &[], now()).unwrap();
+        keys.store(&crate::db_guard(&conn), 1, &NewKey { kind: KeyKind::Openrouter, key: "sk-or-1234", model: "mine/model", base_url: None, models: &[] }, now()).unwrap();
         let own = keys.llm(&conn, 1, &server);
         assert_eq!(own.model().as_deref(), Some("mine/model"));
         assert_eq!(own.offered(), vec!["mine/model", "server/model", "other/model"]);
@@ -558,10 +646,10 @@ mod tests {
         let keys = OwnKeys::ephemeral();
         let conn = db();
         let conn = crate::db_guard(&conn);
-        assert_eq!(OwnKeys::info(&conn, 1).unwrap(), None);
-        keys.store(&conn, 1, KeyKind::Openai, "sk-proj-SECRET-9xyz", "gpt-5", &[], now()).unwrap();
-        let info = OwnKeys::info(&conn, 1).unwrap().unwrap();
-        assert_eq!(info, KeyInfo { kind: KeyKind::Openai, model: "gpt-5".into(), key_hint: "9xyz".into() });
+        assert_eq!(keys.info(&conn, 1).unwrap(), None);
+        keys.store(&conn, 1, &NewKey { kind: KeyKind::Openai, key: "sk-proj-SECRET-9xyz", model: "gpt-5", base_url: None, models: &[] }, now()).unwrap();
+        let info = keys.info(&conn, 1).unwrap().unwrap();
+        assert_eq!(info, KeyInfo { kind: KeyKind::Openai, model: "gpt-5".into(), key_hint: "9xyz".into(), base_url: Some(OPENAI_BASE.into()) });
         assert!(!serde_json::to_string(&info).unwrap().contains("SECRET"));
     }
 
@@ -569,13 +657,13 @@ mod tests {
     fn a_refused_key_is_not_taken() {
         let (base, rx) = crate::testhttp::serve(vec![("401 Unauthorized", r#"{"error":{"message":"No auth credentials found"}}"#)]);
         let keys = OwnKeys::ephemeral().with_bases(&base, &base);
-        assert_eq!(keys.verify(KeyKind::Openrouter, "sk-or-bad", "a/model"), Err(Refusal::Key));
+        assert_eq!(keys.verify(KeyKind::Openrouter, "sk-or-bad", "a/model", None), Err(Refusal::Key));
         let raw = rx.recv().unwrap();
         assert!(raw.starts_with("GET /key ") && raw.contains("Bearer sk-or-bad"), "{raw}");
 
         let (base, _rx) = crate::testhttp::serve(vec![("403 Forbidden", "{}")]);
         let keys = OwnKeys::ephemeral().with_bases(&base, &base);
-        assert_eq!(keys.verify(KeyKind::Openai, "sk-bad", "gpt-5"), Err(Refusal::Key));
+        assert_eq!(keys.verify(KeyKind::Openai, "sk-bad", "gpt-5", None), Err(Refusal::Key));
     }
 
     #[test]
@@ -585,14 +673,14 @@ mod tests {
             ("200 OK", r#"{"data":[{"id":"a/model"},{"id":"b/model"}]}"#),
         ]);
         let keys = OwnKeys::ephemeral().with_bases(&base, &base);
-        assert_eq!(keys.verify(KeyKind::Openrouter, "sk-or-good", "a/model"), Ok(vec!["a/model".to_string()]));
+        assert_eq!(keys.verify(KeyKind::Openrouter, "sk-or-good", "a/model", None), Ok(vec!["a/model".to_string()]));
 
         let (base, _rx) = crate::testhttp::serve(vec![
             ("200 OK", r#"{"data":{"label":"x"}}"#),
             ("200 OK", r#"{"data":[{"id":"a/model"}]}"#),
         ]);
         let keys = OwnKeys::ephemeral().with_bases(&base, &base);
-        assert_eq!(keys.verify(KeyKind::Openrouter, "sk-or-good", "gone/model"), Err(Refusal::Model));
+        assert_eq!(keys.verify(KeyKind::Openrouter, "sk-or-good", "gone/model", None), Err(Refusal::Model));
 
         let catalogue = r#"{"data":[
             {"id":"gpt-5","created":30},{"id":"gpt-5-mini","created":20},{"id":"gpt-4o-2024-08-06","created":10},
@@ -600,7 +688,7 @@ mod tests {
             {"id":"text-embedding-3-small","created":1}]}"#;
         let (base, _rx) = crate::testhttp::serve(vec![("200 OK", catalogue)]);
         let keys = OwnKeys::ephemeral().with_bases(&base, &base);
-        assert_eq!(keys.verify(KeyKind::Openai, "sk-good", "gpt-5-mini"), Ok(vec!["gpt-5-mini".into(), "gpt-5".into(), "o4-mini".into()]));
+        assert_eq!(keys.verify(KeyKind::Openai, "sk-good", "gpt-5-mini", None), Ok(vec!["gpt-5-mini".into(), "gpt-5".into(), "o4-mini".into()]));
     }
 
     #[test]
@@ -611,7 +699,7 @@ mod tests {
         )]);
         let keys = OwnKeys::ephemeral().with_bases(&base, &base);
         let conn = db();
-        keys.store(&crate::db_guard(&conn), 1, KeyKind::Openai, "sk-own", "gpt-5", &[], now()).unwrap();
+        keys.store(&crate::db_guard(&conn), 1, &NewKey { kind: KeyKind::Openai, key: "sk-own", model: "gpt-5", base_url: None, models: &[] }, now()).unwrap();
         let server: Arc<dyn LLMProvider> = Arc::new(crate::providers::mock::NullLLM);
         let llm = keys.llm(&conn, 1, &server);
         let _meter = crate::usage::Meter::open();
@@ -621,20 +709,98 @@ mod tests {
         assert_eq!((spent.calls, spent.byok, spent.prompt), (1, 1, 3));
     }
 
+    fn body_of(raw: &str) -> serde_json::Value {
+        serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap()
+    }
+
     #[test]
-    fn an_openai_key_sends_openai_fields() {
-        let (base, rx) = crate::testhttp::serve(vec![("200 OK", r#"{"choices":[{"message":{"content":"ok"}}]}"#)]);
-        let keys = OwnKeys::ephemeral().with_bases(&base, &base);
+    fn only_openais_own_api_gets_its_request_shape() {
+        assert!(openai_proper(OPENAI_BASE));
+        assert!(!openai_proper("https://llm.example.com/v1"));
+        assert!(!openai_proper("https://api.openai.com.example.com/v1"));
+        assert!(!openai_proper("http://api.openai.com/v1"));
+        let mut v = crate::providers::openai::body(
+            "gpt-5",
+            &ChatRequest { system: "", messages: &[], tools: &[], background: false, plain: false, must_call: None, model: None, effort: None },
+            Some("low"),
+        );
+        crate::providers::openai::reshape_for_openai(&mut v);
+        assert_eq!((v["reasoning_effort"].as_str(), v["max_completion_tokens"].as_u64()), (Some("low"), Some(16_384)));
+        assert!(v.get("reasoning").is_none() && v.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn an_openai_compatible_key_is_checked_and_spoken_to_at_its_own_endpoint() {
+        let (base, rx) = crate::testhttp::serve(vec![
+            ("200 OK", r#"{"data":[{"id":"local-model"}]}"#),
+            ("200 OK", r#"{"choices":[{"message":{"content":"ok"}}]}"#),
+        ]);
+        let keys = OwnKeys::ephemeral().unguarded();
+        let endpoint = format!("{base}/v1/");
+        assert_eq!(keys.verify(KeyKind::Openai, "sk-local", "local-model", Some(&endpoint)), Ok(vec!["local-model".to_string()]));
+        assert!(rx.recv().unwrap().starts_with("GET /v1/models "));
         let conn = db();
-        keys.store(&crate::db_guard(&conn), 1, KeyKind::Openai, "sk-own", "gpt-5", &[], now()).unwrap();
+        let new = NewKey { kind: KeyKind::Openai, key: "sk-local", model: "local-model", base_url: Some(&endpoint), models: &[] };
+        keys.store(&crate::db_guard(&conn), 1, &new, now()).unwrap();
+        assert_eq!(keys.info(&crate::db_guard(&conn), 1).unwrap().unwrap().base_url, Some(format!("{base}/v1")));
         let server: Arc<dyn LLMProvider> = Arc::new(crate::providers::mock::NullLLM);
         let req = ChatRequest { system: "", messages: &[], tools: &[], background: false, plain: false, must_call: None, model: None, effort: Some(Effort::Low) };
         keys.llm(&conn, 1, &server).chat(&req).unwrap();
         let raw = rx.recv().unwrap();
-        let body: serde_json::Value = serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
-        assert_eq!(body["reasoning_effort"], "low");
-        assert_eq!(body["max_completion_tokens"], 16_384);
-        assert!(body.get("reasoning").is_none() && body.get("max_tokens").is_none() && body.get("usage").is_none());
+        assert!(raw.starts_with("POST /v1/chat/completions "), "{raw}");
+        let body = body_of(&raw);
+        assert_eq!(body["max_tokens"], 16_384, "another endpoint keeps the generic shape");
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn a_typed_endpoint_must_be_public_https_on_save_and_when_called() {
+        let keys = OwnKeys::ephemeral();
+        for endpoint in ["http://llm.example.com/v1", "https://10.1.2.3/v1", "https://127.0.0.1:8443/v1", "https://[fd00::1]/v1", "https://100.64.0.9/v1"] {
+            assert!(matches!(keys.verify(KeyKind::Openai, "sk", "m", Some(endpoint)), Err(Refusal::Endpoint(_))), "{endpoint}");
+        }
+
+        let (base, rx) = crate::testhttp::serve(vec![("200 OK", r#"{"choices":[{"message":{"content":"ok"}}]}"#)]);
+        let port = base.rsplit(':').next().unwrap();
+        let conn = db();
+        let server: Arc<dyn LLMProvider> = Arc::new(crate::providers::mock::NullLLM);
+        let req = ChatRequest { system: "", messages: &[], tools: &[], background: false, plain: false, must_call: None, model: None, effort: None };
+        for (user, endpoint) in [(1, format!("https://127.0.0.1:{port}")), (2, base.clone())] {
+            let new = NewKey { kind: KeyKind::Openai, key: "sk", model: "m", base_url: Some(&endpoint), models: &[] };
+            keys.store(&crate::db_guard(&conn), user, &new, now()).unwrap();
+            assert!(keys.llm(&conn, user, &server).chat(&req).is_err(), "{endpoint}");
+        }
+        assert!(rx.try_recv().is_err(), "nothing reached the private address");
+    }
+
+    #[test]
+    fn only_seeding_exempts_the_servers_own_endpoint() {
+        let (base, rx) = crate::testhttp::serve(vec![("200 OK", r#"{"choices":[{"message":{"content":"seeded"}}]}"#)]);
+        let tmp = tempfile::tempdir().unwrap();
+        let key_file = tmp.path().join("server.key");
+        std::fs::write(&key_file, "sk-server\n").unwrap();
+        let cfg = crate::config::ProvidersConfig {
+            llm: Some(toml::from_str(&format!(
+                "kind = \"openai\"\nbase_url = \"{base}\"\nmodel = \"local\"\napi_key_file = \"{}\"",
+                key_file.display()
+            ))
+            .unwrap()),
+            ..Default::default()
+        };
+        let keys = OwnKeys::ephemeral();
+        let conn = db();
+        keys.seed_from_server(&crate::db_guard(&conn), &cfg, None, now()).unwrap();
+        let info = keys.info(&crate::db_guard(&conn), 1).unwrap().unwrap();
+        assert_eq!((info.kind, info.base_url.as_deref()), (KeyKind::Openai, Some(base.as_str())), "the server's base is kept as written");
+        let server: Arc<dyn LLMProvider> = Arc::new(crate::providers::mock::NullLLM);
+        let req = ChatRequest { system: "", messages: &[], tools: &[], background: false, plain: false, must_call: None, model: None, effort: None };
+        assert_eq!(keys.llm(&conn, 1, &server).chat(&req).unwrap().text, "seeded");
+        rx.recv().unwrap();
+
+        let new = NewKey { kind: KeyKind::Openai, key: "sk-mine", model: "local", base_url: Some(&base), models: &[] };
+        keys.store(&crate::db_guard(&conn), 1, &new, now()).unwrap();
+        assert!(keys.llm(&conn, 1, &server).chat(&req).is_err(), "the user's own save of that endpoint is held to the guard");
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
@@ -653,16 +819,16 @@ mod tests {
         let keys = OwnKeys::ephemeral();
         let db = db();
         let conn = crate::db_guard(&db);
-        keys.store(&conn, 2, KeyKind::Openai, "sk-mine-0000", "gpt-5", &[], now()).unwrap();
+        keys.store(&conn, 2, &NewKey { kind: KeyKind::Openai, key: "sk-mine-0000", model: "gpt-5", base_url: None, models: &[] }, now()).unwrap();
         assert_eq!(keys.seed_from_server(&conn, &cfg, Some("live/model".into()), now()).unwrap(), 1);
         assert_eq!(
-            OwnKeys::info(&conn, 1).unwrap().unwrap(),
-            KeyInfo { kind: KeyKind::Openrouter, model: "live/model".into(), key_hint: "7777".into() }
+            keys.info(&conn, 1).unwrap().unwrap(),
+            KeyInfo { kind: KeyKind::Openrouter, model: "live/model".into(), key_hint: "7777".into(), base_url: None }
         );
-        assert_eq!(OwnKeys::info(&conn, 2).unwrap().unwrap().key_hint, "0000", "a saved key stays");
+        assert_eq!(keys.info(&conn, 2).unwrap().unwrap().key_hint, "0000", "a saved key stays");
         conn.execute("DELETE FROM llm_keys WHERE user_id = 1", []).unwrap();
         assert_eq!(keys.seed_from_server(&conn, &cfg, None, now()).unwrap(), 0, "it runs once");
-        assert_eq!(OwnKeys::info(&conn, 1).unwrap(), None);
+        assert_eq!(keys.info(&conn, 1).unwrap(), None);
     }
 
     #[test]

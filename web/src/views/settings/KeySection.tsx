@@ -14,11 +14,15 @@ const MODEL_HINT: Record<KeyKind, string> = {
   openai: 'gpt-5-mini',
 }
 
+const OPENAI_BASE = 'https://api.openai.com/v1'
+
 export const keyHint = (k: LlmKey) => `•••• ${k.key_hint}`
 
 function refusal(err: unknown): string {
   if (!(err instanceof ApiError)) return t('key.saveFailed')
-  if (err.status === 422) return err.message.startsWith('model') ? t('key.modelRefused') : t('key.refused')
+  if (err.status === 422 && err.message.startsWith('model')) return t('key.modelRefused')
+  if (err.status === 422 && err.message.startsWith('base_url')) return t('key.endpointRefused')
+  if (err.status === 422) return t('key.refused')
   if (err.status === 502) return t('key.unreachable')
   return t('key.saveFailed')
 }
@@ -39,6 +43,7 @@ export function KeyForm({
   const [kind, setKind] = useState<KeyKind>(initial?.kind ?? 'openrouter')
   const [key, setKey] = useState('')
   const [model, setModel] = useState(initial?.model ?? '')
+  const [base, setBase] = useState(initial?.base_url && initial.base_url !== OPENAI_BASE ? initial.base_url : '')
   const [busy, setBusy] = useState(false)
 
   const ready = !busy && key.trim() !== '' && model.trim() !== ''
@@ -48,7 +53,7 @@ export function KeyForm({
     if (!ready) return
     setBusy(true)
     try {
-      const saved = await api.saveLlmKey(kind, key.trim(), model.trim())
+      const saved = await api.saveLlmKey(kind, key.trim(), model.trim(), kind === 'openai' ? base.trim() : '')
       setKey('')
       onSaved(saved)
     } catch (err) {
@@ -67,6 +72,18 @@ export function KeyForm({
           </button>
         ))}
       </div>
+      {kind === 'openai' && (
+        <input
+          type="url"
+          aria-label={t('key.endpoint')}
+          placeholder={OPENAI_BASE}
+          autoComplete="off"
+          spellCheck={false}
+          maxLength={300}
+          value={base}
+          onChange={(e) => setBase(e.target.value)}
+        />
+      )}
       <input
         type="password"
         aria-label={t('key.key')}

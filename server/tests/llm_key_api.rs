@@ -66,7 +66,7 @@ async fn a_saved_key_is_shown_by_its_last_four_and_never_given_back() {
     let (status, body) = send(&app, Method::PUT, "/api/settings/llm-key", &cookie, Some(put)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(fake.took().contains("Bearer sk-or-v1-TOPSECRET-wxyz"), "the key is checked with the provider");
-    assert_eq!(json(&body), serde_json::json!({"kind": "openrouter", "model": "mine/model", "key_hint": "wxyz"}));
+    assert_eq!(json(&body), serde_json::json!({"kind": "openrouter", "model": "mine/model", "key_hint": "wxyz", "base_url": null}));
 
     for path in ["/api/settings/llm-key", "/api/settings", "/api/me", "/api/models"] {
         let (_, body) = send(&app, Method::GET, path, &cookie, None).await;
@@ -91,6 +91,22 @@ async fn a_key_the_provider_refuses_is_not_saved() {
     assert_eq!(json(&send(&app, Method::GET, "/api/settings/llm-key", &cookie, None).await.1), serde_json::Value::Null);
     let (status, _) = send(&app, Method::PUT, "/api/settings/llm-key", &cookie, Some(r#"{"kind":"anthropic","key":"k","model":"m"}"#)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_typed_endpoint_must_be_public_https_and_the_server_exemption_cannot_be_claimed() {
+    let (app, cookie, state, _cfg) = strict(server_llm(), "https://openrouter.ai/api/v1").await;
+    for endpoint in ["http://llm.example.com/v1", "https://192.168.1.10/v1", "https://localhost/v1"] {
+        let put = format!(r#"{{"kind":"openai","key":"sk","model":"m","base_url":"{endpoint}"}}"#);
+        let (status, body) = send(&app, Method::PUT, "/api/settings/llm-key", &cookie, Some(&put)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{endpoint}: {body}");
+        assert!(json(&body)["error"].as_str().unwrap().starts_with("base_url "), "{body}");
+    }
+    let forged = r#"{"kind":"openai","key":"sk","model":"m","base_url":"http://127.0.0.1:1","seeded":true}"#;
+    let (status, _) = send(&app, Method::PUT, "/api/settings/llm-key", &cookie, Some(forged)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let rows: i64 = state.db().query_row("SELECT COUNT(*) FROM llm_keys", [], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 0);
 }
 
 #[tokio::test]

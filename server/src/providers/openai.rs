@@ -227,7 +227,7 @@ impl OpenAILLM {
 }
 
 /// Reasoning switched off is `OpenAI`'s default, so only an effort survives.
-fn reshape_for_openai(v: &mut serde_json::Value) {
+pub(crate) fn reshape_for_openai(v: &mut serde_json::Value) {
     let Some(body) = v.as_object_mut() else { return };
     if let Some(n) = body.remove("max_tokens") {
         body.insert("max_completion_tokens".into(), n);

@@ -489,7 +489,7 @@ async fn me(user: CurrentUser, State(state): State<AppState>, headers: HeaderMap
 
 /// Whether the user has to save a key of their own before Note can answer them.
 fn needs_key(state: &AppState, user_id: i64) -> bool {
-    state.own_keys.required() && !matches!(crate::own_keys::OwnKeys::info(&state.db(), user_id), Ok(Some(_)))
+    state.own_keys.required() && !matches!(state.own_keys.info(&state.db(), user_id), Ok(Some(_)))
 }
 
 /// Refused while the user still has to save a key.
@@ -504,7 +504,7 @@ async fn onboarding_done(user: CurrentUser, State(state): State<AppState>) -> im
 }
 
 async fn llm_key_get(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
-    match crate::own_keys::OwnKeys::info(&state.db(), user.id) {
+    match state.own_keys.info(&state.db(), user.id) {
         Ok(info) => Json(serde_json::json!(info)).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
@@ -516,11 +516,15 @@ struct LlmKeyReq {
     kind: String,
     key: String,
     model: String,
+    /// An `openai` key's endpoint; blank is `OpenAI`'s own.
+    #[serde(default)]
+    base_url: Option<String>,
 }
 
-/// Saves the key once the provider has taken it and offers the model.
+/// Saves the key once the provider has taken it and offers the model. The
+/// provider's own words never reach the user.
 async fn llm_key_put(user: CurrentUser, State(state): State<AppState>, Json(req): Json<LlmKeyReq>) -> impl IntoResponse {
-    use crate::own_keys::{Refusal, MAX_KEY_LEN, MAX_MODEL_LEN};
+    use crate::own_keys::{NewKey, Refusal, MAX_BASE_LEN, MAX_KEY_LEN, MAX_MODEL_LEN};
     let Some(kind) = crate::own_keys::KeyKind::parse(&req.kind) else {
         return invalid_field("kind", "must be openrouter or openai");
     };
@@ -532,23 +536,32 @@ async fn llm_key_put(user: CurrentUser, State(state): State<AppState>, Json(req)
     if model.is_empty() || model.len() > MAX_MODEL_LEN || model.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return invalid_field("model", "must be a model id");
     }
+    let base_url = req
+        .base_url
+        .map(|b| b.trim().trim_end_matches('/').to_string())
+        .filter(|b| !b.is_empty() && kind == crate::own_keys::KeyKind::Openai);
+    if base_url.as_ref().is_some_and(|b| b.len() > MAX_BASE_LEN || b.chars().any(|c| c.is_whitespace() || c.is_control())) {
+        return invalid_field("base_url", "must be a URL");
+    }
     let keys = state.own_keys.clone();
-    let (k, m) = (key.clone(), model.clone());
-    let verified = tokio::task::spawn_blocking(move || keys.verify(kind, &k, &m)).await;
+    let (k, m, b) = (key.clone(), model.clone(), base_url.clone());
+    let verified = tokio::task::spawn_blocking(move || keys.verify(kind, &k, &m, b.as_deref())).await;
     let models = match verified {
         Ok(Ok(models)) => models,
         Ok(Err(Refusal::Key)) => return unprocessable_field("key", "was refused by the provider"),
         Ok(Err(Refusal::Model)) => return unprocessable_field("model", "is not offered by the provider"),
+        Ok(Err(Refusal::Endpoint(why))) => return unprocessable_field("base_url", why),
         Ok(Err(Refusal::Unreachable(_))) | Err(_) => {
             return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": "the provider could not be reached" }))).into_response();
         }
     };
     let conn = state.db();
-    let saved = state.own_keys.store(&conn, user.id, kind, &key, &model, &models, jiff::Timestamp::now()).and_then(|()| {
+    let new = NewKey { kind, key: &key, model: &model, base_url: base_url.as_deref(), models: &models };
+    let saved = state.own_keys.store(&conn, user.id, &new, jiff::Timestamp::now()).and_then(|()| {
         for reason in [crate::failure::Reason::NoKey, crate::failure::Reason::AuthInvalid] {
             crate::outage::clear(&conn, user.id, crate::outage::Outage::Ai(reason))?;
         }
-        crate::own_keys::OwnKeys::info(&conn, user.id)
+        state.own_keys.info(&conn, user.id)
     });
     match saved {
         Ok(info) => {
