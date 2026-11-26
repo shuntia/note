@@ -196,6 +196,7 @@ async fn main() -> anyhow::Result<()> {
     runner::spawn(state.clone());
     note_server::matrix::spawn(state.clone());
     nightly::spawn(state.clone());
+    note_server::brief::spawn(state.clone());
     summaries::spawn(state.clone());
 
     let app = api::router_with_web(state, &cfg.web_dir);

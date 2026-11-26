@@ -41,6 +41,7 @@ const EDITABLE = [
   'close_day_time',
   'calls_until',
   'morning_until',
+  'brief_time',
   'template',
   'triggers_per_day',
   'pomodoro_work_min',
@@ -83,6 +84,7 @@ function draftOf(s: UserSettings): Draft {
     close_day_time: s.close_day_time,
     calls_until: s.calls_until,
     morning_until: s.morning_until,
+    brief_time: s.brief_time,
     template: s.template,
     triggers_per_day: s.triggers_per_day,
     pomodoro_work_min: s.pomodoro_work_min,
@@ -578,6 +580,26 @@ export function Settings({
               )}
             </FoldRow>
             <ReviewRow {...folding('review')} />
+            <FoldRow
+              label={t('settings.brief')}
+              value={loaded.draft.brief_time || t('settings.off')}
+              open={open === 'brief'}
+              onToggle={fold('brief')}
+            >
+              {open === 'brief' && (
+                <div className="set-fold-body">
+                  <span className="set-sub">{t('settings.brief.sub')}</span>
+                  <input
+                    type="time"
+                    aria-label={t('settings.brief')}
+                    value={loaded.draft.brief_time}
+                    onChange={(e) => edit('brief_time', e.target.value)}
+                    {...commitOn('brief')}
+                  />
+                  <Status save={save} row="brief" />
+                </div>
+              )}
+            </FoldRow>
             <FoldRow
               label={t('settings.closeDay')}
               value={loaded.draft.close_day_time || t('settings.off')}

@@ -522,7 +522,21 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE llm_keys ADD COLUMN base_url TEXT;
      ALTER TABLE llm_keys ADD COLUMN seeded INTEGER NOT NULL DEFAULT 0 CHECK (seeded IN (0, 1));",
     LLM_KEYS_FOLLOW,
+    BRIEFS,
 ];
+
+/// v75: one morning brief per user and local date; a brief whose writing
+/// failed keeps its row with no content, so the day is not tried again.
+const BRIEFS: &str = "
+    CREATE TABLE briefs (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        date TEXT NOT NULL,
+        content TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE (user_id, date)
+    );
+";
 
 /// v74: an `OpenRouter` key may name no model, and runs on the admin's switch;
 /// seeded ones are made to.

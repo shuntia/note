@@ -862,6 +862,7 @@ fn advance(
                 conversation_id: session.conversation_id,
                 actions: Vec::new(),
                 wait: None,
+                shown_in_app: false,
             })
         }
     } else {
@@ -884,6 +885,7 @@ fn advance(
             conversation_id: session.conversation_id,
             actions: Vec::new(),
             wait: None,
+            shown_in_app: false,
         })
     };
     Ok(Some(Flip { user_id, username: username.to_string(), message }))
@@ -928,6 +930,7 @@ pub fn planned_end(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -
             conversation_id: session.conversation_id,
             actions: Vec::new(),
             wait: None,
+            shown_in_app: false,
         });
         flips.push(Flip { user_id, username, message });
     }
@@ -1018,6 +1021,7 @@ pub fn overrun(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Re
                 conversation_id: session.conversation_id,
                 actions: Vec::new(),
                 wait: None,
+                shown_in_app: false,
             }),
         });
     }

@@ -1180,6 +1180,15 @@ textarea.mono { font-family: var(--mono); }
 .dayline.compact .dl-ticks { height: 5px; }
 .dayline.compact .dl-now { width: 12px; height: 12px; }
 .dayline.compact .dl-span { top: -5px; height: 10px; min-width: 8px; }
+/* the drawing keeps the line's own box, so the brief icon can sit beside it as a control */
+.dl-draw { position: absolute; inset: 0; }
+.dl-brief { position: absolute; right: -0.375rem; top: -2.375rem; width: 1.75rem; height: 1.75rem; padding: 0.25rem; border: 0; background: none; color: var(--ink); opacity: 0.45; cursor: pointer; transition: opacity 160ms ease; }
+.dl-brief:hover, .dl-brief:focus-visible { opacity: 0.9; }
+.dayline.compact .dl-brief { top: -1.875rem; width: 1.5rem; height: 1.5rem; }
+.sunrise-icon { display: block; width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+.brief-card { position: fixed; inset: 0; z-index: 50; margin: auto; box-sizing: border-box; width: min(34rem, calc(100vw - 2rem)); height: fit-content; max-height: 78vh; overflow-y: auto; overscroll-behavior: contain; padding: 1.75rem 1.75rem 2rem; border-radius: var(--radius-xl); background: var(--haze-strong); backdrop-filter: blur(18px); box-shadow: 0 1.5rem 3.75rem -2.5rem var(--cal-shadow); color: var(--ink); cursor: default; }
+.brief-card > .sunrise-icon { width: 1.75rem; height: 1.75rem; margin: 0 auto 1rem; opacity: 0.45; }
 
 @keyframes bubble-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 .tellnote { display: flex; align-items: center; gap: 0.625rem; padding: 0 0.375rem 0 1rem; border-radius: 999px; background: var(--haze-strong); min-height: 3rem; }

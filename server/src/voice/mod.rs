@@ -515,6 +515,7 @@ impl Voice {
             conversation_id: Some(conversation_id),
             actions: Vec::new(),
             wait: None,
+            shown_in_app: false,
         })
     }
 
@@ -1002,6 +1003,7 @@ mod tests {
             conversation_id: Some(9),
             actions: Vec::new(),
             wait: None,
+            shown_in_app: false,
         }
     }
 

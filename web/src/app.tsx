@@ -394,7 +394,7 @@ export function App() {
       // the thread, so the thread is the notice; a session's notices are toasts over
       // whatever is open.
       if (ev.conversation_id !== null && (ev.event_id !== null || ev.urgency === 'high')) openConversation(ev.conversation_id)
-      else notify(ev.body ? `${ev.title} — ${ev.body}` : ev.title)
+      else if (!ev.shown_in_app) notify(ev.body ? `${ev.title} — ${ev.body}` : ev.title)
       onChanged()
     }, onChanged)
   }, [me, onChanged, openConversation])

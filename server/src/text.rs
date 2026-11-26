@@ -219,6 +219,10 @@ pub fn good_morning(l: Lang) -> String {
     l.pick("Good morning", "おはようございます")
 }
 
+pub fn brief_title(l: Lang) -> String {
+    l.pick("Morning brief", "朝の要点")
+}
+
 pub fn no_debrief(l: Lang) -> String {
     l.pick("(no debrief yet)", "朝の手紙はまだありません。")
 }
@@ -718,6 +722,7 @@ const FIELDS_JA: &[(&str, &str)] = &[
     ("alerts", "通知"),
     ("before", "日時"),
     ("brief", "指示"),
+    ("brief_time", "朝の要点の時刻"),
     ("calls_until", "通話の終了時刻"),
     ("category", "カテゴリ"),
     ("close_day_time", "一日の締めの時刻"),
@@ -793,6 +798,7 @@ const ERRORS_JA: &[(&str, &str)] = &[
     ("{} must be at most {} characters", "{0}は{1}文字以内にしてください"),
     ("{} must be at most {} bytes", "{0}は{1}バイト以内にしてください"),
     ("{} must be a zero-padded 24-hour HH:MM, or blank for no close of day", "{0}は24時間表記のHH:MM（例 21:30）か、締めなしなら空欄にしてください"),
+    ("{} must be a zero-padded 24-hour HH:MM, or blank for no morning brief", "{0}は24時間表記のHH:MM（例 07:00）か、なしなら空欄にしてください"),
     ("{} must be a zero-padded 24-hour HH:MM", "{0}は24時間表記のHH:MM（例 07:30）にしてください"),
     ("{} must be zero-padded HH:MM, got {}", "{0}はHH:MM（例 07:30）にしてください（入力：{1}）"),
     ("{} must be YYYY-MM-DD, got {}", "{0}はYYYY-MM-DD形式にしてください（入力：{1}）"),

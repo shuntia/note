@@ -1669,6 +1669,7 @@ fn said_message(
         conversation_id,
         actions,
         wait: None,
+        shown_in_app: false,
     }
 }
 

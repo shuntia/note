@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 
 /// The shipped prompts. They belong to the app and are never overridden; what a
 /// user adds goes in `about`.
-pub const NAMES: [&str; 11] = [
+pub const NAMES: [&str; 12] = [
     "persona", "planning", "import", "inbox", "summarize", "review", "trigger", "search",
-    "title", "share", "voice",
+    "title", "share", "voice", "brief",
 ];
 
 pub const MAX_ABOUT_BYTES: usize = 8 * 1024;
@@ -119,6 +119,7 @@ mod tests {
                 ("inbox", K::Inbox),
                 ("summarize", K::Summarize),
                 ("review", K::Review),
+                ("brief", K::Brief),
             ] {
                 let text = load(name);
                 for tool in registry(kind) {

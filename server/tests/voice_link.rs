@@ -24,6 +24,7 @@ fn urgent() -> OutboundMessage {
         conversation_id: None,
         actions: Vec::new(),
         wait: None,
+        shown_in_app: false,
     }
 }
 

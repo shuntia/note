@@ -1,3 +1,4 @@
+import { SunriseIcon } from './briefSheet'
 import { t } from './i18n'
 import { eventLabel } from './receipts'
 import type { CalendarOccurrence, PlanEvent } from './types'
@@ -23,6 +24,7 @@ export function DayLine({
   hoverId = null,
   onHover,
   end = MIDNIGHT,
+  onBrief,
 }: {
   events: PlanEvent[]
   calendar?: CalendarOccurrence[]
@@ -34,6 +36,8 @@ export function DayLine({
   onHover?: (id: number | null) => void
   // Past MIDNIGHT where the work day runs on into the small hours.
   end?: number
+  // Given only while today's brief exists; the icon at the line's end reopens it.
+  onBrief?: () => void
 }) {
   const pct = (mins: number) => `${((Math.min(end, Math.max(START, mins)) - START) / (end - START)) * 100}%`
   const width = (from: number, to: number, least: number) =>
@@ -54,59 +58,66 @@ export function DayLine({
   const hours = last > 24 ? [...base.filter((h) => h < 24 || !compact), last] : base
 
   return (
-    <div className={`dayline${compact ? ' compact' : ''}`} role="img" aria-label={t('dayline.label')}>
-      <span className="dl-line" />
-      <span className="dl-gone" style={{ width: pct(now) }} />
-      <span className="dl-ticks" />
-      {hours.map((h, i) => (
-        <span
-          key={h}
-          className={`dl-hour${i === 0 ? ' edge-start' : i === hours.length - 1 ? ' edge-end' : ''}`}
-          style={{ left: pct(h * 60) }}
-        >
-          {String(h > 24 ? h % 24 : h).padStart(2, '0')}
-        </span>
-      ))}
-      {calendar.map((o) =>
-        o.kind === 'note' ? (
+    <div className={`dayline${compact ? ' compact' : ''}`}>
+      <div className="dl-draw" role="img" aria-label={t('dayline.label')}>
+        <span className="dl-line" />
+        <span className="dl-gone" style={{ width: pct(now) }} />
+        <span className="dl-ticks" />
+        {hours.map((h, i) => (
           <span
-            key={`c${o.entry_id}-${o.start}`}
-            className="dl-note"
-            style={{ left: pct(minutesOf(o.start)) }}
-            title={`${o.start} ${o.title}`}
-          />
-        ) : (
+            key={h}
+            className={`dl-hour${i === 0 ? ' edge-start' : i === hours.length - 1 ? ' edge-end' : ''}`}
+            style={{ left: pct(h * 60) }}
+          >
+            {String(h > 24 ? h % 24 : h).padStart(2, '0')}
+          </span>
+        ))}
+        {calendar.map((o) =>
+          o.kind === 'note' ? (
+            <span
+              key={`c${o.entry_id}-${o.start}`}
+              className="dl-note"
+              style={{ left: pct(minutesOf(o.start)) }}
+              title={`${o.start} ${o.title}`}
+            />
+          ) : (
+            <span
+              key={`c${o.entry_id}-${o.start}`}
+              className={`dl-band ${o.kind}${minutesOf(o.end) <= now ? ' past' : ''}`}
+              style={{ left: pct(minutesOf(o.start)), width: width(minutesOf(o.start), minutesOf(o.end), 0.6) }}
+              title={`${o.start} – ${o.end} ${o.title}`}
+            />
+          ),
+        )}
+        {settled.map((ev) => (
           <span
-            key={`c${o.entry_id}-${o.start}`}
-            className={`dl-band ${o.kind}${minutesOf(o.end) <= now ? ' past' : ''}`}
-            style={{ left: pct(minutesOf(o.start)), width: width(minutesOf(o.start), minutesOf(o.end), 0.6) }}
-            title={`${o.start} – ${o.end} ${o.title}`}
+            key={`past-${ev.id}`}
+            className={`dl-past ${ev.status}`}
+            style={{ left: pct(minutesOf(ev.end_wall_time ?? ev.wall_time)) }}
           />
-        ),
+        ))}
+        {ahead.map((ev) => {
+          const a = minutesOf(ev.wall_time)
+          const b = minutesOf(ev.end_wall_time ?? ev.wall_time)
+          const name = ev.task ? ev.task.title : eventLabel(ev.kind)
+          return (
+            <span
+              key={ev.id}
+              className={`dl-span${ev.id === filled ? ' next' : ''}${ev.task ? ' task' : ''}${ev.id === hoverId ? ' hover' : ''}`}
+              style={{ left: pct(a), width: width(a, b, 1) }}
+              title={`${ev.wall_time} – ${ev.end_wall_time ?? ev.wall_time} ${name}`}
+              onMouseEnter={() => onHover?.(ev.id)}
+              onMouseLeave={() => onHover?.(null)}
+            />
+          )
+        })}
+        <span className="dl-now" style={{ left: pct(now) }} />
+      </div>
+      {onBrief && (
+        <button type="button" className="dl-brief" aria-label={t('brief.open')} onClick={onBrief}>
+          <SunriseIcon />
+        </button>
       )}
-      {settled.map((ev) => (
-        <span
-          key={`past-${ev.id}`}
-          className={`dl-past ${ev.status}`}
-          style={{ left: pct(minutesOf(ev.end_wall_time ?? ev.wall_time)) }}
-        />
-      ))}
-      {ahead.map((ev) => {
-        const a = minutesOf(ev.wall_time)
-        const b = minutesOf(ev.end_wall_time ?? ev.wall_time)
-        const name = ev.task ? ev.task.title : eventLabel(ev.kind)
-        return (
-          <span
-            key={ev.id}
-            className={`dl-span${ev.id === filled ? ' next' : ''}${ev.task ? ' task' : ''}${ev.id === hoverId ? ' hover' : ''}`}
-            style={{ left: pct(a), width: width(a, b, 1) }}
-            title={`${ev.wall_time} – ${ev.end_wall_time ?? ev.wall_time} ${name}`}
-            onMouseEnter={() => onHover?.(ev.id)}
-            onMouseLeave={() => onHover?.(null)}
-          />
-        )
-      })}
-      <span className="dl-now" style={{ left: pct(now) }} />
     </div>
   )
 }

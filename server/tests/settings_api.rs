@@ -212,6 +212,7 @@ async fn invalid_fields_are_rejected_by_name() {
         (r#"{"close_day_time":"9:30"}"#, "close_day_time"),
         (r#"{"close_day_time":"21:60"}"#, "close_day_time"),
         (r#"{"calls_until":"11pm"}"#, "calls_until"),
+        (r#"{"brief_time":"7:00"}"#, "brief_time"),
         (r#"{"chores_times":["9:00"]}"#, "chores_times"),
         (r#"{"chores_times":["01:00","02:00","03:00","04:00","05:00","06:00","07:00"]}"#, "chores_times"),
         (r#"{"template":"nope"}"#, "template"),
@@ -266,6 +267,17 @@ async fn calls_run_until_eleven_and_blank_runs_them_to_midnight() {
     assert_eq!(v["calls_until"], "22:00");
     let v = json(app.clone().oneshot(put(&cookie, r#"{"calls_until":""}"#)).await.unwrap()).await;
     assert_eq!(v["calls_until"], "");
+}
+
+#[tokio::test]
+async fn the_morning_brief_is_off_until_given_a_time_and_blank_turns_it_off() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let v = json(app.clone().oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!(v["brief_time"], "");
+    let v = json(app.clone().oneshot(put(&cookie, r#"{"brief_time":"07:00"}"#)).await.unwrap()).await;
+    assert_eq!(v["brief_time"], "07:00");
+    let v = json(app.clone().oneshot(put(&cookie, r#"{"brief_time":""}"#)).await.unwrap()).await;
+    assert_eq!(v["brief_time"], "");
 }
 
 #[tokio::test]

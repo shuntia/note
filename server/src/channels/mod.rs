@@ -68,6 +68,9 @@ pub struct OutboundMessage {
     /// The parked wake-up a call with this message resumes once its outcome is known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<i64>,
+    /// The open app brings this up on its own, so it needs no toast there.
+    #[serde(default)]
+    pub shown_in_app: bool,
 }
 
 /// A button on a message. `data` travels back verbatim when it is pressed.
@@ -152,6 +155,7 @@ pub fn render(conn: &Connection, ev: &crate::runner::FiredEvent, lang: Lang) -> 
         conversation_id: None,
         actions,
         wait: None,
+        shown_in_app: false,
     }
 }
 
@@ -316,6 +320,7 @@ pub fn deliver_block_start(
                 data: format!("block:start:{}", start.event_id),
             }],
             wait: None,
+            shown_in_app: false,
         },
     );
     hub.broadcast_changed(start.user_id);
@@ -430,6 +435,7 @@ mod tests {
             conversation_id: None,
             actions: Vec::new(),
             wait: None,
+            shown_in_app: false,
         }
     }
 
@@ -513,6 +519,7 @@ mod tests {
             conversation_id: None,
             actions: Vec::new(),
             wait: None,
+            shown_in_app: false,
         };
         assert_eq!(deliver_via(&db, &ladder, 1, "aki", &msg), Some("webpush"));
         assert_eq!(webpush.seen().len(), 1);

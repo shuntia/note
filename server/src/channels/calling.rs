@@ -258,6 +258,7 @@ impl Caller for crate::AppState {
             conversation_id: thread,
             actions: Vec::new(),
             wait: None,
+            shown_in_app: false,
         };
         ring(self, user_id, username, &msg)
     }
@@ -335,6 +336,7 @@ mod tests {
             conversation_id: Some(7),
             actions: Vec::new(),
             wait: None,
+            shown_in_app: false,
         }
     }
 

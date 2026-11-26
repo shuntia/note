@@ -593,6 +593,7 @@ mod tests {
             conversation_id,
             actions: Vec::new(),
             wait: None,
+            shown_in_app: false,
         }
     }
 

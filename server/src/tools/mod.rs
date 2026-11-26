@@ -42,6 +42,8 @@ pub enum SessionKind {
     /// A visitor on a share link: a read-only slice of one user's day, tasks
     /// and goals, and nothing else.
     Share,
+    /// The morning brief: reads the day ahead and answers with it.
+    Brief,
     /// A live phone call: every tool runs as a background job.
     Call,
 }
@@ -528,6 +530,7 @@ const IMPORT: &[&str] = registry_of![BRIEF];
 const INBOX: &[&str] = registry_of![MEMORY_READ, DECIDE];
 const SUMMARIZE: &[&str] = registry_of![SUMMARY];
 const REVIEW: &[&str] = registry_of![MEMORY_WRITE, REVIEW_WRITE];
+const MORNING: &[&str] = registry_of![TASK_READ, GOALS_READ, CALENDAR_READ, MEMORY_READ];
 const SHARE: &[&str] = registry_of![TASK_READ, GOALS_READ, CALENDAR_READ, DAY_READ, SHARE_NOTE];
 const CALL: &[&str] = registry_of![
     TASK_READ,
@@ -572,6 +575,7 @@ pub fn registry(kind: SessionKind) -> &'static [&'static str] {
         SessionKind::Review => REVIEW,
         SessionKind::Trigger => TRIGGER,
         SessionKind::Share => SHARE,
+        SessionKind::Brief => MORNING,
         SessionKind::Call => CALL,
     }
 }
@@ -1610,6 +1614,7 @@ mod tests {
             SessionKind::Review,
             SessionKind::Trigger,
             SessionKind::Share,
+            SessionKind::Brief,
             SessionKind::Call,
         ] {
             let schemas = schemas(kind);
