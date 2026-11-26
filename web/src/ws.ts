@@ -10,6 +10,8 @@ export type EventFrame = {
   urgency: string
   event_id: number | null
   conversation_id: number | null
+  // The open app brings it up itself, so it takes no toast.
+  shown_in_app?: boolean
 }
 
 export type AgentEvent =

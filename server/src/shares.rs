@@ -1125,6 +1125,7 @@ pub async fn run_turn(state: &crate::AppState, principal: &crate::auth::SharePri
                 conversation_id: None,
                 actions: Vec::new(),
                 wait: None,
+                shown_in_app: false,
             };
             crate::channels::deliver_via(&st.db, &st.channels, owner_id, &owner, &msg);
         }

@@ -545,6 +545,13 @@ pub fn nightly_opening(l: Lang, date: jiff::civil::Date) -> String {
     }
 }
 
+pub fn brief_opening(l: Lang, date: jiff::civil::Date) -> String {
+    match l {
+        Lang::En => format!("Morning brief for {date}."),
+        Lang::Ja => format!("{date}の朝の要点です。"),
+    }
+}
+
 pub fn summarize_opening(l: Lang, so_far: Option<&str>) -> String {
     let ask = l.of("Summarise this conversation.", "この会話を要約してください。");
     match (l, so_far) {

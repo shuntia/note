@@ -15,6 +15,8 @@ import {
 } from 'react'
 import { api, ApiError } from '../api'
 import { hintShown, hintUsed, railX, sessionFor, slotAfter, withoutCategory, workTime } from '../circle'
+import { briefSeen, markBriefSeen } from '../brief'
+import { BriefSheet } from '../briefSheet'
 import { latest } from '../coalesce'
 import type { ToastAction } from '../app'
 import { DayLine as DayLineView, minutesOf } from '../dayline'
@@ -359,6 +361,17 @@ export function Home({
   const now = nowMinutes()
   const next = nextUp(visible, now)
   const [hoverId, setHoverId] = useState<number | null>(null)
+
+  const brief = day?.brief && day.date === todayIso() ? day.brief : null
+  const [briefOpen, setBriefOpen] = useState(false)
+  useEffect(() => {
+    if (brief && !inSession && !briefSeen(brief)) setBriefOpen(true)
+  }, [brief, inSession])
+  const openBrief = useCallback(() => setBriefOpen(true), [])
+  const closeBrief = useCallback(() => {
+    if (brief) markBriefSeen(brief)
+    setBriefOpen(false)
+  }, [brief])
   const facts = next ? eventFacts(next, now) : null
   const face = next ? rowParts(next) : null
   const label = face?.name ?? ''
@@ -1479,7 +1492,7 @@ export function Home({
   // On the phone a session is the whole screen: the day waits until it is over.
   const today = day && !(mobile && inSession) && (
     <div className="home-today">
-      <DayLine events={visible} calendar={day.calendar} now={now} compact={mobile} nextId={next?.id} hoverId={hoverId} onHover={setHoverId} />
+      <DayLine events={visible} calendar={day.calendar} now={now} compact={mobile} nextId={next?.id} hoverId={hoverId} onHover={setHoverId} onBrief={brief ? openBrief : undefined} />
       {closeDay}
       {list}
       {mobile && <Jot flow openTalk={openTalk} openConversation={openConversation} />}
@@ -1747,6 +1760,7 @@ export function Home({
 
   return (
     <div ref={home} className={cls}>
+      {briefOpen && brief && <BriefSheet text={brief.content} onClose={closeBrief} />}
       <section ref={stage} className="stage" aria-label={t('nav.today')}>
         {motion ? (
           <div className="face-big">
@@ -1765,7 +1779,7 @@ export function Home({
             <Jot flow placeholder={t('jot.tellNote')} openTalk={openTalk} openConversation={openConversation} />
           </div>
         )}
-        {compactLanding ? today : events && <section className="today-line"><DayLine events={visible} calendar={day?.calendar} now={now} nextId={next?.id} hoverId={hoverId} onHover={setHoverId} />{closeDay}{list}</section>}
+        {compactLanding ? today : events && <section className="today-line"><DayLine events={visible} calendar={day?.calendar} now={now} nextId={next?.id} hoverId={hoverId} onHover={setHoverId} onBrief={brief ? openBrief : undefined} />{closeDay}{list}</section>}
       </section>
       <section ref={ground} className="today-ground">
         <section id="calendar-slot">

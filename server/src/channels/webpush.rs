@@ -211,6 +211,7 @@ v5mC8db8ZSK9ruR2mEgvMEvePYwohpr98g==
             conversation_id: None,
             actions: Vec::new(),
             wait: None,
+            shown_in_app: false,
         }
     }
 

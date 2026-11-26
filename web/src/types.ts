@@ -275,6 +275,8 @@ export type Settings = {
   calls_until: string
   // Until when an open morning brings the letter to the face, HH:MM.
   morning_until: string
+  // When the morning brief is written, HH:MM; blank writes none.
+  brief_time: string
   template: string
   templates: string[]
   timezones: string[]
@@ -577,6 +579,14 @@ export type DayView = {
   free: FreeWindow[]
   quiet_now: string | null
   history: HistoryRow[]
+  brief?: Brief | null
+}
+
+export type Brief = {
+  id: number
+  date: string
+  content: string
+  created_at: string
 }
 
 export type SessionMode = 'single' | 'pomodoro'

@@ -22,6 +22,8 @@ pub const TRIGGER_MAX_TURNS: usize = 14;
 /// Talk has room for long jobs; its time budget and loop guards keep that room
 /// from being spent going round in circles.
 pub const TALK_MAX_TURNS: usize = 40;
+/// A morning brief may look a few things up before it writes.
+pub const BRIEF_MAX_TURNS: usize = 4;
 /// Long turns answer the client as pending and finish over the socket, so this
 /// bounds cost, not anyone's wait.
 const TALK_BUDGET: std::time::Duration = std::time::Duration::from_mins(10);
@@ -147,6 +149,7 @@ const fn profile(kind: SessionKind) -> SessionProfile {
             ..base
         },
         SessionKind::Call => SessionProfile { prompt: "voice", japanese: None, ..base },
+        SessionKind::Brief => SessionProfile { then: Some("brief"), max_turns: BRIEF_MAX_TURNS, ..base },
         SessionKind::Nightly => SessionProfile { then: Some("planning"), ..base },
         SessionKind::Trigger => {
             SessionProfile { then: Some("trigger"), max_turns: TRIGGER_MAX_TURNS, must_end: true, ..base }

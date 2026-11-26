@@ -427,6 +427,7 @@ mod tests {
             conversation_id: Some(1),
             actions: crate::channels::event_actions(1, crate::text::Lang::En),
             wait: None,
+            shown_in_app: false,
         }
     }
 

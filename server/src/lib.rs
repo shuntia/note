@@ -4,6 +4,7 @@ pub mod admin;
 pub mod agent;
 pub mod api;
 pub mod auth;
+pub mod brief;
 pub mod builtin_memory;
 pub mod calendar;
 pub mod channels;

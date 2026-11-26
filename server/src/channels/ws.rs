@@ -271,6 +271,7 @@ impl Channel for WsChannel {
             "urgency": msg.urgency.as_str(),
             "event_id": msg.event_id,
             "conversation_id": msg.conversation_id,
+            "shown_in_app": msg.shown_in_app,
         })
         .to_string();
         if self.hub.send(user_id, &text) == 0 {
@@ -298,6 +299,7 @@ mod tests {
             conversation_id: Some(3),
             actions: Vec::new(),
             wait: None,
+            shown_in_app: false,
         }
     }
 

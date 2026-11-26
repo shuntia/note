@@ -316,3 +316,23 @@ async fn a_days_list_is_set_by_its_date_and_read_back_as_items() {
     let (status, _) = call(&app, &cookie, Method::PUT, "/api/day/someday/order", Some(&body)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn the_day_carries_its_morning_brief_once_written() {
+    let (app, cookie, state, _cfg) = common::app_with_logged_in_user_and_state().await;
+    let date = today();
+    let (_, day) = call(&app, &cookie, Method::GET, &format!("/api/day/{date}"), None).await;
+    assert!(day["brief"].is_null());
+    state
+        .db()
+        .execute(
+            "INSERT INTO briefs (user_id, date, content, created_at) VALUES (1, ?1, NULL, 'x'), (1, ?2, '## Today', 'y')",
+            (date.to_string(), ahead(1).to_string()),
+        )
+        .unwrap();
+    let (_, day) = call(&app, &cookie, Method::GET, &format!("/api/day/{date}"), None).await;
+    assert!(day["brief"].is_null(), "a brief that failed to write is none");
+    let (_, day) = call(&app, &cookie, Method::GET, &format!("/api/day/{}", ahead(1)), None).await;
+    assert_eq!(day["brief"]["content"], "## Today");
+    assert_eq!(day["brief"]["date"], ahead(1).to_string());
+}

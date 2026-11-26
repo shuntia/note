@@ -1794,6 +1794,7 @@ struct SettingsPatch {
     chores_times: Option<Vec<String>>,
     calls_until: Option<String>,
     morning_until: Option<String>,
+    brief_time: Option<String>,
     template: Option<String>,
     show_arc_between_sessions: Option<bool>,
     counter: Option<String>,
@@ -1848,6 +1849,7 @@ fn settings_body(
         "chores_times": cfg.chores_times(),
         "calls_until": cfg.calls_until(),
         "morning_until": cfg.morning_until(),
+        "brief_time": cfg.brief_time(),
         "template": cfg.template,
         "show_arc_between_sessions": cfg.show_arc_between_sessions,
         "counter": cfg.counter,
@@ -2021,6 +2023,13 @@ async fn settings_put(
             return invalid_field("morning_until", "must be a zero-padded 24-hour HH:MM");
         }
         cfg.morning_until = Some(time);
+    }
+    if let Some(time) = req.brief_time {
+        let time = time.trim();
+        if !time.is_empty() && !crate::templates::valid_time(time) {
+            return invalid_field("brief_time", "must be a zero-padded 24-hour HH:MM, or blank for no morning brief");
+        }
+        cfg.brief_time = Some(time.to_string());
     }
     if let Some(template) = req.template {
         if !templates.contains(&template) {
@@ -2408,6 +2417,7 @@ async fn voice_test(user: CurrentUser, State(state): State<AppState>, headers: H
         conversation_id: None,
         actions: Vec::new(),
         wait: None,
+        shown_in_app: false,
     };
     match voice.start_call(user.id, &link, &msg, jiff::Timestamp::now()) {
         Ok(call_id) => {
@@ -2433,6 +2443,7 @@ async fn notify_test(user: CurrentUser, State(state): State<AppState>, headers: 
         conversation_id: None,
         actions: Vec::new(),
         wait: None,
+        shown_in_app: false,
     };
     let db = state.db.clone();
     let ladder = state.channels.clone();
@@ -2850,6 +2861,9 @@ async fn day_view(
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         }
     };
+    let Ok(brief) = crate::brief::for_date(&conn, user.id, &date.to_string()) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
     Json(serde_json::json!({
         "date": date.to_string(),
         "items": items,
@@ -2858,6 +2872,7 @@ async fn day_view(
         "free": free,
         "quiet_now": quiet_now,
         "history": history,
+        "brief": brief,
     }))
     .into_response()
 }

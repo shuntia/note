@@ -85,6 +85,7 @@ export const WRITABLE_SETTINGS = [
   'chores_times',
   'calls_until',
   'morning_until',
+  'brief_time',
   'template',
   'show_arc_between_sessions',
   'counter',

@@ -71,6 +71,7 @@ mod tests {
             conversation_id: None,
             actions: Vec::new(),
             wait: None,
+            shown_in_app: false,
         };
         ch.deliver(1, "aki", &m).unwrap();
         ch.set_fail(true);

@@ -347,6 +347,10 @@ pub struct UserConfig {
     /// Until when, zero-padded HH:MM, an open morning brings the letter to the face.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub morning_until: Option<String>,
+    /// When the morning brief is written, zero-padded HH:MM; blank, the
+    /// default, writes none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief_time: Option<String>,
     #[serde(default = "default_true")]
     pub show_arc_between_sessions: bool,
     #[serde(default = "default_counter")]
@@ -474,6 +478,10 @@ impl UserConfig {
         self.morning_until.as_deref().unwrap_or(DEFAULT_MORNING_UNTIL)
     }
 
+    pub fn brief_time(&self) -> &str {
+        self.brief_time.as_deref().unwrap_or_default()
+    }
+
     /// `None` when the user set no daily cap.
     pub fn triggers_per_day(&self) -> Option<u32> {
         match self.triggers_per_day {
@@ -594,6 +602,11 @@ impl UserConfig {
             crate::templates::valid_time(cfg.morning_until()),
             "invalid morning_until {:?}",
             cfg.morning_until()
+        );
+        anyhow::ensure!(
+            cfg.brief_time().is_empty() || crate::templates::valid_time(cfg.brief_time()),
+            "invalid brief_time {:?}",
+            cfg.brief_time()
         );
         anyhow::ensure!(
             crate::text::LANGUAGES.contains(&cfg.language()),
@@ -1076,6 +1089,18 @@ mod tests {
         write(tmp.path(), "users/aki/user.toml", "morning_until = \"09:30\"\n");
         assert_eq!(UserConfig::load(tmp.path(), "aki").unwrap().morning_until(), "09:30");
         write(tmp.path(), "users/aki/user.toml", "morning_until = \"9:30\"\n");
+        assert!(UserConfig::load(tmp.path(), "aki").is_err());
+    }
+
+    #[test]
+    fn the_morning_brief_is_off_unless_given_a_time() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "defaults/user.toml",
+            "display_name = \"X\"\ntimezone = \"UTC\"\ntemplate = \"default\"\n");
+        assert_eq!(UserConfig::load(tmp.path(), "aki").unwrap().brief_time(), "");
+        write(tmp.path(), "users/aki/user.toml", "brief_time = \"07:00\"\n");
+        assert_eq!(UserConfig::load(tmp.path(), "aki").unwrap().brief_time(), "07:00");
+        write(tmp.path(), "users/aki/user.toml", "brief_time = \"7:00\"\n");
         assert!(UserConfig::load(tmp.path(), "aki").is_err());
     }
 
