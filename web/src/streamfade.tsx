@@ -33,7 +33,18 @@ export function schedule(text: string, at: number, now: number, after = -Infinit
   })
 }
 
-export type Piece = { node: number; from: number; to: number; delay: number }
+/**
+ * The segments still fading at `now`, cut to text now `length` long. Rendered markup can
+ * read shorter than before (a closing `**` hides both pairs), and a segment left reaching
+ * past the end would overlap the next burst, which starts there.
+ */
+export function stillFading(segs: Segment[], length: number, now: number): Segment[] {
+  return segs
+    .filter((s) => s.start + FADE_MS > now && s.from < length)
+    .map((s) => (s.to > length ? { ...s, to: length } : s))
+}
+
+export type Piece ={ node: number; from: number; to: number; delay: number }
 
 /** Where each segment falls in a run of text nodes, last piece of each node first so splitting keeps offsets valid. */
 export function pieces(lengths: number[], segs: Segment[], now: number): Piece[] {
@@ -139,7 +150,7 @@ export class Fader {
       this.segs = []
       return
     }
-    const live = this.segs.filter((s) => s.start + FADE_MS > now)
+    const live = stillFading(this.segs, full.length, now)
     const fresh = from < full.length ? schedule(full.slice(from), from, now, live.at(-1)?.start) : []
     this.segs = [...live, ...fresh]
     this.fading.push(...wrap(this.root, this.mode === 'plain' ? fresh : this.segs, now))

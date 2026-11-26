@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest'
-import { FADE_MS, pieces, schedule, words } from './streamfade'
+import { FADE_MS, pieces, schedule, stillFading, words } from './streamfade'
 
 test('words rejoin to the text they came from', () => {
   for (const text of ['a b ', '  ', 'one\n\ntwo', ' lead', 'x', '']) expect(words(text).join('')).toBe(text)
@@ -33,4 +33,21 @@ test('segments split across text nodes, each node last piece first', () => {
     { node: 1, from: 3, to: 6, delay: 20 },
     { node: 1, from: 0, to: 3, delay: 10 },
   ])
+})
+
+test('markup that reads shorter cuts the words still fading, so the next burst never overlaps them', () => {
+  const live = stillFading(schedule('Some **bold', 0, 0), 'Some bold'.length, 10)
+  expect(live.at(-1)!.to).toBe('Some bold'.length)
+  const segs = [...live, ...schedule(' text', 'Some bold'.length, 10, live.at(-1)!.start)]
+  const split = pieces(['Some bold text'.length], segs, 10)
+  for (let i = 1; i < split.length; i++) expect(split[i].to).toBeLessThanOrEqual(split[i - 1].from)
+})
+
+test('words past the end of the shorter text, or done fading, are dropped', () => {
+  const segs = [
+    { from: 0, to: 4, start: 100 - FADE_MS },
+    { from: 4, to: 9, start: 100 },
+    { from: 9, to: 14, start: 100 },
+  ]
+  expect(stillFading(segs, 9, 100)).toEqual([{ from: 4, to: 9, start: 100 }])
 })

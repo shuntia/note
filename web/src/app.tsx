@@ -1,4 +1,5 @@
 import {
+  Component,
   Suspense,
   useCallback,
   useEffect,
@@ -496,7 +497,9 @@ export function App() {
             .join(' ')}
           aria-hidden={l === leaving || undefined}
         >
-          <Suspense fallback={null}>{viewOf(l.tab)}</Suspense>
+          <ViewGuard>
+            <Suspense fallback={null}>{viewOf(l.tab)}</Suspense>
+          </ViewGuard>
         </main>
       ))}
       {mobile && <PhoneBar current={current} go={go} tab={tab} inSession={session !== null} />}
@@ -508,6 +511,27 @@ export function App() {
       )}
     </div>
   )
+}
+
+// A view that throws while rendering takes down only itself, not the shell around it.
+class ViewGuard extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false }
+
+  static getDerivedStateFromError() {
+    return { failed: true }
+  }
+
+  render() {
+    if (!this.state.failed) return this.props.children
+    return (
+      <p className="view-failed" role="alert">
+        {t('common.failed')}{' '}
+        <button type="button" onClick={() => this.setState({ failed: false })}>
+          {t('common.retry')}
+        </button>
+      </p>
+    )
+  }
 }
 
 function PhoneBar({
