@@ -31,6 +31,7 @@ import { rise } from '../motion-gsap'
 import { NowCounter } from '../nowcounter'
 import { Overflow, type OverflowItem } from '../overflow'
 import { readPrefs } from '../prefs'
+import { dayLineEnd, workDate, workMinutes } from '../workday'
 import { eventLabel } from '../receipts'
 import {
   effectiveStart,
@@ -136,14 +137,11 @@ const ANNOUNCE: { id: TaskNotify; label: Key }[] = [
 ]
 
 function nowMinutes(): number {
-  const d = new Date()
-  return d.getHours() * 60 + d.getMinutes()
+  return Math.floor(workMinutes(new Date(), readPrefs().dayEnd))
 }
 
 function todayIso(): string {
-  const d = new Date()
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  return workDate(new Date(), readPrefs().dayEnd)
 }
 
 // What the row is called: a block laid for a task carries the task's own name, and
@@ -157,7 +155,7 @@ function rowParts(ev: PlanEvent): { name: string; of: string | null } {
 }
 
 function minutesOfDayNow(): number {
-  return (Date.now() - new Date().setHours(0, 0, 0, 0)) / 60_000
+  return workMinutes(new Date(), readPrefs().dayEnd)
 }
 
 function actionMessage(err: unknown): string {
@@ -1479,7 +1477,7 @@ export function Home({
   // On the phone a session is the whole screen: the day waits until it is over.
   const today = day && !(mobile && inSession) && (
     <div className="home-today">
-      <DayLine events={visible} calendar={day.calendar} now={now} compact={mobile} nextId={next?.id} hoverId={hoverId} onHover={setHoverId} />
+      <DayLine events={visible} calendar={day.calendar} now={now} compact={mobile} nextId={next?.id} hoverId={hoverId} onHover={setHoverId} end={dayLineEnd(prefs.dayEnd)} />
       {closeDay}
       {list}
       {mobile && <Jot flow openTalk={openTalk} openConversation={openConversation} />}
@@ -1765,7 +1763,7 @@ export function Home({
             <Jot flow placeholder={t('jot.tellNote')} openTalk={openTalk} openConversation={openConversation} />
           </div>
         )}
-        {compactLanding ? today : events && <section className="today-line"><DayLine events={visible} calendar={day?.calendar} now={now} nextId={next?.id} hoverId={hoverId} onHover={setHoverId} />{closeDay}{list}</section>}
+        {compactLanding ? today : events && <section className="today-line"><DayLine events={visible} calendar={day?.calendar} now={now} nextId={next?.id} hoverId={hoverId} onHover={setHoverId} end={dayLineEnd(prefs.dayEnd)} />{closeDay}{list}</section>}
       </section>
       <section ref={ground} className="today-ground">
         <section id="calendar-slot">

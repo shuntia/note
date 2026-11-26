@@ -28,6 +28,7 @@ import { SharesSection } from './settings/SharesSection'
 import { SkyStrip } from './settings/SkyStrip'
 import { SettingsContext, ToggleSetting, type SaveSettings } from './settings/ToggleSetting'
 import { TokensSection } from './settings/TokensSection'
+import { DayBoundsRow, DeliveryRow, FineTuningRow, PatienceRow, ReplyRow, ReviewRow, SessionLimitsRow } from './settings/TuningRows'
 import { KeySection, keyHint } from './settings/KeySection'
 import { MAX_TRIGGERS_PER_DAY, triggersFromInput, triggersLabel, UNLIMITED } from './settings/triggers'
 
@@ -152,6 +153,7 @@ export function Settings({
   const settings = loaded?.settings
 
   const fold = (id: string) => () => setOpen((o) => (o === id ? null : id))
+  const folding = (id: string) => ({ open: open === id, onToggle: fold(id) })
 
   const update = (next: (s: Loaded) => Loaded) => setState((s) => (s && s !== 'error' ? next(s) : s))
   const land = (patch: Partial<UserSettings>) => update((s) => ({ ...s, settings: { ...s.settings, ...patch } }))
@@ -433,6 +435,7 @@ export function Settings({
             </FoldRow>
             <ToggleSetting field="session_end_notify" label={t('settings.notifyEnd')} />
             <ToggleSetting field="overrun_wakes" label={t('settings.overrunWakes')} />
+            <SessionLimitsRow {...folding('session_limits')} />
             <FoldRow
               label={t('settings.counter')}
               value={counterLabel}
@@ -507,6 +510,7 @@ export function Settings({
                 )}
               </FoldRow>
             )}
+            <ReplyRow {...folding('reply')} />
           </Group>
         )}
 
@@ -541,6 +545,7 @@ export function Settings({
                 </div>
               )}
             </FoldRow>
+            <DayBoundsRow {...folding('day_bounds')} />
             <FoldRow
               label={t('settings.nightly')}
               value={
@@ -572,6 +577,7 @@ export function Settings({
                 </div>
               )}
             </FoldRow>
+            <ReviewRow {...folding('review')} />
             <FoldRow
               label={t('settings.closeDay')}
               value={loaded.draft.close_day_time || t('settings.off')}
@@ -752,6 +758,8 @@ export function Settings({
               )}
             </FoldRow>
           )}
+          <PatienceRow {...folding('patience')} />
+          <DeliveryRow {...folding('delivery')} />
         </Group>
 
         {settings?.voice_enabled && (
@@ -976,6 +984,7 @@ export function Settings({
         </Group>
 
         <Group head={t('settings.advanced')}>
+          <FineTuningRow {...folding('fine')} />
           <FoldRow
             label={t('settings.aiKey')}
             value={llmKey ? keyHint(llmKey) : undefined}

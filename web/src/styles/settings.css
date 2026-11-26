@@ -80,6 +80,9 @@
 .set-fold-body input:disabled { color: var(--quiet); opacity: 1; }
 .set-times { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; max-width: 100%; }
 .set-time { display: inline-flex; align-items: center; gap: 0.125rem; }
+.set-tunes { display: flex; flex-wrap: wrap; gap: 0.75rem 1rem; max-width: 100%; }
+.set-tune { display: flex; flex-direction: column; gap: 0.25rem; }
+.set-tune-head { font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--quiet); padding-top: 0.5rem; }
 .set-time-remove {
   min-width: 2.75rem;
   min-height: 2.75rem;
