@@ -17,7 +17,7 @@ import { api, ApiError } from '../api'
 import { hintShown, hintUsed, railX, sessionFor, slotAfter, withoutCategory, workTime } from '../circle'
 import { briefSeen, markBriefSeen } from '../brief'
 import { BriefSheet } from '../briefSheet'
-import { latest } from '../coalesce'
+import { latest, quiet } from '../coalesce'
 import type { ToastAction } from '../app'
 import { DayLine as DayLineView, minutesOf } from '../dayline'
 import { desktop } from '../desktop'
@@ -45,7 +45,7 @@ import {
   quickStop,
   type FocusSession,
 } from '../session'
-import { useSameArray, useStableCallback } from '../stable'
+import { reuse, useSameArray, useStableCallback } from '../stable'
 import { Tick } from '../tick'
 import { findNode, leaves } from '../tree'
 import type { DayView, PlanEvent, QueueEntry, QueueReason, SessionPhase, SessionStart, Task, TaskNode, TaskNotify } from '../types'
@@ -81,6 +81,7 @@ const u = (px: number) => `calc(${px} * var(--u))`
 
 // "Leave them" is the user's answer for the rest of that day, and only on this device.
 const LEFT_KEY = 'note.close-day-left'
+const TICK_SETTLE_MS = 800
 
 function leftToday(): boolean {
   try {
@@ -282,10 +283,11 @@ export function Home({
   useIdle(!mobile || inSession)
 
   const newest = useState(() => latest<DayView>())[0]
+  const writes = useRef(0)
   const load = useCallback(() => {
     const date = todayIso()
     newest(api.day(date))
-      .then((d) => d && setDay(d))
+      .then((d) => d && writes.current === 0 && setDay((was) => reuse(was, d)))
       .catch(() =>
         setDay({ date, items: [], events: [], calendar: [], free: [], quiet_now: null, history: [] }),
       )
@@ -295,7 +297,23 @@ export function Home({
     )
   }, [newest])
   useEffect(load, [load, refresh])
-  const events = day?.events ?? null
+  // Blocks ticked done here read done at once, and every tick lands, until the reload after the ticking pauses.
+  const [ticked, setTicked] = useState<ReadonlySet<number>>(() => new Set())
+  const served = day?.events ?? null
+  const events = useMemo(
+    () =>
+      served && ticked.size > 0
+        ? served.map((ev) => (ticked.has(ev.id) && ev.status !== 'done' ? { ...ev, status: 'done' as const } : ev))
+        : served,
+    [served, ticked],
+  )
+  useEffect(() => {
+    if (writes.current > 0 || !served) return
+    setTicked((was) => {
+      const still = [...was].filter((id) => served.some((ev) => ev.id === id && ev.status !== 'done'))
+      return still.length === was.size ? was : new Set(still)
+    })
+  }, [served])
 
   useEffect(() => {
     const id = setInterval(() => tick((n) => n + 1), 1000)
@@ -336,13 +354,35 @@ export function Home({
     })
   }
 
+  const settled = useStableCallback(() => {
+    load()
+    onChanged()
+  })
+  const settle = useState(() => quiet(() => settled(), TICK_SETTLE_MS, TICK_SETTLE_MS))[0]
+  useEffect(() => () => settle.cancel(), [settle])
+
   // A block laid for a task is finished on both counts at once: the plan settles,
   // and so does the task it holds.
-  const finishBlock = (ev: PlanEvent) =>
-    act(async () => {
+  const finishBlock = async (ev: PlanEvent) => {
+    if (ev.status === 'done') return
+    setTicked((was) => new Set(was).add(ev.id))
+    writes.current++
+    settle.poke()
+    try {
       await api.eventAction(ev.id, 'done')
       if (ev.task) await api.patchTask(ev.task.id, { state: 'done' })
-    })
+    } catch (err) {
+      notify(actionMessage(err))
+      setTicked((was) => {
+        const next = new Set(was)
+        next.delete(ev.id)
+        return next
+      })
+    } finally {
+      writes.current--
+      settle.poke()
+    }
+  }
 
   // A trigger is Note's own moment to look again, never the user's, so it stays off
   // the day entirely. The beat is a dependency because the holds live outside React state.

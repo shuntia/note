@@ -137,6 +137,7 @@
   scrollbar-width: thin;
 }
 .goal-card-tasks li { display: flex; align-items: center; gap: 0.5rem; min-height: 1.75rem; }
+.goal-card-tasks li[data-done] .goal-card-task { opacity: 0.5; }
 .goal-card-tasks .tick { width: 1.125rem; height: 1.125rem; border-width: 1.5px; }
 .goal-card-tasks .tick svg { width: 0.75rem; height: 0.75rem; }
 .goal-card-task {

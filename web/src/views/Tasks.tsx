@@ -865,6 +865,20 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       out.set(goal.id, nodes.filter((n) => n.goal_id === goal.id && isLive(n) && visible(n)).sort(bySchedule))
     return out
   }, [nodes, goals, filter, query])
+  // A goal's ticked tasks hold their rows, ticked, while the list holds its places.
+  const frozen = holding || leaving.length > 0
+  const drawnGoals = useRef(goalTasks)
+  const goalRows = useMemo(() => {
+    if (!frozen) return (drawnGoals.current = goalTasks)
+    const out = new Map<number, TaskNode[]>()
+    for (const [id, fresh] of goalTasks) {
+      const was = drawnGoals.current.get(id) ?? []
+      const [kept] = held([was.map((n) => n.id)], [fresh.map((n) => n.id)], (k) => rootsById.has(k))
+      const rows = kept.flatMap((k) => rootsById.get(k) ?? [])
+      out.set(id, rows.length === was.length && rows.every((n, i) => n === was[i]) ? was : rows)
+    }
+    return (drawnGoals.current = out)
+  }, [goalTasks, frozen, rootsById])
   const goalPcts = useMemo(() => {
     const words = searchWords(query)
     return new Map(goals.map((g) => [g.id, nodes ? goalProgress(g, nodes, filter, words) : { pct: 0, parts: 0 }]))
@@ -892,7 +906,6 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     ? [ids(shown.soon.slice(0, shown.ordered)), ids(shown.soon.slice(shown.ordered)), ids(shown.later)]
     : [[], [], []]
   const leavingOf = (id: number) => leaving.find((l) => l.id === id)
-  const frozen = holding || leaving.length > 0
   drawn.current = frozen ? held(drawn.current, fresh, (id) => leavingOf(id) !== undefined) : fresh
   // A leaving row is drawn from the node it left as, since a reload no longer lists a dropped one.
   const placedOf = (group: number[]): Placed[] =>
@@ -1076,7 +1089,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
                 key={goal.id}
                 goal={goal}
                 pct={goalPcts.get(goal.id)?.pct ?? 0}
-                tasks={goalTasks.get(goal.id) ?? NO_TASKS}
+                tasks={goalRows.get(goal.id) ?? NO_TASKS}
                 onComplete={onCompleteInGoal}
                 onEdit={onEditGoal}
                 onClose={onCloseGoal}
@@ -1444,8 +1457,12 @@ const GoalCard = memo(function GoalCard({
       {tasks.length > 0 && (
         <ul className="goal-card-tasks" aria-label={t('goals.tasksOf', { title: goal.title })}>
           {tasks.map((n) => (
-            <li key={n.id}>
-              <Tick checked={false} label={t('tasks.tick', { text: n.title })} onClick={() => onComplete(n)} />
+            <li key={n.id} data-done={!isLive(n) || undefined}>
+              <Tick
+                checked={!isLive(n)}
+                label={t('tasks.tick', { text: n.title })}
+                onClick={() => isLive(n) && onComplete(n)}
+              />
               <span className="goal-card-task">{shownTitle(n)}</span>
             </li>
           ))}
