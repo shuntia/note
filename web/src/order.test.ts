@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { arranged, dropped, gapAt, landing, openTaskItems, withOrder } from './order'
+import { arranged, dropped, gapAt, held, landing, openTaskItems, withOrder } from './order'
 import type { DayItem, TaskNode } from './types'
 
 const node = (id: number, steps: number[] = []) =>
@@ -156,5 +156,30 @@ describe('across two columns', () => {
       { top: 93, height: 40 },
     ]
     expect(arranged(one, 0, 3).map((p) => p.top)).toEqual([93, 0, 46, 53])
+  })
+})
+
+describe('held', () => {
+  const none = () => false
+
+  test('rows keep the places they were drawn in while the fresh order differs', () => {
+    expect(held([[1, 2], [3, 4]], [[2], [4, 1, 3]], none)).toEqual([[1, 2], [3, 4]])
+  })
+
+  test('finished rows stay put, so the next one aimed at has not moved', () => {
+    const was = [[], [1, 2, 3]]
+    const one = held(was, [[], [2, 3]], (k) => k === 1)
+    expect(one).toEqual([[], [1, 2, 3]])
+    const two = held(one, [[], [3]], (k) => k <= 2)
+    expect(two).toEqual([[], [1, 2, 3]])
+    expect(held(two, [[], []], (k) => k <= 3)).toEqual([[], [1, 2, 3]])
+  })
+
+  test('a row gone without being held leaves, and a new one joins its group at the end', () => {
+    expect(held([[1], [2, 3]], [[1, 5], [3, 4]], none)).toEqual([[1, 5], [3, 4]])
+  })
+
+  test('a row is drawn once even when it is both held and listed', () => {
+    expect(held([[], [1, 2]], [[1], [2]], (k) => k === 1)).toEqual([[], [1, 2]])
   })
 })
