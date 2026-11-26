@@ -63,11 +63,17 @@ const DELIVERY: Choice<Delivery>[] = [
   { id: 'push', key: 'announce.notify' },
   { id: 'chat', key: 'announce.chat' },
 ]
-const CHANNELS: { field: 'nudge_channel' | 'checkin_channel' | 'review_channel' | 'brief_channel'; key: Key }[] = [
-  { field: 'checkin_channel', key: 'tuning.channel.checkin' },
-  { field: 'nudge_channel', key: 'tuning.channel.nudge' },
-  { field: 'review_channel', key: 'tuning.channel.review' },
-  { field: 'brief_channel', key: 'tuning.channel.brief' },
+// The brief never lands in a chat thread: kept from notifications it waits in the app.
+const IN_APP: Choice<Delivery>[] = [DELIVERY[0], { id: 'chat', key: 'tuning.delivery.inApp' }]
+const CHANNELS: {
+  field: 'nudge_channel' | 'checkin_channel' | 'review_channel' | 'brief_channel'
+  key: Key
+  choices: Choice<Delivery>[]
+}[] = [
+  { field: 'checkin_channel', key: 'tuning.channel.checkin', choices: DELIVERY },
+  { field: 'nudge_channel', key: 'tuning.channel.nudge', choices: DELIVERY },
+  { field: 'review_channel', key: 'tuning.channel.review', choices: DELIVERY },
+  { field: 'brief_channel', key: 'tuning.channel.brief', choices: IN_APP },
 ]
 
 const labelOf = <T extends string>(list: Choice<T>[], id: T) => t(list.find((c) => c.id === id)?.key ?? list[0].key)
@@ -332,7 +338,6 @@ export function DeliveryRow({ open, onToggle }: Fold) {
   const tuner = useTuning('delivery')
   if (!tuner) return null
   const { tuning } = tuner
-  const options = DELIVERY.map((c) => ({ id: c.id, label: t(c.key) }))
   const quiet = CHANNELS.filter((c) => tuning[c.field] === 'chat').length
   return (
     <FoldRow
@@ -348,7 +353,7 @@ export function DeliveryRow({ open, onToggle }: Fold) {
               <span className="set-row-body">
                 <span className="set-label">{t(c.key)}</span>
               </span>
-              <Seg label={t(c.key)} value={tuning[c.field]} options={options} disabled={tuner.busy} onPick={(v) => void tuner.put({ [c.field]: v })} />
+              <Seg label={t(c.key)} value={tuning[c.field]} options={c.choices.map((o) => ({ id: o.id, label: t(o.key) }))} disabled={tuner.busy} onPick={(v) => void tuner.put({ [c.field]: v })} />
             </div>
           ))}
           <Status save={tuner.save} row="delivery" />

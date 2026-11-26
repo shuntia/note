@@ -33,6 +33,12 @@ test('the day reads from its start to midnight or past it', () => {
   expect(render(<DayBoundsRow open={false} onToggle={() => undefined} />, { day_end: '03:00' })).toContain('08:00 – 03:00')
 })
 
-test('delivery counts the categories kept to the chat', () => {
-  expect(render(<DeliveryRow open={false} onToggle={() => undefined} />)).toContain('2 in chat only')
+test('delivery counts the categories kept from notifications', () => {
+  expect(render(<DeliveryRow open={false} onToggle={() => undefined} />)).toContain('2 without notifications')
+})
+
+test('the brief is kept to the app, never to a chat', () => {
+  const html = render(<DeliveryRow open onToggle={() => undefined} />)
+  expect(html.match(/>Chat</g)).toHaveLength(3)
+  expect(html.match(/>App only</g)).toHaveLength(1)
 })
