@@ -88,8 +88,9 @@ pub fn run_for_user(
     let lang = Lang::for_user(deps.config_dir, username);
     let opening = crate::model_text::brief_opening(lang, date);
     let outcome = crate::agent::run_session(deps, user_id, username, crate::tools::SessionKind::Brief, now, &[], &opening);
+    let canned = [crate::text::max_turns_reply(lang), crate::text::unwritten_reply(lang, false)];
     let content = match outcome {
-        Ok(out) if !out.reply.trim().is_empty() => Some(out.reply.trim().to_string()),
+        Ok(out) if !out.reply.trim().is_empty() && !canned.contains(&out.reply) => Some(out.reply.trim().to_string()),
         Ok(_) => {
             crate::log::record(&crate::db_guard(deps.db), Some(user_id), "brief_error", &format!("{date}: no reply"))?;
             None
@@ -361,6 +362,27 @@ mod tests {
         }
         let back = run_for_user(&deps(&db, &tmp, &llm), 1, "aitest", next, at("2026-11-26T23:01:00Z")).unwrap().unwrap();
         assert_eq!(back.content, "Back again.");
+    }
+
+    #[test]
+    fn the_last_round_must_write_and_a_brief_that_never_does_is_not_kept() {
+        let look = || ChatResponse {
+            text: String::new(),
+            tool_calls: vec![crate::providers::ToolCall { id: "c".into(), name: "task_find".into(), args: "{}".into() }],
+        };
+        let (db, tmp) = env("07:00");
+        let llm = MockLLM::scripted(vec![look(), look(), look(), said("A full day.")]);
+        let date: jiff::civil::Date = "2026-11-26".parse().unwrap();
+        let brief = run_for_user(&deps(&db, &tmp, &llm), 1, "aitest", date, at("2026-11-25T22:00:00Z")).unwrap().unwrap();
+        assert_eq!(brief.content, "A full day.");
+        let seen = llm.seen();
+        assert_eq!(seen.len(), crate::agent::BRIEF_MAX_TURNS);
+        assert_eq!(seen[seen.len() - 1].must_call.as_deref(), Some("-"), "the last round may only write");
+
+        let (db, tmp) = env("07:00");
+        let llm = MockLLM::scripted(vec![look(), look(), look(), look(), look()]);
+        assert_eq!(run_for_user(&deps(&db, &tmp, &llm), 1, "aitest", date, at("2026-11-25T22:00:00Z")).unwrap(), None);
+        assert_eq!(for_date(&db.lock().unwrap(), 1, "2026-11-26").unwrap(), None);
     }
 
     #[test]

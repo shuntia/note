@@ -29,13 +29,13 @@ pub fn translate(date: Date, wall: &str, from: &TimeZone, to: &TimeZone) -> Opti
 }
 
 /// The work day `at` counts toward in `tz`: its own date, or the day before
-/// while the clock still reads earlier than `day_end`.
+/// while it is earlier than that date's `day_end` instant, so an hour the
+/// clock repeats never takes the day back.
 pub fn work_date(tz: &TimeZone, at: Timestamp, day_end: &str) -> Date {
-    let (date, wall) = civil(at, tz);
-    if wall.as_str() < day_end {
-        date.yesterday().unwrap_or(date)
-    } else {
-        date
+    let (date, _) = civil(at, tz);
+    match instant(tz, date, day_end) {
+        Some(opens) if at < opens => date.yesterday().unwrap_or(date),
+        _ => date,
     }
 }
 
@@ -43,9 +43,12 @@ pub fn work_date(tz: &TimeZone, at: Timestamp, day_end: &str) -> Date {
 /// hours that run on beyond midnight.
 pub fn work_wall(tz: &TimeZone, at: Timestamp, day_end: &str) -> (Date, String) {
     let (date, wall) = civil(at, tz);
-    match extended(&wall, day_end) {
-        Some(late) => (date.yesterday().unwrap_or(date), late),
-        None => (date, wall),
+    let day = work_date(tz, at, day_end);
+    if day < date {
+        let m = crate::templates::wall_minutes(&wall) + 24 * 60;
+        (day, format!("{:02}:{:02}", m / 60, m % 60))
+    } else {
+        (date, wall)
     }
 }
 
@@ -102,16 +105,6 @@ pub fn civil_date(date: Date, wall: &str, day_end: &str) -> Date {
     } else {
         date
     }
-}
-
-/// A wall time of the next calendar date that still belongs to the work day
-/// before, written on past 24:00 ("01:30" reads "25:30").
-pub fn extended(wall: &str, day_end: &str) -> Option<String> {
-    if wall >= day_end || !crate::templates::valid_time(wall) {
-        return None;
-    }
-    let m = crate::templates::wall_minutes(wall) + 24 * 60;
-    Some(format!("{:02}:{:02}", m / 60, m % 60))
 }
 
 /// The half-open span of instants work day `date` covers.
@@ -255,10 +248,27 @@ mod tests {
         assert_eq!(civil_date(d("2026-11-24"), "01:30", "03:00"), d("2026-11-25"));
         assert_eq!(civil_date(d("2026-11-24"), "23:30", "03:00"), d("2026-11-24"));
         assert_eq!(civil_date(d("2026-11-24"), "01:30", "00:00"), d("2026-11-24"));
-        assert_eq!(extended("01:30", "03:00").as_deref(), Some("25:30"));
-        assert_eq!(extended("03:00", "03:00"), None);
+        assert_eq!(work_wall(&la, at("2026-11-25T09:30:00Z"), "03:00"), (d("2026-11-24"), "25:30".into()));
+        assert_eq!(work_wall(&la, at("2026-11-25T11:00:00Z"), "03:00"), (d("2026-11-25"), "03:00".into()));
         let (from, to) = work_bounds(&la, d("2026-11-24"), "03:00").unwrap();
         assert_eq!((from, to), (at("2026-11-24T11:00:00Z"), at("2026-11-25T11:00:00Z")));
+    }
+
+    #[test]
+    fn the_work_day_never_steps_back_in_an_hour_the_clock_repeats() {
+        let la = named("America/Los_Angeles");
+        let d = |s: &str| s.parse::<Date>().unwrap();
+        // 2026-11-01: 01:00-02:00 PDT runs again as PST from 09:00Z.
+        assert_eq!(work_date(&la, at("2026-11-01T08:15:00Z"), "01:30"), d("2026-10-31"), "01:15 PDT");
+        assert_eq!(work_date(&la, at("2026-11-01T08:45:00Z"), "01:30"), d("2026-11-01"), "01:45 PDT");
+        assert_eq!(work_date(&la, at("2026-11-01T09:15:00Z"), "01:30"), d("2026-11-01"), "01:15 PST");
+        assert_eq!(work_wall(&la, at("2026-11-01T09:15:00Z"), "01:30"), (d("2026-11-01"), "01:15".into()));
+        assert_eq!(work_wall(&la, at("2026-11-01T08:15:00Z"), "01:30"), (d("2026-10-31"), "25:15".into()));
+        // 2026-03-08: 02:00-03:00 never happens; a day_end inside it resolves forward, as the runner fires it.
+        assert_eq!(work_date(&la, at("2026-03-08T10:29:00Z"), "02:30"), d("2026-03-07"), "03:29 PDT");
+        assert_eq!(work_date(&la, at("2026-03-08T10:30:00Z"), "02:30"), d("2026-03-08"), "03:30 PDT");
+        let (from, to) = work_bounds(&la, d("2026-03-07"), "02:30").unwrap();
+        assert_eq!((from, to), (at("2026-03-07T10:30:00Z"), at("2026-03-08T10:30:00Z")));
     }
 
     #[test]

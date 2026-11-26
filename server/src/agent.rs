@@ -152,7 +152,9 @@ const fn profile(kind: SessionKind) -> SessionProfile {
             ..base
         },
         SessionKind::Call => SessionProfile { prompt: "voice", japanese: None, ..base },
-        SessionKind::Brief => SessionProfile { then: Some("brief"), max_turns: BRIEF_MAX_TURNS, ..base },
+        SessionKind::Brief => {
+            SessionProfile { then: Some("brief"), max_turns: BRIEF_MAX_TURNS, max_turns_reply: true, ..base }
+        }
         SessionKind::Nightly => SessionProfile { then: Some("planning"), ..base },
         SessionKind::Trigger => {
             SessionProfile { then: Some("trigger"), max_turns: TRIGGER_MAX_TURNS, must_end: true, ..base }
