@@ -29,16 +29,20 @@ pub fn for_date(conn: &Connection, user_id: i64, date: &str) -> rusqlite::Result
     .optional()
 }
 
-/// The local date a brief is owed for at `now`, whether or not it was written.
+/// The work day a brief is owed for at `now`, whether or not it was written.
+/// `brief_time` is a wall time on that work day, so one earlier than
+/// `day_end` falls past its midnight; it is never owed once its day is over.
 fn owed(ucfg: &UserConfig, now: jiff::Timestamp) -> Option<jiff::civil::Date> {
     let at = ucfg.brief_time();
     if !crate::templates::valid_time(at) {
         return None;
     }
-    let local = now.to_zoned(crate::zone::named(&ucfg.timezone));
-    let minutes = i64::from(local.hour()) * 60 + i64::from(local.minute());
-    let late = minutes - crate::templates::wall_minutes(at);
-    (0..LATE_MIN).contains(&late).then(|| local.date())
+    let clock = crate::zone::Clock::of(ucfg);
+    let date = clock.today(now);
+    let from = crate::zone::instant(&clock.tz, clock.civil_date(date, at), at)?;
+    let late = from.checked_add(jiff::SignedDuration::from_mins(LATE_MIN)).ok()?;
+    let (_, day_over) = clock.bounds(date).ok()?;
+    (from <= now && now < late.min(day_over)).then_some(date)
 }
 
 /// Users whose brief is owed and not yet written, with the date it is for.
@@ -312,6 +316,26 @@ mod tests {
         ucfg.brief_time = Some(String::new());
         ucfg.save(tmp.path(), "aitest").unwrap();
         assert!(due_at("2026-11-26T22:00:00Z").is_empty(), "a blank time writes none");
+    }
+
+    #[test]
+    fn a_brief_belongs_to_the_work_day_when_it_runs_past_midnight() {
+        let (db, tmp) = env("07:00");
+        let mut ucfg = UserConfig::load(tmp.path(), "aitest").unwrap();
+        ucfg.tuning.day_end = Some("05:00".into());
+        ucfg.save(tmp.path(), "aitest").unwrap();
+        let conn = db.lock().unwrap();
+        let due_at = |ts: &str| due(&conn, tmp.path(), at(ts)).unwrap();
+        assert_eq!(due_at("2026-11-25T22:00:00Z"), [(1, "aitest".to_string(), "2026-11-26".parse().unwrap())]);
+        assert!(due_at("2026-11-25T18:00:00Z").is_empty(), "03:00 is still the 25th's night");
+
+        let mut ucfg = UserConfig::load(tmp.path(), "aitest").unwrap();
+        ucfg.brief_time = Some("04:00".into());
+        ucfg.save(tmp.path(), "aitest").unwrap();
+        let owed_for = |ts: &str| due(&conn, tmp.path(), at(ts)).unwrap().first().map(|u| u.2.to_string());
+        assert_eq!(owed_for("2026-11-25T19:00:00Z").as_deref(), Some("2026-11-25"), "04:00 on the 26th is the 25th's");
+        assert_eq!(owed_for("2026-11-25T19:59:00Z").as_deref(), Some("2026-11-25"));
+        assert_eq!(owed_for("2026-11-25T20:00:00Z"), None, "05:00 closes the 25th and its brief with it");
     }
 
     #[test]
