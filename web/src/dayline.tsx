@@ -3,17 +3,12 @@ import { eventLabel } from './receipts'
 import type { CalendarOccurrence, PlanEvent } from './types'
 
 const START = 6 * 60
-const END = 24 * 60
+const MIDNIGHT = 24 * 60
 
 export function minutesOf(wall: string): number {
   const [h, m] = wall.split(':')
   return Number(h) * 60 + Number(m)
 }
-
-const pct = (mins: number) => `${((Math.min(END, Math.max(START, mins)) - START) / (END - START)) * 100}%`
-
-const width = (from: number, to: number, least: number) =>
-  `${Math.max(least, ((to - from) / (END - START)) * 100)}%`
 
 // What is ahead is a bare span; what is behind is a tick on the gone bar for each
 // event the day already settled, and the calendar's own windows are the ground
@@ -27,6 +22,7 @@ export function DayLine({
   compact = false,
   hoverId = null,
   onHover,
+  end = MIDNIGHT,
 }: {
   events: PlanEvent[]
   calendar?: CalendarOccurrence[]
@@ -36,7 +32,12 @@ export function DayLine({
   compact?: boolean
   hoverId?: number | null
   onHover?: (id: number | null) => void
+  // Past MIDNIGHT where the work day runs on into the small hours.
+  end?: number
 }) {
+  const pct = (mins: number) => `${((Math.min(end, Math.max(START, mins)) - START) / (end - START)) * 100}%`
+  const width = (from: number, to: number, least: number) =>
+    `${Math.max(least, ((to - from) / (end - START)) * 100)}%`
   const ahead = events.filter(
     (ev) =>
       (ev.status === 'pending' || ev.status === 'snoozed' || ev.status === 'fired') &&
@@ -48,7 +49,9 @@ export function DayLine({
       minutesOf(ev.end_wall_time ?? ev.wall_time) <= now,
   )
   const filled = nextId ?? ahead[0]?.id
-  const hours = compact ? [6, 15, 24] : [6, 9, 12, 15, 18, 21, 24]
+  const last = Math.floor(end / 60)
+  const base = compact ? [6, 15, 24] : [6, 9, 12, 15, 18, 21, 24]
+  const hours = last > 24 ? [...base.filter((h) => h < 24 || !compact), last] : base
 
   return (
     <div className={`dayline${compact ? ' compact' : ''}`} role="img" aria-label={t('dayline.label')}>
@@ -61,7 +64,7 @@ export function DayLine({
           className={`dl-hour${i === 0 ? ' edge-start' : i === hours.length - 1 ? ' edge-end' : ''}`}
           style={{ left: pct(h * 60) }}
         >
-          {String(h).padStart(2, '0')}
+          {String(h > 24 ? h % 24 : h).padStart(2, '0')}
         </span>
       ))}
       {calendar.map((o) =>

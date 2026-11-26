@@ -71,6 +71,7 @@ pub(super) struct Saver<'a> {
     conn: &'a Connection,
     ctx: &'a ToolCtx<'a>,
     tz: jiff::tz::TimeZone,
+    clock: crate::zone::Clock,
     now: jiff::Timestamp,
     pub env: Envelope,
     refs: HashMap<i64, Ref>,
@@ -98,6 +99,7 @@ impl<'a> Saver<'a> {
             conn,
             ctx,
             tz: user_tz(ctx),
+            clock: crate::zone::Clock::load(ctx.config_dir, ctx.username),
             now: jiff::Timestamp::now(),
             env: Envelope::default(),
             refs: HashMap::new(),
@@ -201,9 +203,9 @@ impl<'a> Saver<'a> {
         if let Some(v) = obj.take(&["due", "due_at", "due_on", "deadline", "due_date"]) {
             match loose::text(&v) {
                 Some(s) if s.trim().is_empty() => node.due = Some(None),
-                Some(s) => match loose::when(&s, &self.tz, self.now) {
+                Some(s) => match loose::when(&s, &self.tz, &self.clock.day_end, self.now) {
                     Some(w) => {
-                        if let Some(d) = loose::rolled(&s, self.now.to_zoned(self.tz.clone()).date()) {
+                        if let Some(d) = loose::rolled(&s, self.clock.today(self.now)) {
                             self.env.adjusted(Some(r), "due", d.to_string().into(), loose::rolled_why(&s, d));
                         }
                         node.due = Some(Some(w));

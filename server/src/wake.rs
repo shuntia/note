@@ -6,8 +6,6 @@ use rusqlite::Connection;
 use std::path::Path;
 
 pub const ORIGIN: &str = "lay_day";
-/// Activity before this belongs to the night before, not the new day.
-pub const EARLIEST: &str = "05:00";
 
 struct Seen {
     user_id: i64,
@@ -63,10 +61,11 @@ fn check_one(conn: &Connection, config_dir: &Path, user: &Seen, now: jiff::Times
     let local = now.to_zoned(tz.clone());
     let at = wall(&local);
     let close = cfg.close_day_time();
-    if at.as_str() < EARLIEST || (!close.is_empty() && at.as_str() >= close) {
+    let earliest = cfg.tuning.wake_earliest().max(cfg.day_end());
+    if at.as_str() < earliest || (!close.is_empty() && at.as_str() >= close) {
         return Ok(None);
     }
-    let date = local.date();
+    let date = cfg.today(now);
     if laid_on(conn, user.user_id, date)? {
         return Ok(None);
     }
@@ -75,7 +74,7 @@ fn check_one(conn: &Connection, config_dir: &Path, user: &Seen, now: jiff::Times
         .as_deref()
         .and_then(|s| s.parse::<jiff::Timestamp>().ok())
         .map(|t| t.to_zoned(tz.clone()))
-        .is_some_and(|t| t.date() == date && wall(&t).as_str() >= EARLIEST);
+        .is_some_and(|t| t.date() == date && wall(&t).as_str() >= earliest);
     if !up_today && at.as_str() < start {
         return Ok(None);
     }
@@ -125,18 +124,14 @@ impl Busy {
     }
 }
 
-/// How long after `close_day_time` a call still counts as inside the day, so
-/// the close of the day and the wait it lays may ring.
-pub const CLOSE_DAY_CALLS_MIN: u32 = 30;
-
 /// The wall times a call may ring between: `day_start` to `calls_until`, held
-/// open until `CLOSE_DAY_CALLS_MIN` past the close of the day. A blank end
-/// reads as midnight.
+/// open until `close_day_calls_min` past the close of the day, so the close of
+/// the day and the wait it lays may ring. A blank end reads as midnight.
 pub fn call_hours(cfg: &crate::config::UserConfig) -> (String, String) {
     let start = if cfg.day_start().is_empty() { "00:00" } else { cfg.day_start() };
     let mut until = if cfg.calls_until().is_empty() { "24:00".to_string() } else { cfg.calls_until().to_string() };
     if let Some(close) = minutes(cfg.close_day_time()) {
-        let held = (close + CLOSE_DAY_CALLS_MIN).min(24 * 60);
+        let held = (close + cfg.tuning.close_day_calls_min()).min(24 * 60);
         let held = format!("{:02}:{:02}", held / 60, held % 60);
         if held > until {
             until = held;

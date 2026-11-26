@@ -316,3 +316,31 @@ async fn a_days_list_is_set_by_its_date_and_read_back_as_items() {
     let (status, _) = call(&app, &cookie, Method::PUT, "/api/day/someday/order", Some(&body)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn a_day_that_runs_past_midnight_shows_the_small_hours_of_the_next_date() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let (status, _) =
+        call(&app, &cookie, Method::PUT, "/api/settings", Some(r#"{"tuning":{"day_end":"03:00"}}"#)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (date, next) = (ahead(2), ahead(3));
+    for (on, start, end) in [(next, "01:00", "02:00"), (next, "09:00", "10:00"), (date, "02:00", "02:30")] {
+        let body = format!(r#"{{"title":"t{start}","kind":"busy","start_time":"{start}","end_time":"{end}","on_date":"{on}"}}"#);
+        let (status, row) = call(&app, &cookie, Method::POST, "/api/calendar", Some(&body)).await;
+        assert_eq!(status, StatusCode::CREATED, "{row}");
+    }
+    let (status, day) = call(&app, &cookie, Method::GET, &format!("/api/day/{date}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(day["day_end"], "03:00");
+    let spans: Vec<(String, String)> = day["calendar"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| (o["start"].as_str().unwrap().to_string(), o["end"].as_str().unwrap().to_string()))
+        .collect();
+    assert_eq!(spans, vec![("25:00".to_string(), "26:00".to_string())], "{day}");
+
+    let (status, now) = call(&app, &cookie, Method::GET, "/api/day/today", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(now["date"], now["today"]);
+}

@@ -41,6 +41,7 @@ import '../styles/tasks.css'
 import type { Adjusted, Goal, NewTask, Task, TaskNode, TaskNotify, TaskState, TaskUpdate, TaskUrgency } from '../types'
 import { t, type Key } from '../i18n'
 import * as format from '../i18n/format'
+import { readPrefs } from '../prefs'
 
 const NOW_CAP = 3
 const UNDO_MS = 5000
@@ -214,10 +215,8 @@ function sameDay(iso: string, today: Date): boolean {
   )
 }
 
-const SOON_DAYS = 7
-
 const near = (iso: string | null, today: Date) =>
-  iso !== null && daysUntil(new Date(iso), today) < SOON_DAYS
+  iso !== null && daysUntil(new Date(iso), today) < readPrefs().soonDays
 
 // The server caps Now itself, but a frame between an agent write and the reload
 // must not count a fourth: the newest live members fall out of it, which is the

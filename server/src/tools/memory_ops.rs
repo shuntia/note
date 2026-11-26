@@ -230,7 +230,7 @@ fn note_when(raw: &str, there: &jiff::tz::TimeZone, user: &jiff::tz::TimeZone) -
     if s.is_empty() {
         return Some(None);
     }
-    let read = notes::parse_when(s, there).ok().or_else(|| match loose::when(s, there, jiff::Timestamp::now())? {
+    let read = notes::parse_when(s, there).ok().or_else(|| match loose::when(s, there, "00:00", jiff::Timestamp::now())? {
         loose::When::At(t) => Some(t.to_string()),
         loose::When::Day(d) => notes::parse_when(&d.to_string(), there).ok(),
     })?;
@@ -328,7 +328,7 @@ impl Writer<'_> {
         if s.is_empty() {
             return Some(None);
         }
-        let today = jiff::Timestamp::now().to_zoned(self.tz.clone()).date();
+        let today = crate::zone::today(self.ctx.config_dir, self.ctx.username, jiff::Timestamp::now());
         let day = loose::day(s, today).or_else(|| s.get(..10).and_then(|d| d.parse().ok()));
         if day.is_none() {
             self.env.ignored(Some(r), "until", format!("a memory's until is a day: {}", loose::DAY_FORMS));

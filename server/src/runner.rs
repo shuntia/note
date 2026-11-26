@@ -83,6 +83,7 @@ fn due_at(tz: &jiff::tz::TimeZone, c: &Candidate) -> Result<jiff::Timestamp> {
 struct UserRuntime {
     tz: jiff::tz::TimeZone,
     features: Features,
+    late_min: i64,
 }
 
 /// Resolves what the sweep needs from a user's config, memoized so it reads
@@ -103,6 +104,7 @@ fn user_runtime(
     let features = cfg
         .as_ref()
         .map_or_else(|| Features::for_category(&c.category), |u| u.features(&c.category));
+    let cfg_tuning = cfg.as_ref().map(|u| u.tuning.clone()).unwrap_or_default();
     let name = cfg.map_or_else(|| "UTC".into(), |u| u.timezone);
     let tz = match jiff::tz::TimeZone::get(&name) {
         Ok(tz) => tz,
@@ -119,7 +121,8 @@ fn user_runtime(
             jiff::tz::TimeZone::UTC
         }
     };
-    let rt = UserRuntime { tz, features };
+    let late_min = cfg_tuning.patient(crate::triggers::LATE_MIN);
+    let rt = UserRuntime { tz, features, late_min };
     cache.insert(c.username.clone(), rt.clone());
     Ok(rt)
 }
@@ -253,7 +256,7 @@ pub fn fire_due_except<S: std::hash::BuildHasher>(
         if due > now && !ended() {
             continue;
         }
-        if trigger && now.duration_since(due) > jiff::SignedDuration::from_mins(crate::triggers::LATE_MIN) {
+        if trigger && now.duration_since(due) > jiff::SignedDuration::from_mins(rt.late_min) {
             crate::triggers::drop_stale(conn, c.user_id, c.event_id, due, now)?;
             continue;
         }

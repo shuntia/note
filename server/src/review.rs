@@ -23,9 +23,9 @@ pub fn monday_of(date: jiff::civil::Date) -> jiff::civil::Date {
 }
 
 /// The week a nightly run for `date` looks back on: the seven days ending the
-/// night before, and only when `date` opens a new one.
-pub fn reviewed_week(date: jiff::civil::Date) -> Option<jiff::civil::Date> {
-    (date.weekday() == jiff::civil::Weekday::Monday)
+/// night before, and only when `date` is the user's review day.
+pub fn reviewed_week(date: jiff::civil::Date, review_day: Option<jiff::civil::Weekday>) -> Option<jiff::civil::Date> {
+    (Some(date.weekday()) == review_day)
         .then(|| date.checked_sub(jiff::Span::new().days(7)).ok())
         .flatten()
 }
@@ -365,7 +365,9 @@ pub fn run_for_user(
     date: jiff::civil::Date,
     now: jiff::Timestamp,
 ) -> Result<()> {
-    let Some(week_start) = reviewed_week(date) else { return Ok(()) };
+    let review_day = crate::config::UserConfig::load(deps.config_dir, username)
+        .map_or(Some(jiff::civil::Weekday::Monday), |c| c.tuning.review_weekday());
+    let Some(week_start) = reviewed_week(date, review_day) else { return Ok(()) };
     let week = week_start.to_string();
     if crate::context::read_strategy(deps.config_dir, username).is_some_and(|(written, _)| written == week) {
         return Ok(());
@@ -611,8 +613,13 @@ mod tests {
 
     #[test]
     fn only_a_monday_looks_back_and_it_looks_back_exactly_one_week() {
-        assert_eq!(reviewed_week(date("2026-09-21")), Some(date("2026-09-14")));
-        assert_eq!(reviewed_week(date("2026-09-22")), None);
+        let monday = Some(jiff::civil::Weekday::Monday);
+        assert_eq!(reviewed_week(date("2026-09-21"), monday), Some(date("2026-09-14")));
+        assert_eq!(reviewed_week(date("2026-09-22"), monday), None);
+        let thursday = Some(jiff::civil::Weekday::Thursday);
+        assert_eq!(reviewed_week(date("2026-09-24"), thursday), Some(date("2026-09-17")));
+        assert_eq!(reviewed_week(date("2026-09-21"), thursday), None);
+        assert_eq!(reviewed_week(date("2026-09-21"), None), None);
         assert_eq!(monday_of(date("2026-09-20")), date("2026-09-14"));
         assert_eq!(monday_of(date("2026-09-14")), date("2026-09-14"));
 

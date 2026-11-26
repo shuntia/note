@@ -315,6 +315,60 @@ export type Settings = {
   // Null follows the server's own.
   model: string | null
   effort: Effort | null
+  // When the day is laid if the user has not shown up, HH:MM; '' turns day-laying off.
+  day_start: string
+  tuning: Tuning
+}
+
+export type ReviewDay = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun' | 'off'
+export type Patience = 'quick' | 'normal' | 'patient'
+export type ReplyLength = 'short' | 'normal' | 'detailed'
+export type ReplyTone = 'default' | 'warm' | 'direct' | 'playful'
+// 'push' walks the notification ladder; 'chat' only lands in the thread.
+export type Delivery = 'push' | 'chat'
+
+// The server reads every value here at its shipped default until it is changed.
+export type Tuning = {
+  overrun_ask_pct: number
+  overrun_end_pct: number
+  gone_grace_min: number
+  max_pause_min: number
+  first_check_min: number
+  block_min: number
+  spoke_hold_min: number
+  idle_backoff_steps: number
+  no_show_grace_min: number
+  close_day_calls_min: number
+  ring_secs: number
+  due_soon_days: number
+  soon_days: number
+  lead_min: number
+  near_min: number
+  tidy_stale_days: number
+  tidy_overdue_days: number
+  tidy_big_min: number
+  tidy_small_min: number
+  note_stale_days: number
+  learn_window_days: number
+  history_limit: number
+  lookup_rounds: number
+  completion_cap: number
+  working_memory_cap: number
+  overrun_auto_end: boolean
+  block_follows_pomodoro: boolean
+  learning: boolean
+  auto_breakdown: boolean
+  calendar_quiet: boolean
+  // Until when past midnight the clock still counts toward the day before, HH:MM.
+  day_end: string
+  wake_earliest: string
+  review_day: ReviewDay
+  patience: Patience
+  reply_length: ReplyLength
+  reply_tone: ReplyTone
+  nudge_channel: Delivery
+  checkin_channel: Delivery
+  review_channel: Delivery
 }
 
 export type Language = '' | 'en' | 'ja'
@@ -571,6 +625,9 @@ export type DayItem = {
 
 export type DayView = {
   date: string
+  // The user's current work day, which runs past midnight until `day_end`.
+  today?: string
+  day_end?: string
   items: DayItem[]
   events: PlanEvent[]
   calendar: CalendarOccurrence[]

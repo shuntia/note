@@ -80,11 +80,12 @@ fn check_one(
         _ => last,
     };
     let outcomes = outcomes_since(conn, user.user_id, last)?;
-    if now.as_second() - since.as_second() < threshold * 60 * backoff(&outcomes) {
+    if now.as_second() - since.as_second() < threshold * 60 * backoff(&outcomes, cfg.tuning.idle_backoff_steps()) {
         return Ok(None);
     }
     if let Some(spoke) = outcomes.iter().find_map(|o| o.spoke_at) {
-        if now.as_second() - spoke.as_second() < SPOKE_HOLD_MIN * 60 && !changed_since(conn, user.user_id, spoke)? {
+        let hold = i64::from(cfg.tuning.spoke_hold_min());
+        if now.as_second() - spoke.as_second() < hold * 60 && !changed_since(conn, user.user_id, spoke)? {
             return Ok(None);
         }
     }
@@ -94,17 +95,17 @@ fn check_one(
     if crate::calendar::quiet_window(conn, user.user_id, &tz, now)?.is_some() {
         return Ok(None);
     }
-    let wall = format!("{:02}:{:02}", local.hour(), local.minute());
+    let (today, late) = crate::zone::work_wall(&tz, now, cfg.day_end());
     let close = cfg.close_day_time();
-    if !close.is_empty() && wall.as_str() >= close {
+    if !close.is_empty() && late.as_str() >= close {
         return Ok(None);
     }
-    let date = local.date();
-    if let Some(cap) = triggers::allowance(conn, config_dir, &user.username, user.user_id, date)? {
-        if triggers::spent(conn, user.user_id, date)? >= cap {
+    if let Some(cap) = triggers::allowance(conn, config_dir, &user.username, user.user_id, today)? {
+        if triggers::spent(conn, user.user_id, today)? >= cap {
             return Ok(None);
         }
     }
+    let (date, wall) = crate::zone::civil(now, &tz);
     let plan_id = crate::plan::ensure(conn, config_dir, &user.username, user.user_id, date)?;
     let id = triggers::insert(
         conn,
@@ -126,20 +127,18 @@ fn check_one(
     Ok(Some(id))
 }
 
-/// How long past `day_start` a user who has not shown up yet counts as having
-/// gone quiet from.
-pub const NO_SHOW_GRACE_MIN: i64 = 30;
-
-/// Whether `last` falls on today's date at or after `wake::EARLIEST`.
-fn here_today(tz: &jiff::tz::TimeZone, last: jiff::Timestamp, now: jiff::Timestamp) -> bool {
-    let seen = last.to_zoned(tz.clone());
-    let wall = format!("{:02}:{:02}", seen.hour(), seen.minute());
-    seen.date() == now.to_zoned(tz.clone()).date() && wall.as_str() >= crate::wake::EARLIEST
+/// Whether `last` falls in the work day of `now`, at or after the user's
+/// `wake_earliest` or in the hours past midnight their day runs on into.
+fn here_today(cfg: &crate::config::UserConfig, tz: &jiff::tz::TimeZone, last: jiff::Timestamp, now: jiff::Timestamp) -> bool {
+    let (_, wall) = crate::zone::civil(last, tz);
+    let end = cfg.day_end();
+    crate::zone::work_date(tz, last, end) == crate::zone::work_date(tz, now, end)
+        && (wall.as_str() >= cfg.tuning.wake_earliest() || wall.as_str() < end)
 }
 
 /// When the user's quiet began: their last activity when it was today, or for
-/// a day they have not shown up to, `day_start` plus `NO_SHOW_GRACE_MIN`.
-/// Activity before `wake::EARLIEST` is the night before's. `None` with no
+/// a day they have not shown up to, `day_start` plus `no_show_grace_min`.
+/// Activity before `wake_earliest` is the night before's. `None` with no
 /// `day_start` to count a no-show from.
 fn quiet_since(
     cfg: &crate::config::UserConfig,
@@ -147,22 +146,16 @@ fn quiet_since(
     local: &jiff::Zoned,
     last: jiff::Timestamp,
 ) -> Option<jiff::Timestamp> {
-    if here_today(tz, last, local.timestamp()) {
+    if here_today(cfg, tz, last, local.timestamp()) {
         return Some(last);
     }
     let start = cfg.day_start();
     if start.is_empty() {
         return None;
     }
-    let begun = crate::zone::instant(tz, local.date(), start)?;
-    Some(begun + jiff::Span::new().minutes(NO_SHOW_GRACE_MIN))
+    let begun = crate::zone::instant(tz, cfg.today(local.timestamp()), start)?;
+    Some(begun + jiff::Span::new().minutes(cfg.tuning.no_show_grace_min()))
 }
-
-/// How long after an idle nudge that spoke another is not worth a session
-/// while nothing has changed; the trigger prompt's "nudged about in the last hour".
-const SPOKE_HOLD_MIN: i64 = 60;
-/// The idle wait doubles per quiet ending in a row, up to this many times.
-const MAX_BACKOFF_STEPS: u32 = 2;
 
 /// One idle check's ending; `spoke_at` is set when its session said or rang.
 struct Outcome {
@@ -196,10 +189,11 @@ fn outcomes_since(conn: &Connection, user_id: i64, since: jiff::Timestamp) -> ru
     rows.collect()
 }
 
-/// 1, 2 or 4: how many idle waits to let pass after this many quiet endings in a row.
-fn backoff(outcomes: &[Outcome]) -> i64 {
+/// How many idle waits to let pass after this many quiet endings in a row:
+/// doubling per ending, at most `max_steps` times.
+fn backoff(outcomes: &[Outcome], max_steps: u32) -> i64 {
     let quiet = outcomes.iter().take_while(|o| o.quiet).count();
-    1 << u32::try_from(quiet).unwrap_or(u32::MAX).min(MAX_BACKOFF_STEPS)
+    1 << u32::try_from(quiet).unwrap_or(u32::MAX).min(max_steps)
 }
 
 /// Whether the user's day moved since `at`: a message, a task change, or a plan
@@ -254,8 +248,10 @@ fn ago(ts: &str, l: Lang, now: jiff::Timestamp) -> String {
 /// What an idle trigger's session reads under its prompt: how long the user
 /// has been quiet, or that they have not been in today, then each active note
 /// with its id, age and last nudge.
+#[allow(clippy::too_many_arguments)]
 pub fn context(
     conn: &Connection,
+    config_dir: &Path,
     data_dir: &Path,
     user_id: i64,
     username: &str,
@@ -264,8 +260,9 @@ pub fn context(
     now: jiff::Timestamp,
 ) -> Result<String> {
     let mut s = String::new();
+    let cfg = crate::config::UserConfig::load(config_dir, username)?;
     if let Some(at) = crate::presence::last_active(conn, user_id)? {
-        if here_today(tz, at, now) {
+        if here_today(&cfg, tz, at, now) {
             let _ = writeln!(s, "{}", mt::quiet_for(l, (now.as_second() - at.as_second()).max(0) / 60));
         } else {
             let _ = writeln!(s, "{}", mt::not_in_today(l));
@@ -587,7 +584,7 @@ mod tests {
         let milk = note(&conn, &tmp, "milk", "2026-09-30T11:30:00Z", None);
         note(&conn, &tmp, "past thing", MORNING, Some("2026-09-30T09:00:00Z"));
 
-        let text = context(&conn, tmp.path(), uid, "aki", &jiff::tz::TimeZone::UTC, Lang::En, noon()).unwrap();
+        let text = context(&conn, tmp.path(), tmp.path(), uid, "aki", &jiff::tz::TimeZone::UTC, Lang::En, noon()).unwrap();
         assert!(text.contains("Nothing from the user for 20 min."), "{text}");
         assert!(text.contains(&format!("- {}: \"call the bank\", added 4 h ago, nudged 1 h ago", &bank[..8])), "{text}");
         assert!(text.contains(&format!("- {}: \"milk\", added 30 min ago, never nudged", &milk[..8])), "{text}");
@@ -598,7 +595,7 @@ mod tests {
     fn the_idle_note_says_when_the_user_has_not_been_in_today() {
         let (conn, tmp, uid) = env("");
         seen(&conn, uid, "2026-09-29T22:00:00Z");
-        let text = context(&conn, tmp.path(), uid, "aki", &jiff::tz::TimeZone::UTC, Lang::En, noon()).unwrap();
+        let text = context(&conn, tmp.path(), tmp.path(), uid, "aki", &jiff::tz::TimeZone::UTC, Lang::En, noon()).unwrap();
         assert!(text.starts_with("The user has not been in today."), "{text}");
     }
 
@@ -606,7 +603,7 @@ mod tests {
     fn the_idle_note_has_no_working_header_without_active_notes() {
         let (conn, tmp, uid) = env("");
         seen(&conn, uid, "2026-09-30T11:40:00Z");
-        let text = context(&conn, tmp.path(), uid, "aki", &jiff::tz::TimeZone::UTC, Lang::En, noon()).unwrap();
+        let text = context(&conn, tmp.path(), tmp.path(), uid, "aki", &jiff::tz::TimeZone::UTC, Lang::En, noon()).unwrap();
         assert!(!text.contains("Working notes"), "{text}");
     }
 }

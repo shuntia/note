@@ -243,7 +243,8 @@ impl Caller for crate::AppState {
         let wall = format!("{:02}:{:02}", local.hour(), local.minute());
         let thread = {
             let conn = self.db();
-            crate::talk::checkin_thread(&conn, user_id, &local.date().to_string(), &wall, &call.opening, lang, now).ok()
+            let day = crate::zone::today(&self.config_dir, username, now);
+            crate::talk::checkin_thread(&conn, user_id, &day.to_string(), &wall, &call.opening, lang, now).ok()
         };
         self.hub.broadcast_changed(user_id);
         let msg = OutboundMessage {

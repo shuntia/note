@@ -54,7 +54,7 @@ fn tz(ctx: &ToolCtx) -> jiff::tz::TimeZone {
 }
 
 fn today(ctx: &ToolCtx) -> jiff::civil::Date {
-    jiff::Timestamp::now().to_zoned(tz(ctx)).date()
+    crate::zone::today(ctx.config_dir, ctx.username, jiff::Timestamp::now())
 }
 
 fn day_start(ctx: &ToolCtx, day: jiff::civil::Date) -> Result<String, ToolError> {

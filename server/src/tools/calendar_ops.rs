@@ -37,7 +37,7 @@ fn unscoped(ctx: &ToolCtx) -> Result<(), ToolError> {
 }
 
 fn today(ctx: &ToolCtx) -> jiff::civil::Date {
-    jiff::Timestamp::now().to_zoned(crate::triggers::timezone(ctx.config_dir, ctx.username)).date()
+    crate::zone::today(ctx.config_dir, ctx.username, jiff::Timestamp::now())
 }
 
 /// How an entry recurs, in a few words.
@@ -540,7 +540,7 @@ fn create(conn: &Connection, ctx: &ToolCtx, r: &Ref, env: &mut Envelope, entry: 
     let fields = calendar::Fields {
         title,
         kind: entry.kind.unwrap_or("busy").into(),
-        quiet: entry.quiet,
+        quiet: Some(entry.quiet.unwrap_or_else(|| crate::tuning::of(ctx.config_dir, ctx.username).calendar_quiet())),
         start_time: start,
         end_time: end,
         days: Some(days),

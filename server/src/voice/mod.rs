@@ -16,10 +16,10 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
-pub const RING_SECS: u32 = 30;
 pub const RING_BY_SECS: i64 = 10;
 pub const STALE_START_SECS: i64 = 20;
-pub const STALE_RING_SECS: i64 = 90;
+/// How long past its own ring a ringing call may stay unsettled before it is stale.
+pub const STALE_AFTER_RING_SECS: i64 = 60;
 pub const STALE_LIVE_SECS: i64 = 40 * 60;
 
 type Ladder = Arc<OnceLock<Vec<Arc<dyn Channel>>>>;
@@ -183,6 +183,7 @@ impl Voice {
         let room_id = link.room_id.clone().ok_or_else(|| anyhow::anyhow!("the link has no room"))?;
         let id = uuid::Uuid::new_v4().to_string();
         let ring_by = now + jiff::SignedDuration::from_secs(RING_BY_SECS);
+        let ring_secs = self.handler.ring_secs(user_id);
         {
             let conn = crate::db_guard(&self.db);
             let busy: bool = conn.query_row(
@@ -207,7 +208,7 @@ impl Voice {
                 room_id,
                 mxid: link.mxid.clone(),
                 title: msg.title.clone(),
-                ring_secs: RING_SECS,
+                ring_secs,
                 ring_by_ms: ring_by.as_millisecond(),
                 voice,
                 direction: Direction::Outbound,
@@ -556,25 +557,28 @@ impl Voice {
         n
     }
 
-    /// Each stale call's id and the state it went stale in.
+    /// Each stale call's id and the state it went stale in. A ringing call
+    /// goes stale `STALE_AFTER_RING_SECS` past its user's ring length.
     fn stale_calls(&self, now: jiff::Timestamp) -> Vec<(String, String)> {
-        let cutoff = |state: &str| {
-            let secs = match state {
-                "ringing" => STALE_RING_SECS,
-                "answered" => STALE_LIVE_SECS,
-                _ => STALE_START_SECS,
+        let open: Vec<(String, i64, String, String)> = {
+            let conn = crate::db_guard(&self.db);
+            let Ok(mut stmt) = conn.prepare("SELECT id, user_id, state, ring_by FROM voice_calls WHERE state != 'ended'") else {
+                return Vec::new();
             };
-            now - jiff::SignedDuration::from_secs(secs)
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)));
+            let Ok(rows) = rows else { return Vec::new() };
+            rows.flatten().collect()
         };
-        let conn = crate::db_guard(&self.db);
-        let Ok(mut stmt) = conn.prepare("SELECT id, state, ring_by FROM voice_calls WHERE state != 'ended'") else {
-            return Vec::new();
-        };
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)));
-        let Ok(rows) = rows else { return Vec::new() };
-        rows.flatten()
-            .filter(|(_, state, ring_by)| ring_by.parse::<jiff::Timestamp>().is_ok_and(|t| t < cutoff(state)))
-            .map(|(id, state, _)| (id, state))
+        open.into_iter()
+            .filter(|(_, user_id, state, ring_by)| {
+                let secs = match state.as_str() {
+                    "ringing" => i64::from(self.handler.ring_secs(*user_id)) + STALE_AFTER_RING_SECS,
+                    "answered" => STALE_LIVE_SECS,
+                    _ => STALE_START_SECS,
+                };
+                ring_by.parse::<jiff::Timestamp>().is_ok_and(|t| t < now - jiff::SignedDuration::from_secs(secs))
+            })
+            .map(|(id, _, state, _)| (id, state))
             .collect()
     }
 
@@ -695,6 +699,15 @@ impl NoteHandler {
     fn profile(&self, user_id: i64) -> VoiceProfile {
         let mic = mics::gain(&crate::db_guard(&self.db), user_id, mics::ELEMENT);
         VoiceProfile { mic, ..self.voice(user_id) }
+    }
+
+    /// How long the user's phone rings before the call counts as missed.
+    fn ring_secs(&self, user_id: i64) -> u32 {
+        let username: Option<String> = crate::db_guard(&self.db)
+            .query_row("SELECT username FROM users WHERE id = ?1", [user_id], |r| r.get(0))
+            .ok();
+        let cfg = self.config_dir.get().zip(username).and_then(|(dir, name)| crate::config::UserConfig::load(dir, &name).ok());
+        cfg.map(|c| c.tuning).unwrap_or_default().ring_secs()
     }
 
     fn voice(&self, user_id: i64) -> VoiceProfile {
@@ -1500,7 +1513,7 @@ mod tests {
         let (voice, mock) = rig();
         let id = answered(&voice);
         let now = jiff::Timestamp::now();
-        assert_eq!(voice.sweep(now + jiff::SignedDuration::from_secs(STALE_RING_SECS + 60)), 0);
+        assert_eq!(voice.sweep(now + jiff::SignedDuration::from_secs(30 + STALE_AFTER_RING_SECS + 60)), 0);
         assert_eq!(voice.sweep(now + jiff::SignedDuration::from_secs(STALE_LIVE_SECS + 60)), 1);
         let (state, outcome): (String, String) = crate::db_guard(&voice.db)
             .query_row("SELECT state, outcome FROM voice_calls WHERE id = ?1", [&id], |r| Ok((r.get(0)?, r.get(1)?)))

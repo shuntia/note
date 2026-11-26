@@ -41,7 +41,8 @@ pub(crate) fn target_date(ctx: &ToolCtx, kind: SessionKind, now: jiff::Timestamp
     let local = now.to_zoned(tz);
     match (kind, cfg) {
         (SessionKind::Nightly, Some(cfg)) => crate::nightly::plan_date(&local, &cfg.nightly_time),
-        _ => local.date(),
+        (_, Some(cfg)) => cfg.today(now),
+        (_, None) => local.date(),
     }
 }
 
@@ -70,11 +71,11 @@ pub fn say(conn: &Connection, ctx: &ToolCtx, args: &SayArgs) -> Result<serde_jso
         out["task_ids"] = task_ids.into();
     }
     if args.await_min.is_none() && asks(text) {
-        out["await_min"] = triggers::QUESTION_WAIT_MIN.into();
+        let wait = triggers::patient(ctx.config_dir, ctx.username, triggers::QUESTION_WAIT_MIN);
+        out["await_min"] = wait.into();
         out["await_default"] = true.into();
         out["warnings"] = serde_json::json!([format!(
-            "a question waits {} minutes for its answer when await_min is left out; 0 waits for nothing",
-            triggers::QUESTION_WAIT_MIN
+            "a question waits {wait} minutes for its answer when await_min is left out; 0 waits for nothing"
         )]);
     }
     if let Some(min) = args.await_min.filter(|m| *m != 0) {

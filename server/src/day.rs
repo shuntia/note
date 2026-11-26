@@ -31,19 +31,67 @@ fn row(at: &str, tz: &jiff::tz::TimeZone, kind: &str, label: String) -> Option<H
     })
 }
 
-fn on_date(at: &str, tz: &jiff::tz::TimeZone, date: jiff::civil::Date) -> bool {
-    at.parse::<jiff::Timestamp>()
-        .is_ok_and(|t| t.to_zoned(tz.clone()).date() == date)
+fn on_date(at: &str, clock: &crate::zone::Clock, date: jiff::civil::Date) -> bool {
+    at.parse::<jiff::Timestamp>().is_ok_and(|t| clock.today(t) == date)
 }
 
-/// The half-open span of instants that local date covers.
-pub(crate) fn bounds(
-    tz: &jiff::tz::TimeZone,
+/// `wall` on the next calendar date, written on past 24:00.
+fn past_midnight(wall: &str) -> String {
+    let m = crate::templates::wall_minutes(wall) + 24 * 60;
+    format!("{:02}:{:02}", m / 60, m % 60)
+}
+
+/// A work day's events: its own date's from `day_end` on, then the next
+/// date's that start before it, their times written on past 24:00.
+pub fn work_day_events(
+    conn: &Connection,
+    user_id: i64,
+    clock: &crate::zone::Clock,
     date: jiff::civil::Date,
-) -> Result<(jiff::Timestamp, jiff::Timestamp)> {
-    let start = tz.to_ambiguous_zoned(date.to_datetime(jiff::civil::Time::midnight())).compatible()?;
-    let end = start.checked_add(jiff::Span::new().days(1))?;
-    Ok((start.timestamp(), end.timestamp()))
+) -> Result<Vec<crate::plan::PlanEvent>> {
+    let end = clock.day_end.as_str();
+    let mut events: Vec<_> = crate::plan::events_for(conn, user_id, date)?
+        .into_iter()
+        .filter(|e| e.wall_time.as_str() >= end)
+        .collect();
+    if end == "00:00" {
+        return Ok(events);
+    }
+    for mut e in crate::plan::events_for(conn, user_id, date.tomorrow()?)? {
+        if e.wall_time.as_str() >= end {
+            continue;
+        }
+        e.wall_time = past_midnight(&e.wall_time);
+        e.end_wall_time = e.end_wall_time.as_deref().map(past_midnight);
+        events.push(e);
+    }
+    Ok(events)
+}
+
+/// A work day's calendar, cut at `day_end` the way `work_day_events` cuts its plan.
+pub fn work_day_calendar(
+    conn: &Connection,
+    user_id: i64,
+    clock: &crate::zone::Clock,
+    date: jiff::civil::Date,
+) -> Result<Vec<crate::calendar::Occurrence>> {
+    let end = clock.day_end.as_str();
+    let mut out: Vec<_> = crate::calendar::occurrences(conn, user_id, date)?
+        .into_iter()
+        .filter(|o| o.start.as_str() >= end)
+        .collect();
+    if end == "00:00" {
+        return Ok(out);
+    }
+    for mut o in crate::calendar::occurrences(conn, user_id, date.tomorrow()?)? {
+        if o.start.as_str() >= end {
+            continue;
+        }
+        o.start = past_midnight(&o.start);
+        o.end = past_midnight(&o.end);
+        out.push(o);
+    }
+    Ok(out)
 }
 
 struct Decided {
@@ -65,10 +113,11 @@ struct Decided {
 pub fn history(
     conn: &Connection,
     user_id: i64,
-    tz: &jiff::tz::TimeZone,
+    clock: &crate::zone::Clock,
     date: jiff::civil::Date,
     now: jiff::Timestamp,
 ) -> Result<Vec<HistoryRow>> {
+    let tz = &clock.tz;
     let mut out = Vec::new();
 
     let mut stmt = conn.prepare(
@@ -108,7 +157,7 @@ pub fn history(
             continue;
         }
         match &e.settled_at {
-            Some(at) if on_date(at, tz, date) => {
+            Some(at) if on_date(at, clock, date) => {
                 let (kind, label) = match (e.status.as_str(), &e.moved) {
                     ("done", _) => ("event_done", e.kind.clone()),
                     ("dropped", Some((k, d, w))) => {
@@ -124,7 +173,7 @@ pub fn history(
                 }
             }
             _ => {
-                let Some(at) = e.fired_at.as_ref().filter(|at| on_date(at, tz, date)) else {
+                let Some(at) = e.fired_at.as_ref().filter(|at| on_date(at, clock, date)) else {
                     continue;
                 };
                 if e.status != "fired" {
@@ -145,7 +194,7 @@ pub fn history(
         }
     }
 
-    let (from, to) = bounds(tz, date)?;
+    let (from, to) = clock.bounds(date)?;
     let mut stmt = conn.prepare(
         "SELECT id, title, completed_at FROM tasks
          WHERE user_id = ?1 AND state = 'done'
@@ -213,7 +262,7 @@ mod tests {
     }
 
     fn rows(conn: &Connection, uid: i64, date: jiff::civil::Date, now: &str) -> Vec<HistoryRow> {
-        history(conn, uid, &jiff::tz::TimeZone::UTC, date, now.parse().unwrap()).unwrap()
+        history(conn, uid, &crate::zone::Clock::utc(), date, now.parse().unwrap()).unwrap()
     }
 
     #[test]

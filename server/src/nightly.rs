@@ -102,6 +102,7 @@ fn run_stages(
     report: &mut Report,
 ) -> Result<()> {
     let tz = crate::zone::named(&ucfg.timezone);
+    let note_stale_days = i64::from(ucfg.tuning.note_stale_days());
     let note = |kind: &str, e: &anyhow::Error| {
         crate::failure::noted(e);
         let conn = crate::db_guard(deps.db);
@@ -114,7 +115,7 @@ fn run_stages(
             crate::log::ERROR_LOG_WINDOW_MINS,
         );
     };
-    // Monday's run looks back before it looks forward, so the planning session
+    // The review day's run looks back before it looks forward, so the planning session
     // already reads the new strategy.
     if skip != Some(Skip::Keyless) {
         let at = std::time::Instant::now();
@@ -124,7 +125,8 @@ fn run_stages(
     let at = std::time::Instant::now();
     let learned = {
         let conn = crate::db_guard(deps.db);
-        crate::learn::run_for_user(&conn, user_id, now)
+        let window = ucfg.tuning.learning().then(|| i64::from(ucfg.tuning.learn_window_days()));
+        crate::learn::run_for_user(&conn, user_id, window, now)
     };
     report.stage("learn", at, learned.as_ref().err().inspect(|e| note("learn_error", e)));
 
@@ -154,7 +156,7 @@ fn run_stages(
     let mut opening = crate::model_text::nightly_opening(lang, date);
     let due = {
         let conn = crate::db_guard(deps.db);
-        crate::notes::due_to_settle(&conn, deps.data_dir, username, now).unwrap_or_default()
+        crate::notes::due_to_settle(&conn, deps.data_dir, username, note_stale_days, now).unwrap_or_default()
     };
     if !due.is_empty() {
         opening.push_str(crate::model_text::notes_to_settle(lang));
@@ -172,7 +174,7 @@ fn run_stages(
     let at = std::time::Instant::now();
     let settled = {
         let conn = crate::db_guard(deps.db);
-        crate::notes::settle_leftovers(&conn, deps.data_dir, username, now)
+        crate::notes::settle_leftovers(&conn, deps.data_dir, username, note_stale_days, now)
     };
     report.stage("notes", at, settled.as_ref().err().inspect(|e| note("notes_settle_error", e)));
     let fallback = crate::text::fallback_debrief(lang);

@@ -28,6 +28,100 @@ pub fn translate(date: Date, wall: &str, from: &TimeZone, to: &TimeZone) -> Opti
     instant(from, date, wall).map(|at| civil(at, to))
 }
 
+/// The work day `at` counts toward in `tz`: its own date, or the day before
+/// while the clock still reads earlier than `day_end`.
+pub fn work_date(tz: &TimeZone, at: Timestamp, day_end: &str) -> Date {
+    let (date, wall) = civil(at, tz);
+    if wall.as_str() < day_end {
+        date.yesterday().unwrap_or(date)
+    } else {
+        date
+    }
+}
+
+/// The work day `at` counts toward and its wall time there, past 24:00 in the
+/// hours that run on beyond midnight.
+pub fn work_wall(tz: &TimeZone, at: Timestamp, day_end: &str) -> (Date, String) {
+    let (date, wall) = civil(at, tz);
+    match extended(&wall, day_end) {
+        Some(late) => (date.yesterday().unwrap_or(date), late),
+        None => (date, wall),
+    }
+}
+
+/// The work day it is for `username`; UTC's date when their config cannot be read.
+pub fn today(config_dir: &Path, username: &str, now: Timestamp) -> Date {
+    Clock::load(config_dir, username).today(now)
+}
+
+/// A user's zone and the hour past midnight their work day runs on to: what
+/// "today" and "now" mean for them.
+#[derive(Debug, Clone)]
+pub struct Clock {
+    pub tz: TimeZone,
+    pub day_end: String,
+}
+
+impl Clock {
+    pub fn of(cfg: &crate::config::UserConfig) -> Self {
+        Self { tz: named(&cfg.timezone), day_end: cfg.day_end().to_string() }
+    }
+
+    pub fn utc() -> Self {
+        Self { tz: TimeZone::UTC, day_end: "00:00".into() }
+    }
+
+    /// UTC and the calendar day when the user's config cannot be read.
+    pub fn load(config_dir: &Path, username: &str) -> Self {
+        crate::config::UserConfig::load(config_dir, username).map_or_else(|_| Self::utc(), |cfg| Self::of(&cfg))
+    }
+
+    pub fn today(&self, at: Timestamp) -> Date {
+        work_date(&self.tz, at, &self.day_end)
+    }
+
+    pub fn wall(&self, at: Timestamp) -> (Date, String) {
+        work_wall(&self.tz, at, &self.day_end)
+    }
+
+    pub fn bounds(&self, date: Date) -> Result<(Timestamp, Timestamp)> {
+        work_bounds(&self.tz, date, &self.day_end)
+    }
+
+    /// The calendar date a wall time on work day `date` falls on.
+    pub fn civil_date(&self, date: Date, wall: &str) -> Date {
+        civil_date(date, wall, &self.day_end)
+    }
+}
+
+/// The calendar date a wall time on work day `date` falls on: one earlier than
+/// `day_end` lies past that day's midnight.
+pub fn civil_date(date: Date, wall: &str, day_end: &str) -> Date {
+    if wall < day_end {
+        date.tomorrow().unwrap_or(date)
+    } else {
+        date
+    }
+}
+
+/// A wall time of the next calendar date that still belongs to the work day
+/// before, written on past 24:00 ("01:30" reads "25:30").
+pub fn extended(wall: &str, day_end: &str) -> Option<String> {
+    if wall >= day_end || !crate::templates::valid_time(wall) {
+        return None;
+    }
+    let m = crate::templates::wall_minutes(wall) + 24 * 60;
+    Some(format!("{:02}:{:02}", m / 60, m % 60))
+}
+
+/// The half-open span of instants work day `date` covers.
+pub fn work_bounds(tz: &TimeZone, date: Date, day_end: &str) -> Result<(Timestamp, Timestamp)> {
+    let start = instant(tz, date, day_end).ok_or_else(|| anyhow::anyhow!("{date} {day_end} names no instant"))?;
+    let next = date.tomorrow()?;
+    let end = instant(tz, next, day_end).ok_or_else(|| anyhow::anyhow!("{next} {day_end} names no instant"))?;
+    Ok((start, end))
+}
+
 /// A zone name as the runner reads it: unknown names fall back to UTC.
 pub fn named(name: &str) -> TimeZone {
     TimeZone::get(name).unwrap_or(TimeZone::UTC)
@@ -146,6 +240,35 @@ mod tests {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn the_work_day_runs_past_midnight_until_day_end() {
+        let la = named("America/Los_Angeles");
+        let d = |s: &str| s.parse::<Date>().unwrap();
+        // 01:30 and 02:59 in Los Angeles on the 25th are still the 24th's work day; 03:00 opens the 25th.
+        assert_eq!(work_date(&la, at("2026-11-25T09:30:00Z"), "03:00"), d("2026-11-24"));
+        assert_eq!(work_date(&la, at("2026-11-25T10:59:00Z"), "03:00"), d("2026-11-24"));
+        assert_eq!(work_date(&la, at("2026-11-25T11:00:00Z"), "03:00"), d("2026-11-25"));
+        assert_eq!(work_date(&la, at("2026-11-25T08:00:00Z"), "00:00"), d("2026-11-25"), "midnight keeps the calendar day");
+        assert_eq!(work_date(&la, at("2026-11-25T07:59:00Z"), "00:00"), d("2026-11-24"));
+        assert_eq!(civil_date(d("2026-11-24"), "01:30", "03:00"), d("2026-11-25"));
+        assert_eq!(civil_date(d("2026-11-24"), "23:30", "03:00"), d("2026-11-24"));
+        assert_eq!(civil_date(d("2026-11-24"), "01:30", "00:00"), d("2026-11-24"));
+        assert_eq!(extended("01:30", "03:00").as_deref(), Some("25:30"));
+        assert_eq!(extended("03:00", "03:00"), None);
+        let (from, to) = work_bounds(&la, d("2026-11-24"), "03:00").unwrap();
+        assert_eq!((from, to), (at("2026-11-24T11:00:00Z"), at("2026-11-25T11:00:00Z")));
+    }
+
+    #[test]
+    fn a_user_reads_today_through_their_day_end() {
+        let (_conn, tmp, _uid) = env();
+        let p = tmp.path().join("users/aitest/user.toml");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "[tuning]\nday_end = \"03:00\"\n").unwrap();
+        assert_eq!(today(tmp.path(), "aitest", at("2026-11-25T09:30:00Z")).to_string(), "2026-11-24");
+        assert_eq!(today(tmp.path(), "nobody", at("2026-11-25T09:30:00Z")).to_string(), "2026-11-25");
     }
 
     fn rezoned(conn: &Connection, tmp: &tempfile::TempDir, uid: i64, now: &str) -> usize {

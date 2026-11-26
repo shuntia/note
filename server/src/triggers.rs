@@ -11,8 +11,6 @@ pub const KIND: &str = "trigger";
 pub const OVERRUN_MIN: i64 = 15;
 /// The furthest ahead a `+Nmin` offset may reach; a later day is named by date.
 pub const MAX_OFFSET_MIN: i64 = 24 * 60;
-/// Two pending triggers closer than this are one follow-up laid twice.
-pub const NEAR_MIN: i64 = 20;
 pub const MAX_PROMPT_BYTES: usize = 1000;
 pub const MAX_SAY_BYTES: usize = 1200;
 /// How much of the thread a firing trigger reads.
@@ -45,6 +43,11 @@ pub const RETRY_AFTER_MIN: i64 = 10;
 pub const MAX_ATTEMPTS: i64 = 3;
 /// How late a trigger may still fire; one later than this no longer applies.
 pub const LATE_MIN: i64 = 90;
+
+/// One of the shipped waits above, stretched or shortened by the user's patience.
+pub fn patient(config_dir: &Path, username: &str, minutes: u32) -> u32 {
+    u32::try_from(crate::tuning::of(config_dir, username).patient(minutes)).unwrap_or(minutes)
+}
 /// Longer than any wake-up session runs: a trigger fired before this and still
 /// undecided is not running.
 pub const SESSION_MAX_MIN: i64 = 30;
@@ -315,7 +318,8 @@ fn resolve(at: &str, lay: &Lay, local: &jiff::Zoned) -> Result<(jiff::civil::Dat
     if !crate::templates::valid_time(at) {
         return Err(loose());
     }
-    Ok((lay.date, crate::templates::wall_minutes(at)))
+    let date = crate::zone::Clock::load(lay.config_dir, lay.username).civil_date(lay.date, at);
+    Ok((date, crate::templates::wall_minutes(at)))
 }
 
 /// The instant `lay.at` names, read the way `lay` will place it.
@@ -340,12 +344,13 @@ pub struct Near {
 }
 
 /// The pending trigger of this user nearest `target`, other than `except`,
-/// when one sits within `NEAR_MIN` minutes of it; of two as near, the one in
-/// `thread`.
+/// when one sits within `near_min` minutes of it (two that close are one
+/// follow-up laid twice); of two as near, the one in `thread`.
 pub fn near(
     conn: &Connection,
     user_id: i64,
     tz: &jiff::tz::TimeZone,
+    near_min: i64,
     target: jiff::Timestamp,
     thread: Option<i64>,
     except: Option<i64>,
@@ -368,7 +373,7 @@ pub fn near(
         };
         row.apart = (at - target).get_seconds().abs() / 60;
         let rank = |n: &Near| (n.apart, n.conversation_id != thread);
-        if row.apart <= NEAR_MIN && best.as_ref().is_none_or(|b| rank(&row) < rank(b)) {
+        if row.apart <= near_min && best.as_ref().is_none_or(|b| rank(&row) < rank(b)) {
             best = Some(row);
         }
     }
@@ -1380,10 +1385,10 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
             opening.push_str(mt::laid_to_ring(l));
         }
         if ev.origin == crate::idle::ORIGIN {
-            opening.push_str(&crate::idle::context(&conn, &state.data_dir, fired.user_id, &fired.username, &tz, l, now).unwrap_or_default());
+            opening.push_str(&crate::idle::context(&conn, &state.config_dir, &state.data_dir, fired.user_id, &fired.username, &tz, l, now).unwrap_or_default());
         }
         let fence = (ev.origin == crate::chores::ORIGIN).then(|| {
-            opening.push_str(&crate::chores::opening(&conn, fired.user_id, &fired.username, &tz, l, now).unwrap_or_default());
+            opening.push_str(&crate::chores::opening(&conn, fired.user_id, &fired.username, &tz, l, &crate::tuning::of(&state.config_dir, &fired.username), now).unwrap_or_default());
             crate::chores::fence(&conn).unwrap_or(i64::MAX)
         });
         opening.push_str(&crate::follow_up::summary(&conn, fired.user_id, &tz, l, now).unwrap_or_default());
@@ -1513,7 +1518,7 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
     let wait_min = if rings {
         Some(CALL_WAIT_MIN)
     } else if held.is_some() {
-        Some(asked.unwrap_or(HELD_WAIT_MIN))
+        Some(asked.unwrap_or_else(|| patient(&state.config_dir, &fired.username, HELD_WAIT_MIN)))
     } else {
         asked
     };
@@ -1594,7 +1599,16 @@ pub fn fire(state: &crate::AppState, fired: &crate::runner::FiredEvent) {
         }
         via_of(&outcome)
     } else {
-        crate::channels::deliver_via(&state.db, &state.channels, fired.user_id, &fired.username, &msg);
+        let category = if close_day {
+            crate::tuning::Category::Review
+        } else if ev.origin == crate::idle::ORIGIN || ev.origin == crate::chores::ORIGIN {
+            crate::tuning::Category::Nudge
+        } else {
+            crate::tuning::Category::Checkin
+        };
+        if crate::tuning::of(&state.config_dir, &fired.username).channel(category) != "chat" {
+            crate::channels::deliver_via(&state.db, &state.channels, fired.user_id, &fired.username, &msg);
+        }
         crate::follow_up::Via::Message
     };
     let sent = crate::follow_up::Sent {
@@ -1930,7 +1944,7 @@ mod tests {
         let eleven = lay(&conn, &lay_at(&tmp, uid, "11:00")).unwrap().event_id;
         let noon = lay(&conn, &lay_at(&tmp, uid, "11:40")).unwrap().event_id;
         let utc = jiff::tz::TimeZone::UTC;
-        let found = |ts: &str| near(&conn, uid, &utc, at(ts), None, None).unwrap().map(|n| n.event_id);
+        let found = |ts: &str| near(&conn, uid, &utc, 20, at(ts), None, None).unwrap().map(|n| n.event_id);
         assert_eq!(found("2026-09-17T11:15:00Z"), Some(eleven));
         assert_eq!(found("2026-09-17T11:25:00Z"), Some(noon));
         assert_eq!(found("2026-09-17T12:01:00Z"), None);

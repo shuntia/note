@@ -199,7 +199,6 @@ const CAPS: [Caps; 7] = [
     Caps { later: 0, debrief: 0, activity: 3, notes: false },
 ];
 
-const WORKING_MEMORY_CAP: usize = 40;
 
 /// The user's files `assemble` renders from, read without the DB lock.
 pub struct Sources {
@@ -241,9 +240,10 @@ pub fn assemble_from(
         Err(_) => (jiff::tz::TimeZone::UTC, mt::timezone_invalid(l).into()),
     };
     let local = now.to_zoned(tz.clone());
-    let today = local.date();
+    let clock = crate::zone::Clock::of(ucfg);
+    let (today, wall) = clock.wall(now);
     let tomorrow = today.tomorrow()?;
-    let now_min = i64::from(local.hour()) * 60 + i64::from(local.minute());
+    let now_min = crate::templates::wall_minutes(&wall);
 
     let events = crate::plan::events_for(conn, user_id, today)?;
     let tasks = crate::tasks::list(conn, user_id)?;
@@ -258,19 +258,16 @@ pub fn assemble_from(
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => b.task.id.cmp(&a.task.id),
     });
-    let done_today = crate::tasks::done_between(
-        conn,
-        user_id,
-        today.to_zoned(tz.clone())?.timestamp(),
-        tomorrow.to_zoned(tz.clone())?.timestamp(),
-    )?;
+    let (day_from, day_to) = clock.bounds(today)?;
+    let done_today = crate::tasks::done_between(conn, user_id, day_from, day_to)?;
     let order = crate::order::list(conn, user_id, today)?;
     let category = crate::auth::category(conn, username)?
         .unwrap_or_else(|| crate::config::CATEGORY_MEMBER.into());
     let debrief = latest_debrief(conn, user_id, today)?;
     let activity = recent_activity(conn, user_id)?;
     let (active_notes, upcoming_notes) = crate::notes::active_and_upcoming(conn, data_dir, username, now)?;
-    let working_s = working_section(l, &active_notes, &upcoming_notes, &tz);
+    let working_s =
+        working_section(l, &active_notes, &upcoming_notes, ucfg.tuning.working_memory_cap() as usize, &tz);
 
     let quiet = crate::calendar::quiet_window(conn, user_id, &tz, now)?;
     let calendar = crate::calendar::occurrences(conn, user_id, today)?;
@@ -295,7 +292,8 @@ pub fn assemble_from(
         let mut s = String::with_capacity(2048);
         s.push_str(&notes_section(l, notes.as_ref(), today, caps.notes));
         s.push_str(&plan_s);
-        s.push_str(&tasks_section(l, &now_tasks, &later, done_today, caps.later, &tz, today, now));
+        let soon_days = i64::from(ucfg.tuning.due_soon_days());
+        s.push_str(&tasks_section(l, &now_tasks, &later, done_today, caps.later, soon_days, &tz, today, now));
         s.push_str(&order_section(l, &order));
         s.push_str(&working_s);
         s.push_str(&debrief_section(l, debrief.as_ref(), today, caps.debrief));
@@ -575,10 +573,10 @@ fn next_part_due(root: &crate::tasks::TaskNode) -> Option<&crate::tasks::Task> {
         .filter(|n| root.task.due_at.as_ref().is_none_or(|own| n.due_at.as_ref().is_some_and(|d| d < own)))
 }
 
-/// Open nodes, parts included, with a deadline inside the next three days,
-/// and those already past theirs.
-fn due_soon(tasks: &[&crate::tasks::TaskNode], now: jiff::Timestamp) -> (usize, usize) {
-    let horizon = now + jiff::Span::new().hours(24 * DUE_SOON_DAYS);
+/// Open nodes, parts included, with a deadline inside the next `days`, and
+/// those already past theirs.
+fn due_soon(tasks: &[&crate::tasks::TaskNode], days: i64, now: jiff::Timestamp) -> (usize, usize) {
+    let horizon = now + jiff::Span::new().hours(24 * days);
     let dates = tasks
         .iter()
         .flat_map(|t| t.walk())
@@ -597,7 +595,6 @@ fn due_soon(tasks: &[&crate::tasks::TaskNode], now: jiff::Timestamp) -> (usize, 
     (soon, overdue)
 }
 
-const DUE_SOON_DAYS: i64 = 3;
 
 #[allow(clippy::too_many_arguments)]
 fn tasks_section(
@@ -606,6 +603,7 @@ fn tasks_section(
     later: &[&crate::tasks::TaskNode],
     done_today: i64,
     cap: usize,
+    soon_days: i64,
     tz: &jiff::tz::TimeZone,
     today: jiff::civil::Date,
     now: jiff::Timestamp,
@@ -663,9 +661,9 @@ fn tasks_section(
         }
     }
     let dated: Vec<_> = now_tasks.iter().chain(later.iter()).copied().collect();
-    let (soon, overdue) = due_soon(&dated, now);
+    let (soon, overdue) = due_soon(&dated, soon_days, now);
     if soon > 0 || overdue > 0 {
-        let _ = writeln!(s, "{}", mt::due_soon(l, soon, DUE_SOON_DAYS, overdue));
+        let _ = writeln!(s, "{}", mt::due_soon(l, soon, soon_days, overdue));
     }
     s.push_str(&mt::finished_not_listed(l, done_today));
     s
@@ -754,13 +752,14 @@ fn working_section(
     l: Lang,
     active: &[crate::notes::Note],
     coming: &[crate::notes::Note],
+    cap: usize,
     tz: &jiff::tz::TimeZone,
 ) -> String {
     if active.is_empty() && coming.is_empty() {
         return String::new();
     }
     let mut s = String::from(mt::working_memory_heading(l));
-    for n in active.iter().take(WORKING_MEMORY_CAP) {
+    for n in active.iter().take(cap) {
         let _ = writeln!(s, "- {}: {}", crate::notes::short(&n.id), flat(&n.title));
     }
     if !coming.is_empty() {
@@ -768,7 +767,7 @@ fn working_section(
             s.push('\n');
         }
         s.push_str(mt::coming_up(l));
-        for n in coming.iter().take(WORKING_MEMORY_CAP) {
+        for n in coming.iter().take(cap) {
             let opens = n
                 .from
                 .as_deref()
@@ -1150,7 +1149,8 @@ mod tests {
         let bare = dynamic(&assemble(&conn, tmp.path(), tmp.path(), uid, "aki", now).unwrap()).to_string();
 
         let made = crate::notes::stamp(now - jiff::SignedDuration::from_hours(1));
-        for i in 0..WORKING_MEMORY_CAP {
+        let cap = crate::tuning::Tuning::default().working_memory_cap() as usize;
+        for i in 0..cap {
             let title = format!("{i:02} {}", "n".repeat(crate::notes::MAX_TITLE_CHARS - 3));
             crate::notes::add(&conn, tmp.path(), "aki", &title, None, None, made.parse().unwrap()).unwrap();
         }
@@ -1159,7 +1159,7 @@ mod tests {
         let start = block.find("# Working memory").expect(block);
         let end = start + block[start..].find("\n\n# ").expect(block) + 2;
         let rest = format!("{}{}", &block[..start], &block[end..]);
-        assert_eq!(block[start..end].lines().filter(|l| l.starts_with("- ")).count(), WORKING_MEMORY_CAP);
+        assert_eq!(block[start..end].lines().filter(|l| l.starts_with("- ")).count(), cap);
         assert_eq!(rest, bare);
     }
 

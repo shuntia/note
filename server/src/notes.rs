@@ -5,7 +5,6 @@ use std::path::Path;
 
 pub const MAX_TITLE_CHARS: usize = 160;
 const UPCOMING_HOURS: i64 = 12;
-const STALE_DAYS: i64 = 3;
 
 /// One line of Note's working memory; every instant is an RFC 3339 string.
 #[derive(Debug, Clone, PartialEq)]
@@ -69,9 +68,9 @@ impl Note {
         instant(self.from.as_deref()).is_some_and(|t| t > now && t <= horizon)
     }
 
-    /// Past its `until`; or, with no `until`, three days since the latest of
+    /// Past its `until`; or, with no `until`, `stale_days` since the latest of
     /// when it was touched, written, or its window opened.
-    pub fn is_due(&self, now: jiff::Timestamp) -> bool {
+    pub fn is_due(&self, stale_days: i64, now: jiff::Timestamp) -> bool {
         if let Some(until) = instant(self.until.as_deref()) {
             return until <= now;
         }
@@ -79,7 +78,7 @@ impl Note {
             .into_iter()
             .filter_map(instant)
             .max();
-        last.is_some_and(|t| t <= now - jiff::SignedDuration::from_hours(STALE_DAYS * 24))
+        last.is_some_and(|t| t <= now - jiff::SignedDuration::from_hours(stale_days * 24))
     }
 
     pub fn windowed(&self) -> bool {
@@ -183,8 +182,8 @@ fn upcoming_of(notes: Vec<Note>, now: jiff::Timestamp) -> Vec<Note> {
     notes
 }
 
-pub fn due_to_settle(conn: &Connection, data_dir: &Path, user: &str, now: jiff::Timestamp) -> Result<Vec<Note>> {
-    Ok(all(conn, data_dir, user)?.into_iter().filter(|n| n.is_due(now)).collect())
+pub fn due_to_settle(conn: &Connection, data_dir: &Path, user: &str, stale_days: i64, now: jiff::Timestamp) -> Result<Vec<Note>> {
+    Ok(all(conn, data_dir, user)?.into_iter().filter(|n| n.is_due(stale_days, now)).collect())
 }
 
 /// `None` for an id that is not one of the user's live notes.
@@ -345,8 +344,8 @@ pub fn settle(
 }
 
 /// Keeps every note still due as a memory, word for word; returns how many.
-pub fn settle_leftovers(conn: &Connection, data_dir: &Path, user: &str, now: jiff::Timestamp) -> Result<usize> {
-    let due = due_to_settle(conn, data_dir, user, now)?;
+pub fn settle_leftovers(conn: &Connection, data_dir: &Path, user: &str, stale_days: i64, now: jiff::Timestamp) -> Result<usize> {
+    let due = due_to_settle(conn, data_dir, user, stale_days, now)?;
     let verbatim = Outcome::Memory { category: None, summary: None, body: None };
     for note in &due {
         settle(conn, data_dir, user, &note.id, &verbatim)?;
@@ -471,7 +470,7 @@ mod tests {
         note(&conn, &tmp, "fresh", (None, None), "2026-10-07T12:00:01Z");
         note(&conn, &tmp, "waiting", (Some("2026-10-09T00:00:00Z"), None), "2026-10-01T00:00:00Z");
         note(&conn, &tmp, "running", (None, Some("2026-10-17T12:00:00Z")), "2026-10-06T12:00:00Z");
-        let mut due = ids(due_to_settle(&conn, tmp.path(), "aki", at("2026-10-10T12:00:00Z")).unwrap());
+        let mut due = ids(due_to_settle(&conn, tmp.path(), "aki", 3, at("2026-10-10T12:00:00Z")).unwrap());
         due.sort();
         let mut want = vec![ended.id, stale.id];
         want.sort();
@@ -529,7 +528,7 @@ mod tests {
         let fresh = note(&conn, &tmp, "sat score lands friday", (None, None), "2026-10-01T00:00:00Z");
         touch(&conn, tmp.path(), "aki", std::slice::from_ref(&fresh.id), at("2026-10-09T00:00:00Z")).unwrap();
 
-        assert_eq!(settle_leftovers(&conn, tmp.path(), "aki", at("2026-10-10T00:00:00Z")).unwrap(), 1);
+        assert_eq!(settle_leftovers(&conn, tmp.path(), "aki", 3, at("2026-10-10T00:00:00Z")).unwrap(), 1);
         assert_eq!(ids(all(&conn, tmp.path(), "aki").unwrap()), vec![fresh.id]);
         let kept = crate::memory::list(&conn, "aki", None, 10).unwrap();
         assert_eq!(kept.len(), 1);

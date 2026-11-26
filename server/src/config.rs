@@ -406,6 +406,8 @@ pub struct UserConfig {
     /// The reasoning effort the user's sessions ask for; absent follows the server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "crate::tuning::Tuning::is_empty")]
+    pub tuning: crate::tuning::Tuning,
 }
 
 pub const DEFAULT_TRIGGERS_PER_DAY: u32 = 12;
@@ -459,6 +461,16 @@ impl UserConfig {
 
     pub fn day_start(&self) -> &str {
         self.day_start.as_deref().unwrap_or(DEFAULT_DAY_START)
+    }
+
+    /// Until when past midnight the clock still counts toward the day before.
+    pub fn day_end(&self) -> &str {
+        self.tuning.day_end()
+    }
+
+    /// The work day `now` belongs to in the user's zone.
+    pub fn today(&self, now: jiff::Timestamp) -> jiff::civil::Date {
+        crate::zone::work_date(&crate::zone::named(&self.timezone), now, self.day_end())
     }
 
     /// Blank where the user lets calls run to midnight.

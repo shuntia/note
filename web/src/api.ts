@@ -41,6 +41,7 @@ import type {
   SessionStart,
   Settings,
   SettingsSaved,
+  Tuning,
   NewShare,
   Share,
   ShareInfo,
@@ -106,11 +107,14 @@ export const WRITABLE_SETTINGS = [
   'language',
   'model',
   'effort',
+  'day_start',
+  'tuning',
 ] as const
 
 export type WritableSetting = (typeof WRITABLE_SETTINGS)[number]
 
-export type SettingsPatch = Partial<Pick<Settings, WritableSetting>>
+// Tuning travels as only the values that changed.
+export type SettingsPatch = Partial<Omit<Pick<Settings, WritableSetting>, 'tuning'>> & { tuning?: Partial<Tuning> }
 
 type NewTaskOpts = {
   duration_min?: number
