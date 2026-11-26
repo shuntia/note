@@ -25,6 +25,17 @@ export function withOrder(
   return { rows: [...top, ...soon.filter((n) => !top.includes(n))], ordered: top.length }
 }
 
+// The groups of rows as `was` drew them, each row kept where it stood while `now` still lists it
+// or `keep` holds it, with the rows new to the list after them in the group and order `now` gives.
+export function held<K>(was: K[][], now: K[][], keep: (k: K) => boolean): K[][] {
+  const listed = new Set(now.flat())
+  const seen = new Set(was.flat())
+  return now.map((fresh, i) => [
+    ...(was[i] ?? []).filter((k) => listed.has(k) || keep(k)),
+    ...fresh.filter((k) => !seen.has(k)),
+  ])
+}
+
 const itemsOf = (node: TaskNode, order: number[]) => {
   const held = order.filter((id) => holds(node, id))
   return held.length > 0 ? held : [node.id]

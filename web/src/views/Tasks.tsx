@@ -11,14 +11,14 @@ import {
   type RefObject,
 } from 'react'
 import { api, ApiError } from '../api'
-import { latest } from '../coalesce'
+import { latest, quiet, trailing } from '../coalesce'
 import { doubleColumn } from '../columns'
-import { dropped, openTaskItems, useLiftDrag, withOrder, type DropTo } from '../order'
+import { dropped, held, openTaskItems, useLiftDrag, withOrder, type DropTo } from '../order'
 import type { ViewProps } from '../app'
 import { collapse, flip, settle, vanish } from '../motion-gsap'
 import { reducedMotion } from '../motion'
 import { Overflow, useMenuSheet, type OverflowItem } from '../overflow'
-import { useStableCallback, useStableMethods } from '../stable'
+import { reuse, useSameArray, useStableCallback, useStableMethods } from '../stable'
 import { Tick } from '../tick'
 import { urgencyRank } from '../urgent'
 import { dueBody, dueDraft, dueParts, goalDated, localDay, type DueBody } from '../due'
@@ -326,21 +326,17 @@ function mergeUpdate(nodes: TaskNode[], u: TaskUpdate): TaskNode[] {
   return next
 }
 
-// A finished or dropped task keeps its place in the list until it has folded away.
-type Leaving = { id: number; group: Exclude<Group, 'done'>; index: number; state: TaskState; node: TaskNode }
+// A finished or dropped task keeps its place in the list until the hand pauses, then folds away.
+type Leaving = { id: number; state: TaskState; node: TaskNode; folding?: boolean }
 
-type Placed = { node: TaskNode; leaving: TaskState | null }
+type Placed = { node: TaskNode; leaving: TaskState | null; folding: boolean }
 
-// A leaving row is drawn from the node it left as, since a reload no longer lists a dropped one.
-function placed(list: TaskNode[], nodes: TaskNode[], leaving: Leaving[], group: Group): Placed[] {
-  const out: Placed[] = list.map((node) => ({ node, leaving: null }))
-  for (const l of leaving) {
-    if (l.group !== group) continue
-    const node = nodes.find((n) => n.id === l.id) ?? l.node
-    out.splice(Math.min(l.index, out.length), 0, { node, leaving: l.state })
-  }
-  return out
-}
+// Rows hold their places from the first tick until the ticking has paused this long, which
+// outlasts the finish the stylesheet plays; a mouse resting on the list holds them up to the cap.
+const SETTLE_PAUSE_MS = 1200
+const SETTLE_CAP_MS = 3000
+const FOLD_SPARE_MS = 1000
+const RELOAD_MS = 150
 
 // Rows that were already there slide from where they were; rows that are new settle
 // in. While a row folds away it drives the layout itself, so the FLIP stands down and
@@ -423,6 +419,9 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const [sort, setSort] = useState<SortKey>(storedSort)
   const [goalDraft, setGoalDraft] = useState<{ title: string; due: string; time: string } | null>(null)
   const [runOrder, setRunOrder] = useState<number[]>([])
+  const [holding, setHolding] = useState(false)
+  const drawn = useRef<number[][]>([[], [], []])
+  const writes = useRef(0)
   const [columns] = useState(doubleColumn)
   const dropRef = useRef<DropTo | null>(null)
   useLiftDrag(dropRef)
@@ -440,7 +439,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const loadGoals = useCallback(() => {
     api
       .goals()
-      .then((gs) => setGoals(gs.filter((g) => g.state === 'open')))
+      .then((gs) => setGoals((was) => reuse(was, gs.filter((g) => g.state === 'open'))))
       .catch(() => setGoals([]))
   }, [])
 
@@ -449,12 +448,12 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     loadGoals()
     api
       .day(localDay(new Date()))
-      .then((d) => setRunOrder(openTaskItems(d.items)))
+      .then((d) => setRunOrder((was) => reuse(was, openTaskItems(d.items))))
       .catch(() => setRunOrder([]))
     newest(api.tasks())
       .then((ts) => {
-        if (!ts) return
-        setNodes(ts)
+        if (!ts || writes.current > 0) return
+        setNodes((was) => reuse(was, ts))
         setFailed(false)
         if (seeded.current) return
         seeded.current = true
@@ -465,6 +464,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       .catch(() => setFailed(true))
   }, [loadGoals, newest])
   useEffect(load, [load, refresh])
+  const reload = useMemo(() => trailing(load, RELOAD_MS), [load])
 
   const patch = useCallback(
     async (
@@ -482,23 +482,25 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
         position?: number
       },
     ) => {
+      writes.current++
       try {
         const updated = await api.patchTask(id, body)
         setNodes((ns) => (ns ? mergeUpdate(ns, updated) : ns))
         const clamp = updated.adjusted?.find((a: Adjusted) => a.field === 'due')
         if (clamp)
           notify(t('tasks.dueClamped', { date: clampDay(clamp.to), title: clamp.by_title ?? updated.title }))
-        load()
       } catch (err) {
         notify(
           err instanceof ApiError && err.status === 409
             ? t('tasks.nowFull')
             : t('tasks.updateFailed'),
         )
-        load()
+      } finally {
+        writes.current--
+        reload()
       }
     },
-    [load, notify],
+    [reload, notify],
   )
 
   // A restored row still folding away stays where it is and unfolds its finish.
@@ -514,12 +516,39 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     [mark, patch],
   )
 
+  const settler = useState(() =>
+    quiet(
+      () => {
+        setHolding(false)
+        setLeaving((ls) => (ls.length === 0 ? ls : ls.map((l) => ({ ...l, folding: true }))))
+      },
+      SETTLE_PAUSE_MS,
+      SETTLE_CAP_MS,
+    ),
+  )[0]
+  useEffect(() => () => settler.cancel(), [settler])
+
+  // A row whose fold never ran, being out of sight, is let go once the others have folded.
+  const anyFolding = leaving.some((l) => l.folding)
+  useEffect(() => {
+    if (!anyFolding) return
+    const timer = setTimeout(() => {
+      mark()
+      setLeaving((ls) => ls.filter((l) => !l.folding))
+    }, FOLD_SPARE_MS)
+    return () => clearTimeout(timer)
+  }, [anyFolding, mark])
+
+  const hold = () => {
+    settler.poke()
+    setHolding(true)
+  }
+
   const markLeaving = (node: TaskNode, state: TaskState) => {
-    if (!shown) return
-    const soon = shown.soon.findIndex((n) => n.id === node.id)
-    const index = soon === -1 ? shown.later.findIndex((n) => n.id === node.id) : soon
-    if (index === -1) return
-    setLeaving((ls) => [...ls, { id: node.id, group: soon === -1 ? 'later' : 'soon', index, state, node }])
+    const [head, rest, later] = drawn.current
+    const laterOpen = showLater || query.trim() !== ''
+    if (!head.includes(node.id) && !rest.includes(node.id) && !(laterOpen && later.includes(node.id))) return
+    setLeaving((ls) => (ls.some((l) => l.id === node.id) ? ls : [...ls, { id: node.id, state, node }]))
   }
   const gone = useCallback(
     (id: number) => {
@@ -538,6 +567,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     for (const s of snap) unfinished.current.set(s.id, s.progress)
     const root = roots.find((r) => r.id === node.root_id || r.id === node.id)
     if (root?.state === 'done') markLeaving(root, 'done')
+    hold()
     setNodes(unpinAbove(roots, node.id))
     void patch(node.id, { state: 'done' })
     notify(t('tasks.doneToast', { title: node.title }), {
@@ -564,6 +594,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const drop = (node: TaskNode) => {
     const snap = snapOf(subtree(node).filter((n) => n.state !== 'dropped'))
     if (node.parent_id === null) markLeaving(node, 'dropped')
+    hold()
     const put = stamped('dropped')
     setNodes((ns) => (ns ? mapNode(ns, node.id, (n) => mapSubtree(n, put)) : ns))
     void patch(node.id, { state: 'dropped' })
@@ -823,7 +854,8 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const onCompleteInGoal = useStableCallback((node: TaskNode) => actions.complete(node))
   const onEditGoal = useStableCallback(editGoal)
   const onCloseGoal = useStableCallback(closeGoal)
-  const categories = useMemo(() => (nodes ? categoriesOf(nodes) : []), [nodes])
+  const categories = useSameArray(useMemo(() => (nodes ? categoriesOf(nodes) : []), [nodes]))
+  const rootsById = useMemo(() => new Map((nodes ?? []).map((n) => [n.id, n])), [nodes])
 
   // Each goal's open tasks that pass the filters, kept the same array while nothing in it changed.
   const goalTasks = useMemo(() => {
@@ -855,8 +887,23 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const g = groups(nodes)
   const search = query.trim().toLowerCase()
 
-  const soon = placed(shown?.soon ?? [], nodes, leaving, 'soon')
-  const later = placed(shown?.later ?? [], nodes, leaving, 'later')
+  // While ticking goes on, every row stays where it was drawn; the fresh order lands once the hand pauses.
+  const ids = (ns: TaskNode[]) => ns.map((n) => n.id)
+  const fresh = shown
+    ? [ids(shown.soon.slice(0, shown.ordered)), ids(shown.soon.slice(shown.ordered)), ids(shown.later)]
+    : [[], [], []]
+  const leavingOf = (id: number) => leaving.find((l) => l.id === id)
+  const frozen = holding || leaving.length > 0
+  drawn.current = frozen ? held(drawn.current, fresh, (id) => leavingOf(id) !== undefined) : fresh
+  // A leaving row is drawn from the node it left as, since a reload no longer lists a dropped one.
+  const placedOf = (group: number[]): Placed[] =>
+    group.flatMap((id) => {
+      const l = leavingOf(id)
+      const node = rootsById.get(id) ?? l?.node
+      return node ? [{ node, leaving: l?.state ?? null, folding: l?.folding ?? false }] : []
+    })
+  const [head, rest, later] = drawn.current.map(placedOf)
+  const soon = [...head, ...rest]
   // A task settles into Done today only once it has folded away: until then it is
   // still in the list it is leaving, and a row is never in two lists at once.
   const doneToday = g.doneToday.filter((n) => !leaving.some((l) => l.id === n.id))
@@ -865,11 +912,8 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   // Under a filter, a goal with nothing that passes it steps aside.
   const shownGoals =
     filter === null && search === '' ? goals : goals.filter((g) => (goalPcts.get(g.id)?.parts ?? 0) > 0)
-  const orderedIds = new Set((shown?.soon ?? []).slice(0, shown?.ordered ?? 0).map((n) => n.id))
-  const edgeAt = soon.findIndex((p) => !orderedIds.has(p.node.id))
-  const head = edgeAt === -1 ? soon : soon.slice(0, edgeAt)
-  const rest = edgeAt === -1 ? [] : soon.slice(edgeAt)
-  const canDrag = filter === null && search === '' && leaving.length === 0
+  const unfiltered = filter === null && search === ''
+  const canDrag = unfiltered && !frozen
   const dragRows = [
     ...head,
     ...(sort === 'category' ? byCategory(rest, categories).flatMap(([, rows]) => rows) : rest),
@@ -908,6 +952,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       group={group}
       actions={actions}
       leaving={p.leaving}
+      folding={p.folding}
       onGone={gone}
       stepsOpen={openSteps.has(p.node.id)}
       categories={categories}
@@ -931,7 +976,13 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
     )
 
   return (
-    <div className="tasks" ref={root} data-columns={columns || undefined}>
+    <div
+      className="tasks"
+      ref={root}
+      data-columns={columns || undefined}
+      onPointerEnter={(e) => e.pointerType === 'mouse' && settler.hold(true)}
+      onPointerLeave={(e) => e.pointerType === 'mouse' && settler.hold(false)}
+    >
       <div className="task-box">
         {goalDraft === null ? (
           <>
@@ -1040,7 +1091,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
           {head.length > 0 && (
             <div className="task-list">{head.map((p) => row(p, 'soon', canDrag))}</div>
           )}
-          {(head.length > 0 || canDrag) && (
+          {(head.length > 0 || unfiltered) && (
             <hr
               className={head.length > 0 ? 'order-edge' : 'order-edge bare'}
               aria-hidden="true"
@@ -1406,8 +1457,7 @@ const GoalCard = memo(function GoalCard({
 })
 
 // Finishing a row plays out in the stylesheet — the bar fills, the row greys,
-// the bar fades — and the row folds away once that has been seen.
-const FINISH_HOLD_S = 1.15
+// the bar fades — and the row folds away when the list lets it go.
 const REVIVE_MS = 420
 
 const Row = memo(function Row({
@@ -1416,6 +1466,7 @@ const Row = memo(function Row({
   scope = '',
   actions,
   leaving,
+  folding = false,
   onGone,
   stepsOpen,
   categories,
@@ -1430,6 +1481,7 @@ const Row = memo(function Row({
   scope?: string
   actions: RowActions
   leaving: TaskState | null
+  folding?: boolean
   onGone: (id: number) => void
   stepsOpen: boolean
   categories: string[]
@@ -1448,10 +1500,10 @@ const Row = memo(function Row({
   const steps = done ? [] : liveChildren(node)
 
   useLayoutEffect(() => {
-    if (leaving === null) return
+    if (leaving === null || !folding) return
     const go = columns ? vanish : collapse
-    return go(item.current, () => onGone(node.id), leaving === 'done' ? FINISH_HOLD_S : 0)
-  }, [leaving, node.id, onGone, columns])
+    return go(item.current, () => onGone(node.id))
+  }, [leaving, folding, node.id, onGone, columns])
 
   const revive = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => () => void (revive.current && clearTimeout(revive.current)), [])
@@ -1537,7 +1589,7 @@ const Row = memo(function Row({
     <div
       className="task-item"
       ref={item}
-      data-row={`${leaving ? 'x' : 't'}${scope}${node.id}`}
+      data-row={`${done ? 'd' : 't'}${scope}${node.id}`}
       data-leaving={leaving ?? undefined}
       data-finished={finished || undefined}
       data-drag={drag || undefined}
