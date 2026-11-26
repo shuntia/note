@@ -986,6 +986,7 @@ export const ja: Dict = {
   "tuning.channel.checkin": "チェックイン",
   "tuning.channel.nudge": "声かけ",
   "tuning.channel.review": "一日の締め",
+  "tuning.channel.brief": "朝の要点",
   "tuning.closeDayCalls": "締め後の通話分数",
   "tuning.completionCap": "一回のトークン上限",
   "tuning.dayBounds": "一日",

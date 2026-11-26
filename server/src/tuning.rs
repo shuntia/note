@@ -7,7 +7,8 @@ pub const PATIENCE: &[&str] = &["quick", "normal", "patient"];
 pub const REPLY_LENGTHS: &[&str] = &["short", "normal", "detailed"];
 pub const REPLY_TONES: &[&str] = &["default", "warm", "direct", "playful"];
 pub const REVIEW_DAYS: &[&str] = &["mon", "tue", "wed", "thu", "fri", "sat", "sun", "off"];
-/// `push` walks the notification ladder; `chat` only lands in the thread.
+/// `push` walks the notification ladder; `chat` only lands in the thread, or
+/// for the brief only in the app.
 pub const CHANNELS: &[&str] = &["push", "chat"];
 pub const LATEST_DAY_END: &str = "06:00";
 pub const WAKE_EARLIEST: std::ops::RangeInclusive<&str> = "03:00"..="10:00";
@@ -139,6 +140,7 @@ tuning! {
         nudge_channel: "push";
         checkin_channel: "push";
         review_channel: "push";
+        brief_channel: "push";
     }
 }
 
@@ -177,6 +179,7 @@ pub enum Category {
     Nudge,
     Checkin,
     Review,
+    Brief,
 }
 
 impl Tuning {
@@ -185,6 +188,7 @@ impl Tuning {
             Category::Nudge => self.nudge_channel(),
             Category::Checkin => self.checkin_channel(),
             Category::Review => self.review_channel(),
+            Category::Brief => self.brief_channel(),
         }
     }
 

@@ -371,6 +371,7 @@ export type Tuning = {
   nudge_channel: Delivery
   checkin_channel: Delivery
   review_channel: Delivery
+  brief_channel: Delivery
 }
 
 export type Language = '' | 'en' | 'ja'

@@ -10,6 +10,7 @@ const tuning = {
   nudge_channel: 'chat',
   checkin_channel: 'push',
   review_channel: 'chat',
+  brief_channel: 'push',
 } as Tuning
 
 function render(node: React.ReactNode, over: Partial<Tuning> = {}) {

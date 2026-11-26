@@ -985,6 +985,7 @@ export const en = {
   "tuning.channel.checkin": "Check-ins",
   "tuning.channel.nudge": "Nudges",
   "tuning.channel.review": "Close of day",
+  "tuning.channel.brief": "Morning brief",
   "tuning.closeDayCalls": "Calls after close, min",
   "tuning.completionCap": "Tokens per turn",
   "tuning.dayBounds": "Day",

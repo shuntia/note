@@ -130,12 +130,13 @@ pub fn plain(markdown: &str) -> String {
 }
 
 /// Tells the user their brief is there, unless a quiet window is holding
-/// deliveries; the open app shows it either way.
+/// deliveries or they keep it to the app; the open app shows it either way.
 fn announce(state: &crate::AppState, user_id: i64, username: &str, brief: &Brief, now: jiff::Timestamp) {
     state.hub.broadcast_changed(user_id);
     let quiet = UserConfig::load(&state.config_dir, username).is_ok_and(|ucfg| {
         let tz = crate::zone::named(&ucfg.timezone);
-        crate::calendar::quiet_window(&state.db(), user_id, &tz, now).ok().flatten().is_some()
+        ucfg.tuning.channel(crate::tuning::Category::Brief) == "chat"
+            || crate::calendar::quiet_window(&state.db(), user_id, &tz, now).ok().flatten().is_some()
     });
     if quiet {
         return;

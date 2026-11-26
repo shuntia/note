@@ -63,10 +63,11 @@ const DELIVERY: Choice<Delivery>[] = [
   { id: 'push', key: 'announce.notify' },
   { id: 'chat', key: 'announce.chat' },
 ]
-const CHANNELS: { field: 'nudge_channel' | 'checkin_channel' | 'review_channel'; key: Key }[] = [
+const CHANNELS: { field: 'nudge_channel' | 'checkin_channel' | 'review_channel' | 'brief_channel'; key: Key }[] = [
   { field: 'checkin_channel', key: 'tuning.channel.checkin' },
   { field: 'nudge_channel', key: 'tuning.channel.nudge' },
   { field: 'review_channel', key: 'tuning.channel.review' },
+  { field: 'brief_channel', key: 'tuning.channel.brief' },
 ]
 
 const labelOf = <T extends string>(list: Choice<T>[], id: T) => t(list.find((c) => c.id === id)?.key ?? list[0].key)
