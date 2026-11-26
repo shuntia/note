@@ -770,6 +770,8 @@ const FIELDS_JA: &[(&str, &str)] = &[
     ("timezone", "タイムゾーン"),
     ("title", "タイトル"),
     ("triggers_per_day", "1日のトリガー数"),
+    ("tuning.day_end", "一日の終わり"),
+    ("tuning.wake_earliest", "最も早い声かけ"),
     ("until_date", "終了日"),
     ("urgency", "緊急度"),
     ("url", "URL"),
@@ -800,6 +802,12 @@ const ERRORS_JA: &[(&str, &str)] = &[
     ("{} must be a zero-padded 24-hour HH:MM, or blank for no close of day", "{0}は24時間表記のHH:MM（例 21:30）か、締めなしなら空欄にしてください"),
     ("{} must be a zero-padded 24-hour HH:MM, or blank for no morning brief", "{0}は24時間表記のHH:MM（例 07:00）か、なしなら空欄にしてください"),
     ("{} must be a zero-padded 24-hour HH:MM", "{0}は24時間表記のHH:MM（例 07:30）にしてください"),
+    ("{} must not be earlier than the day's end, {}", "{0}は一日の終わり（{1}）以降にしてください"),
+    ("{} must not be later than the morning brief, {}", "{0}は朝の要点の時刻（{1}）以前にしてください"),
+    ("{} must be a zero-padded HH:MM no later than {}", "{0}は{1}までのHH:MM（例 03:00）にしてください"),
+    ("{} must be a zero-padded HH:MM from {} to {}", "{0}は{1}〜{2}のHH:MMにしてください"),
+    ("{} must be above {}", "{0}は{1}より大きくしてください"),
+    ("{} must be below {}", "{0}は{1}より小さくしてください"),
     ("{} must be zero-padded HH:MM, got {}", "{0}はHH:MM（例 07:30）にしてください（入力：{1}）"),
     ("{} must be YYYY-MM-DD, got {}", "{0}はYYYY-MM-DD形式にしてください（入力：{1}）"),
     ("{} must be YYYY-MM-DD", "{0}はYYYY-MM-DD形式にしてください"),
@@ -988,6 +996,8 @@ mod tests {
         assert_eq!(ja("pomodoro_work_min must be 5 to 90"), "ポモドーロの作業時間は5〜90にしてください");
         assert_eq!(ja("external_id x already belongs to task 4"), "外部ID x はすでにタスク 4 に使われています");
         assert_eq!(ja("wrong password"), "パスワードが違います");
+        assert_eq!(ja("brief_time must not be earlier than the day's end, 03:00"), "朝の要点の時刻は一日の終わり（03:00）以降にしてください");
+        assert_eq!(ja("tuning.day_end must not be later than the morning brief, 02:00"), "一日の終わりは朝の要点の時刻（02:00）以前にしてください");
         assert_eq!(ja("something new and unknown"), "something new and unknown");
         assert_eq!(ja("AIモデルが見つかりません。"), "AIモデルが見つかりません。", "a line already in Japanese passes through");
         assert_eq!(error_line(Lang::En, "wrong password"), "wrong password");

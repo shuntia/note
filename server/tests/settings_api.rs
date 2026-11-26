@@ -647,3 +647,25 @@ async fn tuning_reads_the_shipped_values_and_saves_only_what_is_in_range() {
     let v = json(app.oneshot(get(&cookie)).await.unwrap()).await;
     assert_eq!(v["tuning"]["ring_secs"], 45);
 }
+
+#[tokio::test]
+async fn the_morning_brief_cannot_fall_before_the_days_end() {
+    let (app, cookie, _cfg) = common::app_with_logged_in_user().await;
+    let res = app.clone().oneshot(put(&cookie, r#"{"tuning":{"day_end":"03:00"}}"#)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app.clone().oneshot(put(&cookie, r#"{"brief_time":"02:30"}"#)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json(res).await["error"], "brief_time must not be earlier than the day's end, 03:00");
+    let res = app.clone().oneshot(put(&cookie, r#"{"brief_time":"03:00"}"#)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = app.clone().oneshot(put(&cookie, r#"{"tuning":{"day_end":"04:00"}}"#)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json(res).await["error"], "tuning.day_end must not be later than the morning brief, 03:00");
+    let res = app.clone().oneshot(put(&cookie, r#"{"brief_time":"07:00","tuning":{"day_end":"04:00"}}"#)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app.clone().oneshot(put(&cookie, r#"{"brief_time":"","tuning":{"day_end":"06:00"}}"#)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "no brief, no bound");
+    let v = json(app.oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!((v["brief_time"].as_str(), v["tuning"]["day_end"].as_str()), (Some(""), Some("06:00")));
+}

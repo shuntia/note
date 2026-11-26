@@ -2027,6 +2027,7 @@ async fn settings_put(
         }
         cfg.morning_until = Some(time);
     }
+    let brief_named = req.brief_time.is_some();
     if let Some(time) = req.brief_time {
         let time = time.trim();
         if !time.is_empty() && !crate::templates::valid_time(time) {
@@ -2158,6 +2159,13 @@ async fn settings_put(
         if let Err((field, requirement)) = cfg.tuning.apply(patch) {
             return invalid_field(&format!("tuning.{field}"), &requirement);
         }
+    }
+    if !cfg.brief_time().is_empty() && cfg.brief_time() < cfg.day_end() {
+        return if brief_named {
+            invalid_field("brief_time", &format!("must not be earlier than the day's end, {}", cfg.day_end()))
+        } else {
+            invalid_field("tuning.day_end", &format!("must not be later than the morning brief, {}", cfg.brief_time()))
+        };
     }
     if let Some(alerts) = req.alerts {
         let changes: Vec<(usize, bool)> = alerts.iter().map(|a| (a.index, a.alert)).collect();
