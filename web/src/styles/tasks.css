@@ -215,7 +215,7 @@
   align-items: center;
   column-gap: 0.75rem;
   row-gap: 0.25rem;
-  padding: 0.625rem 0;
+  padding: calc(0.625rem * var(--dense)) 0;
 }
 .task-row > .tick { grid-area: tick; }
 .task-body { grid-area: body; }
@@ -450,7 +450,7 @@
   align-items: center;
   column-gap: 0.75rem;
   row-gap: 0.125rem;
-  padding: 0.375rem 0;
+  padding: calc(0.375rem * var(--dense)) 0;
   color: var(--quiet);
   font-size: 0.92rem;
 }
@@ -544,7 +544,7 @@
   .tasks [data-tip]::after { content: none; }
 }
 
-@media (prefers-reduced-motion: reduce) {
+:where([data-motion='reduced']) {
   .task-done-fold svg, .task-fold svg,
   .tick, .tick svg,
   .task-start,
@@ -577,7 +577,7 @@
 [data-dragging] .order-edge.bare { opacity: 1; }
 [data-dragging] [data-drag]:not([data-lifted]) { transition: transform 180ms ease; }
 [data-dragging] .order-edge { transition: transform 180ms ease, opacity 180ms ease; }
-@media (prefers-reduced-motion: reduce) {
+:where([data-motion='reduced']) {
   [data-dragging] [data-drag]:not([data-lifted]), [data-dragging] .order-edge,
   .task-item[data-lifted][data-settling], .task-step[data-lifted][data-settling], .order-edge.bare { transition: none; }
 }

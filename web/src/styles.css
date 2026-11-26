@@ -74,7 +74,12 @@
   --radius-xl: calc(18 * var(--u));
 
   --display: 'Bricolage Grotesque', 'Avenir Next', 'Helvetica Neue', Arial, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', 'Noto Sans CJK JP', 'Yu Gothic UI', Meiryo, sans-serif;
-  --sans: 'Atkinson Hyperlegible', system-ui, -apple-system, 'Segoe UI', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', 'Noto Sans CJK JP', 'Yu Gothic UI', Meiryo, sans-serif;
+  /* the faces a device can set its text in; --sans is the one it picked */
+  --font-system: system-ui, -apple-system, 'Segoe UI', Roboto, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', 'Noto Sans CJK JP', 'Yu Gothic UI', Meiryo, sans-serif;
+  --font-atkinson: 'Atkinson Hyperlegible', var(--font-system);
+  --font-serif: ui-serif, 'Iowan Old Style', Charter, 'Palatino Linotype', Georgia, 'Hiragino Mincho ProN', 'Noto Serif JP', 'Noto Serif CJK JP', 'Yu Mincho', serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', 'Hiragino Sans', 'Noto Sans JP', 'Noto Sans CJK JP', monospace;
+  --sans: var(--font-atkinson);
   --mono: ui-monospace, 'SF Mono', Menlo, monospace;
 
   /* aliases the older rules resolve through */
@@ -156,8 +161,17 @@
 /* nothing is laid out wider than the window; a stray pixel must not scroll it sideways */
 html, body { overflow-x: clip; }
 
-/* every rem in the sheets below is this unit, so type and layout grow together */
-:root { font-size: calc(16 * var(--u)); }
+/* every rem in the sheets below is this unit, so type and layout grow together;
+   the device's text size scales it, and density scales the rows' breathing room */
+:root { --text-scale: 1; --dense: 1; font-size: calc(16 * var(--u) * var(--text-scale)); }
+:root[data-text='small'] { --text-scale: 0.875; }
+:root[data-text='large'] { --text-scale: 1.125; }
+:root[data-text='larger'] { --text-scale: 1.25; }
+:root[data-density='compact'] { --dense: 0.55; }
+
+:root[data-font='system'] { --sans: var(--font-system); }
+:root[data-font='serif'] { --sans: var(--font-serif); }
+:root[data-font='mono'] { --sans: var(--font-mono); }
 
 body {
   margin: 0;
@@ -220,7 +234,7 @@ body::before { content: ''; position: fixed; inset: 0; z-index: -1; background: 
 .shell > .tabs.away { transform: translateY(100%); opacity: 0; pointer-events: none; }
 .handle { position: fixed; left: 50%; bottom: 8px; z-index: 11; width: 56px; height: 4px; margin-left: -28px; border-radius: 2px; background: var(--track); opacity: 0; pointer-events: none; transition: opacity 500ms ease; }
 .handle.on { opacity: 1; }
-@media (prefers-reduced-motion: reduce) { .shell > .tabs, .handle { transition: none; } }
+:where([data-motion='reduced']) { .shell > .tabs, .handle { transition: none; } }
 
 
 button.primary {
@@ -477,7 +491,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   .ev-more { width: 2.5rem; height: 2.5rem; }
 }
 
-@media (prefers-reduced-motion: reduce) {
+:where([data-motion='reduced']) {
   .ev-more, .jot, .jot-hint, .ev-menu-chev, .tick, .tick svg { transition: none; }
   .jot-dot { animation: none; opacity: 1; }
 }
@@ -614,7 +628,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   flex-direction: column;
   gap: 0.125rem;
 }
-.chat-row { border-radius: 0.75rem; padding: 0.375rem 0.5rem 0.25rem; }
+.chat-row { border-radius: 0.75rem; padding: calc(0.375rem * var(--dense)) 0.5rem calc(0.25rem * var(--dense)); }
 .chat-row[data-active='true'] { background: var(--haze-strong); }
 .chat-open {
   display: block;
@@ -711,7 +725,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 }
 .turn.pending { align-self: flex-start; margin: 0; padding: 0 6px; font-size: 0.85rem; color: var(--faint); }
 /* the thinking line reads as muted text; the sweep only runs when motion is welcome */
-@media (prefers-reduced-motion: no-preference) {
+:where(:root:not([data-motion='reduced'])) {
   .turn.pending,
   .activity.live .activity-status {
     background-image: linear-gradient(
@@ -777,7 +791,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   overflow-wrap: anywhere;
 }
 .receipt-mark.running { stroke: var(--faint); }
-@media (prefers-reduced-motion: no-preference) {
+:where(:root:not([data-motion='reduced'])) {
   .receipt-mark.running { transform-origin: 50% 50%; animation: spin 1s linear infinite; }
 }
 @keyframes spin { to { transform: rotate(1turn); } }
@@ -929,7 +943,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 }
 @media (min-width: 768px) { .chat-foot { padding: 0.75rem 0 2.5rem; } }
 
-@media (prefers-reduced-motion: reduce) {
+:where([data-motion='reduced']) {
   .chat-side, .chat-side.open { transition: none; }
   .receipt-chev { transition: none; }
 }
@@ -969,7 +983,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
 }
 .seg button:focus-visible { outline: 2px solid var(--sun); outline-offset: 1px; }
 
-@media (prefers-reduced-motion: reduce) {
+:where([data-motion='reduced']) {
   .pane-status { animation: none; }
   .seg button { transition: none; }
 }
@@ -1021,7 +1035,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   .toast { --toast-from: 8px; top: auto; bottom: calc(1.25rem + env(safe-area-inset-bottom)); }
   .toast.above-tabs { bottom: calc(96px + env(safe-area-inset-bottom)); }
 }
-@media (prefers-reduced-motion: reduce) {
+:where([data-motion='reduced']) {
   .toast { --toast-from: 0px; }
 }
 
@@ -1116,7 +1130,7 @@ textarea.mono { font-family: var(--mono); }
   pointer-events: none;
   animation: nc-drift-out .7s cubic-bezier(.3,.6,.25,1) forwards;
 }
-@media (prefers-reduced-motion: reduce) {
+:where([data-motion='reduced']) {
   .now-counter .glyph.chg { animation: none; }
   .now-counter .ghost { display: none; }
 }
@@ -1345,4 +1359,4 @@ button, [role='button'], a { touch-action: manipulation; }
 .slot.now .mark { transition: background-color 500ms ease 400ms; }
 .circle-face.resting .slot.now :is(.gauge-name, .gauge-sub) { color: transparent; visibility: hidden; transition: color 500ms ease, visibility 0s linear 500ms; }
 .circle-face.resting .slot.now .mark { background-color: transparent; transition-delay: 0s; }
-@media (prefers-reduced-motion: reduce) { .slot.now :is(.gauge-name, .gauge-sub, .mark) { transition: none; } }
+:where([data-motion='reduced']) { .slot.now :is(.gauge-name, .gauge-sub, .mark) { transition: none; } }

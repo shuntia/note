@@ -1,5 +1,6 @@
 import { gsap } from 'gsap'
 import { ScrollTrigger } from 'gsap/ScrollTrigger'
+import { reducedMotion } from './motion'
 
 gsap.registerPlugin(ScrollTrigger)
 
@@ -77,7 +78,7 @@ export function clampStops(stops: () => { start: number; end: number }): () => v
     tween?.kill()
     aim = y
     if (Math.abs(y - window.scrollY) < 1) return hold()
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    if (reducedMotion()) {
       window.scrollTo(0, y)
       return hold()
     }

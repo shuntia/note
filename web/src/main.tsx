@@ -1,5 +1,6 @@
 import { lazy, StrictMode, Suspense } from 'react'
 import { createRoot } from 'react-dom/client'
+import { applyAppearance, storedAppearance } from './appearance'
 import { askMeEarly } from './early'
 import { bootLocale } from './i18n'
 import './styles.css'
@@ -11,6 +12,7 @@ const SharePage = lazy(() => import('./views/Share').then((m) => ({ default: m.S
 const Launcher = lazy(() => import('./launcher').then((m) => ({ default: m.Launcher })))
 
 applyTheme(storedTheme())
+applyAppearance(storedAppearance())
 bootLocale()
 
 if ('serviceWorker' in navigator) {

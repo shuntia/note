@@ -23,10 +23,9 @@ import { eventFacts, nextUp } from '../events'
 import * as fx from '../fx'
 import { arcPath, Circle, Gauge, STROKE, VB, type ArcLine } from '../gauge'
 import { makeHold } from '../held'
-import { useMedia } from '../hooks'
 import { Jot } from '../jot'
 import { clampStops, clearTimeline, scrollReveal, scrollToY, scrub, travel, type Timeline, type Trigger } from '../homeMotion'
-import { REDUCED_MOTION, reducedMotion } from '../motion'
+import { reducedMotion, useReducedMotion } from '../motion'
 import { rise } from '../motion-gsap'
 import { NowCounter } from '../nowcounter'
 import { Overflow, type OverflowItem } from '../overflow'
@@ -279,7 +278,7 @@ export function Home({
   const shown = session ?? landing
   const inSession = shown !== null
   const prefs = readPrefs()
-  const motion = !useMedia(REDUCED_MOTION)
+  const motion = !useReducedMotion()
   useIdle(!mobile || inSession)
 
   const newest = useState(() => latest<DayView>())[0]
