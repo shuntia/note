@@ -713,14 +713,6 @@ struct QueueQuery {
     limit: Option<usize>,
 }
 
-type QueueSource = fn(
-    &rusqlite::Connection,
-    i64,
-    &jiff::tz::TimeZone,
-    jiff::Timestamp,
-    usize,
-) -> rusqlite::Result<Vec<crate::tasks::QueueEntry>>;
-
 /// The queue, or with `order::candidates` what Now starts next: today's order,
 /// then the queue behind it.
 async fn task_queue<const CANDIDATES: bool>(
@@ -728,11 +720,19 @@ async fn task_queue<const CANDIDATES: bool>(
     State(state): State<AppState>,
     Query(q): Query<QueueQuery>,
 ) -> impl IntoResponse {
-    let source: QueueSource = if CANDIDATES { crate::order::candidates } else { crate::tasks::queue };
-    let tz = user_zone(&state, &user.username);
+    let cfg = crate::config::UserConfig::load(&state.config_dir, &user.username).ok();
+    let clock = cfg.as_ref().map_or_else(crate::zone::Clock::utc, crate::zone::Clock::of);
+    let lead_min = i64::from(cfg.map(|c| c.tuning).unwrap_or_default().lead_min());
+    let tz = clock.tz.clone();
     let conn = state.db();
     let limit = q.limit.unwrap_or(5).clamp(1, 20);
-    let listed = source(&conn, user.id, &tz, jiff::Timestamp::now(), limit).and_then(|mut q| {
+    let now = jiff::Timestamp::now();
+    let listed = if CANDIDATES {
+        crate::order::candidates(&conn, user.id, &clock, lead_min, now, limit)
+    } else {
+        crate::tasks::queue(&conn, user.id, &tz, now, limit)
+    };
+    let listed = listed.and_then(|mut q| {
         crate::tasks::stamp_schedule(&conn, user.id, &tz, q.iter_mut().map(|e| &mut e.task.task))?;
         Ok(q)
     });
@@ -1632,8 +1632,7 @@ fn conversation_not_found() -> axum::response::Response {
 }
 
 async fn triggers_log(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
-    let tz = crate::triggers::timezone(&state.config_dir, &user.username);
-    let today = jiff::Timestamp::now().to_zoned(tz).date();
+    let today = crate::zone::today(&state.config_dir, &user.username, jiff::Timestamp::now());
     match crate::triggers::log(&state.db(), user.id, today) {
         Ok(events) => Json(serde_json::json!({ "events": events })).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -1818,6 +1817,8 @@ struct SettingsPatch {
     #[serde(default, deserialize_with = "crate::tasks::present")]
     effort: Option<Option<String>>,
     alerts: Option<Vec<AlertPatch>>,
+    day_start: Option<String>,
+    tuning: Option<crate::tuning::TuningPatch>,
 }
 
 /// A day's worth of check-ins Note may start on its own; more than this and it
@@ -1874,6 +1875,8 @@ fn settings_body(
         "model": crate::models::still_offered(llm, cfg.model.clone()),
         "effort": cfg.effort(),
         "schedule": schedule,
+        "day_start": cfg.day_start(),
+        "tuning": cfg.tuning.view(),
     })
 }
 
@@ -2134,6 +2137,18 @@ async fn settings_put(
             return invalid_field("effort", "must be off, low, medium or high");
         }
         cfg.effort = effort;
+    }
+    if let Some(time) = req.day_start {
+        let time = time.trim();
+        if !time.is_empty() && !crate::templates::valid_time(time) {
+            return invalid_field("day_start", "must be a zero-padded 24-hour HH:MM, or blank for no day-laying");
+        }
+        cfg.day_start = Some(time.to_string());
+    }
+    if let Some(patch) = req.tuning {
+        if let Err((field, requirement)) = cfg.tuning.apply(patch) {
+            return invalid_field(&format!("tuning.{field}"), &requirement);
+        }
     }
     if let Some(alerts) = req.alerts {
         let changes: Vec<(usize, bool)> = alerts.iter().map(|a| (a.index, a.alert)).collect();
@@ -2750,7 +2765,7 @@ async fn plan_today(
             _ => return StatusCode::BAD_REQUEST.into_response(),
         },
         None => match jiff::tz::TimeZone::get(&ucfg.timezone) {
-            Ok(tz) => jiff::Timestamp::now().to_zoned(tz).date(),
+            Ok(_) => ucfg.today(jiff::Timestamp::now()),
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         },
     };
@@ -2803,34 +2818,38 @@ fn day_context(
     Ok((tz, tmpl))
 }
 
-/// One local day, whole: its plan, its calendar, the free time left in it, and
-/// — for today and the days behind it — what has already happened.
+/// One work day, whole: its plan, its calendar, the free time left in it, and
+/// — for today and the days behind it — what has already happened. `today`
+/// names the user's current work day, which runs past midnight to `day_end`.
 async fn day_view(
     user: CurrentUser,
     State(state): State<AppState>,
     Path(date): Path<String>,
 ) -> impl IntoResponse {
-    let Some(date) = date.parse::<jiff::civil::Date>().ok().filter(|d| within_a_year(*d)) else {
+    let clock = crate::zone::Clock::load(&state.config_dir, &user.username);
+    let now = jiff::Timestamp::now();
+    let today = clock.today(now);
+    let date = if date == "today" { Some(today) } else { date.parse::<jiff::civil::Date>().ok() };
+    let Some(date) = date.filter(|d| within_a_year(*d)) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
     let (tz, tmpl) = match day_context(&state, &user.username) {
         Ok(c) => c,
         Err(status) => return status.into_response(),
     };
-    let now = jiff::Timestamp::now();
-    let today = now.to_zoned(tz.clone()).date();
     let conn = state.db();
     if crate::plan::generate(&conn, user.id, &tmpl, date).is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
-    let (Ok(events), Ok(occurrences), Ok(items)) = (
-        crate::plan::events_for(&conn, user.id, date),
+    let (Ok(events), Ok(own_calendar), Ok(occurrences), Ok(items)) = (
+        crate::day::work_day_events(&conn, user.id, &clock, date),
         crate::calendar::occurrences(&conn, user.id, date),
+        crate::day::work_day_calendar(&conn, user.id, &clock, date),
         crate::tools::day_ops::items(&conn, &state.config_dir, &user.username, user.id, date),
     ) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-    let free: Vec<serde_json::Value> = crate::calendar::free_windows(&occurrences)
+    let free: Vec<serde_json::Value> = crate::calendar::free_windows(&own_calendar)
         .iter()
         .map(|w| serde_json::json!({ "start": w.start_wall(), "end": w.end_wall() }))
         .collect();
@@ -2845,13 +2864,15 @@ async fn day_view(
     let history = if date > today {
         Vec::new()
     } else {
-        match crate::day::history(&conn, user.id, &tz, date, now) {
+        match crate::day::history(&conn, user.id, &clock, date, now) {
             Ok(h) => h,
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         }
     };
     Json(serde_json::json!({
         "date": date.to_string(),
+        "today": today.to_string(),
+        "day_end": clock.day_end,
         "items": items,
         "events": events,
         "calendar": occurrences,
@@ -2919,7 +2940,7 @@ async fn plan_carry(
         Err(status) => return status.into_response(),
     };
     let now = jiff::Timestamp::now();
-    if date < now.to_zoned(tz).date() {
+    if date < crate::zone::work_date(&tz, now, crate::zone::Clock::load(&state.config_dir, &user.username).day_end.as_str()) {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(serde_json::json!({ "error": "a day that is over cannot be carried" })),
@@ -2952,10 +2973,10 @@ async fn debrief(
         let Ok(ucfg) = crate::config::UserConfig::load(&state.config_dir, &user.username) else {
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         };
-        let Ok(tz) = jiff::tz::TimeZone::get(&ucfg.timezone) else {
+        if jiff::tz::TimeZone::get(&ucfg.timezone).is_err() {
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        };
-        jiff::Timestamp::now().to_zoned(tz).date().to_string()
+        }
+        ucfg.today(jiff::Timestamp::now()).to_string()
     };
     let conn = state.db();
     let row = conn
@@ -3322,9 +3343,9 @@ async fn work_session_open(user: CurrentUser, State(state): State<AppState>) -> 
 }
 
 async fn work_session_today(user: CurrentUser, State(state): State<AppState>) -> impl IntoResponse {
-    let tz = user_zone(&state, &user.username);
+    let clock = crate::zone::Clock::load(&state.config_dir, &user.username);
     let conn = state.db();
-    match crate::work::rounds_today(&conn, user.id, &tz, jiff::Timestamp::now()) {
+    match crate::work::rounds_today(&conn, user.id, &clock, jiff::Timestamp::now()) {
         Ok(rounds) => Json(serde_json::json!({ "rounds": rounds })).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
@@ -3646,10 +3667,11 @@ async fn calendar_create(
     if !json_declared(&headers) {
         return json_required();
     }
-    let fields = match calendar_body::<crate::calendar::Fields>(&body) {
+    let mut fields = match calendar_body::<crate::calendar::Fields>(&body) {
         Ok(f) => f,
         Err((status, why)) => return calendar_error(status, &why),
     };
+    fields.quiet.get_or_insert_with(|| crate::tuning::of(&state.config_dir, &user.username).calendar_quiet());
     let conn = state.db();
     match crate::calendar::create(&conn, user.id, fields) {
         Ok(entry) => (StatusCode::CREATED, Json(entry)).into_response(),
@@ -3666,10 +3688,11 @@ async fn calendar_upsert(
     Path(external_id): Path<String>,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    let fields = match calendar_body::<crate::calendar::Fields>(&body) {
+    let mut fields = match calendar_body::<crate::calendar::Fields>(&body) {
         Ok(f) => f,
         Err((status, why)) => return calendar_error(status, &why),
     };
+    fields.quiet.get_or_insert_with(|| crate::tuning::of(&state.config_dir, &user.username).calendar_quiet());
     if fields.external_id.as_deref().is_some_and(|id| id.trim() != external_id.trim()) {
         return calendar_error(
             StatusCode::UNPROCESSABLE_ENTITY,

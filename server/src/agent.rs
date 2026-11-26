@@ -25,12 +25,15 @@ pub const TALK_MAX_TURNS: usize = 40;
 /// Long turns answer the client as pending and finish over the socket, so this
 /// bounds cost, not anyone's wait.
 const TALK_BUDGET: std::time::Duration = std::time::Duration::from_mins(10);
-/// Rounds in a row that change nothing before the session is told to act;
-/// when one of them tried a write, the next round must answer instead.
+/// The shipped rounds in a row that change nothing before the session is told
+/// to act (the user's `lookup_rounds`); when one of them tried a write, the
+/// next round must answer instead.
+#[cfg(test)]
 const LOOKUP_ROUNDS: usize = 4;
 /// Writes in a row that change nothing before the session is told to stop and fix them.
 const IDLE_WRITES_NOTE: usize = 2;
-/// Completion tokens, reasoning included, a Talk turn may spend before its next round must answer.
+/// Completion tokens, reasoning included, a Talk turn may spend before its next
+/// round must answer; the user's `completion_cap` replaces it.
 const TALK_COMPLETION_CAP: u64 = 150_000;
 
 use crate::model_text::{self as mt, REPLY_IN_JAPANESE, SPEAK_JAPANESE, VISITOR_JAPANESE};
@@ -531,6 +534,9 @@ fn build_prompt(
         if let Some(about) = crate::prompts::about(deps.config_dir, username) {
             let _ = write!(system, "\n\n{}\n\n{about}", mt::about_user(lang));
         }
+        if let Some(style) = ucfg.as_ref().ok().and_then(|c| mt::reply_style(lang, c.tuning.reply_length(), c.tuning.reply_tone())) {
+            let _ = write!(system, "\n\n{style}");
+        }
     }
     if let (Lang::Ja, Some(line)) = (lang, p.japanese) {
         system.push_str("\n\n");
@@ -602,6 +608,9 @@ fn run_traced(
     trace: &mut crate::trace::Builder,
 ) -> Result<SessionOutcome> {
     let (ucfg, lang) = reader(deps, username, kind);
+    let tuning = ucfg.as_ref().map(|c| c.tuning.clone()).unwrap_or_default();
+    let lookup_rounds = tuning.lookup_rounds() as usize;
+    let completion_cap = profile(kind).completion_cap.map(|_| u64::from(tuning.completion_cap()));
     let pick = session_pick(deps, kind, ucfg.as_ref().ok());
     let prompt = build_prompt(deps, user_id, username, kind, now, lang, ucfg)?;
     let system = &prompt.system;
@@ -718,7 +727,7 @@ fn run_traced(
             said = resp.text;
             break;
         }
-        force_reply |= replies && profile.completion_cap.is_some_and(|cap| trace.completion() >= cap);
+        force_reply |= replies && completion_cap.is_some_and(|cap| trace.completion() >= cap);
         if cut && replies && !last {
             force_reply = true;
             continue;
@@ -819,9 +828,9 @@ fn run_traced(
         if idle_before < IDLE_WRITES_NOTE && idle >= IDLE_WRITES_NOTE {
             note_on_last_result(&mut messages, mt::idle_writes(lang));
         }
-        if replies && lookups >= LOOKUP_ROUNDS && idle > 0 {
+        if replies && lookups >= lookup_rounds && idle > 0 {
             force_reply = true;
-        } else if lookups > 0 && lookups % LOOKUP_ROUNDS == 0 {
+        } else if lookups > 0 && lookups % lookup_rounds == 0 {
             note_on_last_result(&mut messages, &mt::lookups_nudge(lang, lookups));
         }
     }

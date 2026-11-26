@@ -4,9 +4,6 @@ use serde::Serialize;
 use crate::text::{self, Lang};
 use std::path::Path;
 
-/// How long after a session starts its first progress check lands, when the
-/// session named no length.
-pub const DEFAULT_FIRST_CHECK_MIN: i64 = 25;
 pub const MAX_TITLE_BYTES: usize = 200;
 pub const MAX_PLANNED_MIN: i64 = 12 * 60;
 pub const MAX_NOTES_BYTES: usize = 4000;
@@ -305,13 +302,6 @@ pub fn start(
     Ok(with_leaf(conn, session)?)
 }
 
-/// Halfway through, or 25 minutes in, whichever comes first.
-fn first_check_minutes(planned_min: Option<i64>) -> i64 {
-    planned_min
-        .map_or(DEFAULT_FIRST_CHECK_MIN, |min| (min / 2).min(DEFAULT_FIRST_CHECK_MIN))
-        .max(1)
-}
-
 /// The checks a session opens with: the midpoint, and — where the session named
 /// a length and "Time's up." is not wanted in its place — one at the planned end.
 #[allow(clippy::too_many_arguments)]
@@ -332,7 +322,7 @@ fn lay_opening_checks(
         user_id,
         username,
         session_id,
-        first_check_minutes(planned_min),
+        cfg.map(|c| c.tuning.clone()).unwrap_or_default().first_check(planned_min),
         &format!("Progress check on {title}."),
         now,
     )?;
@@ -489,10 +479,10 @@ fn close(
 pub fn rounds_today(
     conn: &Connection,
     user_id: i64,
-    tz: &jiff::tz::TimeZone,
+    clock: &crate::zone::Clock,
     now: jiff::Timestamp,
 ) -> Result<u32> {
-    let (from, to) = crate::day::bounds(tz, now.to_zoned(tz.clone()).date())?;
+    let (from, to) = clock.bounds(clock.today(now))?;
     let n: i64 = conn.query_row(
         "SELECT COALESCE(SUM(CASE WHEN mode = 'pomodoro' THEN round ELSE 1 END), 0)
          FROM work_sessions
@@ -944,14 +934,9 @@ pub fn planned_end(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -
     Ok(flips)
 }
 
-/// How far past its planned length a session may run before Note asks after it,
-/// and how far before Note ends it.
-pub const OVERRUN_ASK_PCT: i64 = 150;
-pub const OVERRUN_END_PCT: i64 = 300;
-
-/// Looks after every open session that has run past its plan: at
-/// `OVERRUN_ASK_PCT` it asks once, in plain words; at `OVERRUN_END_PCT` it ends
-/// the session and says so. Each line lands in the session's thread and goes out
+/// Looks after every open session that has run past its plan: at the user's
+/// `overrun_ask_pct` it asks once, in plain words; at `overrun_end_pct` it ends
+/// the session and says so, unless they turned the ending off. Each line lands in the session's thread and goes out
 /// through the ladder. Where the user has `overrun_wakes` on, the agent is woken
 /// to say each in its own words instead. A paused session is not running.
 pub fn overrun(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Result<Vec<Flip>> {
@@ -972,8 +957,11 @@ pub fn overrun(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Re
         let past = |pct: i64| elapsed_ms >= planned * 60_000 * pct / 100;
         let elapsed = elapsed_ms / 60_000;
         let lang = Lang::for_user(config_dir, &username);
-        let wakes = crate::config::UserConfig::load(config_dir, &username).is_ok_and(|c| c.overrun_wakes());
-        let (title, body, kind) = if past(OVERRUN_END_PCT) {
+        let cfg = crate::config::UserConfig::load(config_dir, &username).ok();
+        let wakes = cfg.as_ref().is_some_and(crate::config::UserConfig::overrun_wakes);
+        let tuning = cfg.map(|c| c.tuning).unwrap_or_default();
+        let (ask_pct, end_pct) = (i64::from(tuning.overrun_ask_pct()), i64::from(tuning.overrun_end_pct()));
+        let (title, body, kind) = if tuning.overrun_auto_end() && past(end_pct) {
             if wakes {
                 catch_up(conn, config_dir, &session, now)?;
                 close(conn, config_dir, user_id, &username, Some(session.id), "stopped", Farewell::Overran, now)?;
@@ -987,7 +975,7 @@ pub fn overrun(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Re
                 text::overrun_ended_body(lang, &session.title, elapsed, planned),
                 "session_force_ended",
             )
-        } else if asked.is_none() && past(OVERRUN_ASK_PCT) {
+        } else if asked.is_none() && past(ask_pct) {
             let extra = ((planned / 2).max(5) + 4) / 5 * 5;
             conn.execute(
                 "UPDATE work_sessions SET overrun_asked_at = ?1 WHERE id = ?2",
@@ -996,9 +984,9 @@ pub fn overrun(conn: &Connection, config_dir: &Path, now: jiff::Timestamp) -> Re
             if wakes {
                 let prompt = format!(
                     "The session on {} has run {elapsed} min against its planned {planned}: ask in \
-                     one line whether it is done or they want to keep going. Note stops it at {} min.",
+                     one line whether it is done or they want to keep going.{}",
                     session.title,
-                    planned * OVERRUN_END_PCT / 100
+                    if tuning.overrun_auto_end() { format!(" Note stops it at {} min.", planned * end_pct / 100) } else { String::new() }
                 );
                 lay_session_wake(conn, config_dir, user_id, &username, &session, &prompt, "overrun wake", now)?;
                 log_overrun(conn, user_id, "session_overrun", &session, elapsed)?;
@@ -1045,17 +1033,13 @@ fn log_overrun(conn: &Connection, user_id: i64, kind: &str, session: &Session, e
     )
 }
 
-/// How long every client of the user may be gone before a session they left
-/// unattended is closed: long enough for a reload or a dropped connection.
-pub const GONE_GRACE_MIN: i64 = 5;
-/// The longest a pause holds a session open.
-pub const MAX_PAUSE_MIN: i64 = 120;
 /// The longest any session stays open by the wall clock, whatever its plan.
 pub const MAX_OPEN_MIN: i64 = MAX_PLANNED_MIN + 4 * 60;
 
-/// Stops every session nobody is keeping: one paused past `MAX_PAUSE_MIN`,
-/// one open past `MAX_OPEN_MIN`, and one paused, open-ended or past its plan
-/// once the user has had no client open for `GONE_GRACE_MIN`, closed as of
+/// Stops every session nobody is keeping: one paused past the user's
+/// `max_pause_min`, one open past `MAX_OPEN_MIN`, and one paused, open-ended or
+/// past its plan once the user has had no client open for `gone_grace_min`,
+/// closed as of
 /// the moment they were last there, or its plan's end when that is later.
 /// `gone_since` answers since when a user has had no client open, `None`
 /// while one is.
@@ -1076,7 +1060,9 @@ pub fn close_abandoned(
 
     let mut closed = Vec::new();
     for (session, user_id, username) in open {
-        let (why, at) = if session.paused_for_ms(now) >= MAX_PAUSE_MIN * 60_000 {
+        let tuning = crate::config::UserConfig::load(config_dir, &username).map(|c| c.tuning).unwrap_or_default();
+        let (max_pause, grace) = (i64::from(tuning.max_pause_min()), i64::from(tuning.gone_grace_min()));
+        let (why, at) = if session.paused_for_ms(now) >= max_pause * 60_000 {
             ("paused too long", now)
         } else if since(&session.started_at, now) >= MAX_OPEN_MIN * 60_000 {
             ("open too long", now)
@@ -1087,7 +1073,7 @@ pub fn close_abandoned(
             let started = session.started_at.parse::<jiff::Timestamp>().unwrap_or(now);
             let last = crate::presence::last_active(conn, user_id)?
                 .map_or(left.max(started), |seen| seen.max(left).max(started));
-            if !unattended || now.as_second() - last.as_second() < GONE_GRACE_MIN * 60 {
+            if !unattended || now.as_second() - last.as_second() < grace * 60 {
                 continue;
             }
             let plan_end = session.planned_min.filter(|_| session.paused_at.is_none()).map(|min| {
@@ -1909,9 +1895,11 @@ mod tests {
         insert("pomodoro", 3, "2026-09-17T09:00:00Z", Some("2026-09-17T10:30:00Z"));
         insert("pomodoro", 2, "2026-09-16T09:00:00Z", Some("2026-09-16T10:00:00Z"));
         insert("single", 1, "2026-09-17T11:00:00Z", None);
-        let tz = jiff::tz::TimeZone::UTC;
-        assert_eq!(rounds_today(&conn, uid, &tz, at("2026-09-17T12:00:00Z")).unwrap(), 4);
-        assert_eq!(rounds_today(&conn, uid, &tz, at("2026-09-18T12:00:00Z")).unwrap(), 0);
+        let utc = crate::zone::Clock::utc();
+        assert_eq!(rounds_today(&conn, uid, &utc, at("2026-09-17T12:00:00Z")).unwrap(), 4);
+        assert_eq!(rounds_today(&conn, uid, &utc, at("2026-09-18T12:00:00Z")).unwrap(), 0);
+        let late = crate::zone::Clock { tz: jiff::tz::TimeZone::UTC, day_end: "08:30".into() };
+        assert_eq!(rounds_today(&conn, uid, &late, at("2026-09-18T08:00:00Z")).unwrap(), 3, "the 17th's day runs 08:30 to 08:30");
     }
 
     #[test]

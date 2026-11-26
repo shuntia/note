@@ -228,6 +228,7 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> R
         return Ok(saver.env.into_value());
     }
     let tz = user_tz(ctx);
+    let clock = crate::zone::Clock::load(ctx.config_dir, ctx.username);
     let now = jiff::Timestamp::now();
     for (i, v) in goals.into_iter().enumerate() {
         let r = Ref::top(i);
@@ -258,9 +259,9 @@ pub fn save(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> R
         if let Some(v) = goal_obj.take(&["due", "due_at", "due_on", "deadline", "due_date"]) {
             match loose::text(&v) {
                 Some(s) if s.trim().is_empty() => due = Some(None),
-                Some(s) => match loose::when(&s, &tz, now) {
+                Some(s) => match loose::when(&s, &tz, &clock.day_end, now) {
                     Some(w) => {
-                        if let Some(d) = loose::rolled(&s, now.to_zoned(tz.clone()).date()) {
+                        if let Some(d) = loose::rolled(&s, clock.today(now)) {
                             env.adjusted(Some(&r), "due", d.to_string().into(), loose::rolled_why(&s, d));
                         }
                         due = Some(Some(w));

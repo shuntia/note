@@ -6,8 +6,6 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 
 pub const MAX_ITEMS: usize = 60;
-/// How soon a timed item's start may be for Now to offer it already.
-pub const LEAD_MIN: i64 = 10;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Item {
@@ -221,18 +219,19 @@ pub fn placed(ids: &[i64], task_id: i64, before: Option<i64>) -> Option<Vec<i64>
     Some(out)
 }
 
-/// What Now offers next: today's open items whose block, if any, starts
-/// within `LEAD_MIN`, one entry per tree, then the queue behind them.
+/// What Now offers next: the work day's open items whose block, if any,
+/// starts within `lead_min`, one entry per tree, then the queue behind them.
 pub fn candidates(
     conn: &Connection,
     user_id: i64,
-    tz: &jiff::tz::TimeZone,
+    clock: &crate::zone::Clock,
+    lead_min: i64,
     now: jiff::Timestamp,
     limit: usize,
 ) -> rusqlite::Result<Vec<QueueEntry>> {
-    let local = now.to_zoned(tz.clone());
-    let today = local.date();
-    let soon = i64::from(local.hour()) * 60 + i64::from(local.minute()) + LEAD_MIN;
+    let tz = &clock.tz;
+    let (today, wall) = clock.wall(now);
+    let soon = crate::templates::wall_minutes(&wall) + lead_min;
     let mut out: Vec<QueueEntry> = Vec::new();
     for item in list(conn, user_id, today)? {
         if out.len() == limit {
@@ -402,7 +401,7 @@ mod tests {
         let outline = task(&conn, uid, "outline", Some(essay));
         let draft = task(&conn, uid, "draft", Some(essay));
         set(&conn, uid, day(), &[draft, outline]).unwrap();
-        let got = candidates(&conn, uid, &jiff::tz::TimeZone::UTC, now, 5).unwrap();
+        let got = candidates(&conn, uid, &crate::zone::Clock::utc(), 10, now, 5).unwrap();
         assert_eq!(picked(&got), [(essay, Some(draft), "order")]);
     }
 
@@ -437,17 +436,16 @@ mod tests {
     fn now_takes_the_head_of_the_order_then_the_queue() {
         let (conn, uid) = env();
         let now: jiff::Timestamp = "2026-10-07T12:00:00Z".parse().unwrap();
-        let utc = jiff::tz::TimeZone::UTC;
         let oldest = task(&conn, uid, "oldest", None);
         let essay = task(&conn, uid, "essay", None);
         let outline = task(&conn, uid, "outline", Some(essay));
         let laundry = task(&conn, uid, "laundry", None);
 
-        let first = candidates(&conn, uid, &utc, now, 5).unwrap();
+        let first = candidates(&conn, uid, &crate::zone::Clock::utc(), 10, now, 5).unwrap();
         assert_eq!(first[0].reason, "oldest", "no order: the queue");
 
         set(&conn, uid, day(), &[outline, laundry]).unwrap();
-        let got = candidates(&conn, uid, &utc, now, 5).unwrap();
+        let got = candidates(&conn, uid, &crate::zone::Clock::utc(), 10, now, 5).unwrap();
         assert_eq!(
             picked(&got)[..2],
             [(essay, Some(outline), "order"), (laundry, None, "order")]
@@ -457,12 +455,12 @@ mod tests {
             "the queue fills in behind the order"
         );
         assert_eq!(got.len(), 3, "a task is offered once");
-        assert_eq!(candidates(&conn, uid, &utc, now, 1).unwrap().len(), 1);
+        assert_eq!(candidates(&conn, uid, &crate::zone::Clock::utc(), 10, now, 1).unwrap().len(), 1);
 
         close(&conn, outline, "done");
         close(&conn, laundry, "done");
         assert!(
-            candidates(&conn, uid, &utc, now, 5)
+            candidates(&conn, uid, &crate::zone::Clock::utc(), 10, now, 5)
                 .unwrap()
                 .iter()
                 .all(|e| e.reason != "order"),

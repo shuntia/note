@@ -12,11 +12,6 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 pub const ORIGIN: &str = "chores";
-const STALE_DAYS: i64 = 14;
-const OVERDUE_DAYS: i64 = 3;
-/// A root this long with no steps under it is too vague to start.
-const BIG_MIN: u32 = 90;
-const SMALL_MIN: u32 = 30;
 const MAX_CANDIDATES: usize = 25;
 pub const MEMORY_SLICE: usize = 30;
 const MAX_TITLE_CHARS: usize = 80;
@@ -203,8 +198,10 @@ fn days(d: jiff::SignedDuration) -> i64 {
 }
 
 /// One line per task worth a look, most pressing reason first, at most
-/// `MAX_CANDIDATES`.
-fn candidates(live: &[Live], l: Lang, now: jiff::Timestamp) -> Vec<String> {
+/// `MAX_CANDIDATES`. A root of `tidy_big_min` or more with no steps under it is
+/// too vague to start, unless the user breaks work down themselves.
+fn candidates(live: &[Live], l: Lang, tuning: &crate::tuning::Tuning, now: jiff::Timestamp) -> Vec<String> {
+    let (overdue_days, stale_days) = (i64::from(tuning.tidy_overdue_days()), i64::from(tuning.tidy_stale_days()));
     let titles: Vec<Vec<char>> = live.iter().map(|t| folded(&t.title).chars().collect()).collect();
     let mut flagged: Vec<(usize, i64, String, Vec<String>)> = Vec::new();
     for (i, t) in live.iter().enumerate() {
@@ -224,15 +221,16 @@ fn candidates(live: &[Live], l: Lang, now: jiff::Timestamp) -> Vec<String> {
         if !twins.is_empty() {
             flag(0, mt::chores_duplicate(l, &twins));
         }
-        if let Some(late) = t.due_at.map(|due| days(now.duration_since(due))).filter(|d| *d >= OVERDUE_DAYS) {
+        if let Some(late) = t.due_at.map(|due| days(now.duration_since(due))).filter(|d| *d >= overdue_days) {
             flag(1, mt::chores_overdue(l, late));
         }
         if t.parent_id.is_none() {
-            if let Some(idle) = t.touched.map(|at| days(now.duration_since(at))).filter(|d| *d >= STALE_DAYS) {
+            if let Some(idle) = t.touched.map(|at| days(now.duration_since(at))).filter(|d| *d >= stale_days) {
                 flag(2, mt::chores_untouched(l, idle));
             }
         }
-        if t.parent_id.is_none() && t.children == 0 && t.duration_min.is_some_and(|m| m >= BIG_MIN) {
+        let big = tuning.auto_breakdown() && t.duration_min.is_some_and(|m| m >= tuning.tidy_big_min());
+        if t.parent_id.is_none() && t.children == 0 && big {
             flag(3, mt::chores_no_steps(l, t.duration_min.unwrap_or_default()));
         }
         if t.children == 0 && t.duration_min.is_none() {
@@ -252,9 +250,9 @@ fn candidates(live: &[Live], l: Lang, now: jiff::Timestamp) -> Vec<String> {
 }
 
 /// A small open step chosen by the clock, so the offer varies run to run.
-fn random_pick(live: &[Live], now: jiff::Timestamp) -> Option<&Live> {
+fn random_pick(live: &[Live], small_min: u32, now: jiff::Timestamp) -> Option<&Live> {
     let small: Vec<&Live> =
-        live.iter().filter(|t| t.children == 0 && t.duration_min.is_none_or(|m| m <= SMALL_MIN)).collect();
+        live.iter().filter(|t| t.children == 0 && t.duration_min.is_none_or(|m| m <= small_min)).collect();
     let i = usize::try_from(now.subsec_nanosecond().unsigned_abs()).unwrap_or(0) % small.len().max(1);
     small.get(i).copied()
 }
@@ -330,11 +328,15 @@ pub fn opening(
     username: &str,
     tz: &jiff::tz::TimeZone,
     l: Lang,
+    tuning: &crate::tuning::Tuning,
     now: jiff::Timestamp,
 ) -> Result<String> {
     let mut s = mt::chores_brief(l).to_string();
+    if !tuning.auto_breakdown() {
+        s.push_str(mt::chores_no_breakdown(l));
+    }
     let live = live_tasks(conn, user_id)?;
-    let lines = candidates(&live, l, now);
+    let lines = candidates(&live, l, tuning, now);
     if lines.is_empty() {
         s.push_str(mt::chores_no_tasks(l));
     } else {
@@ -343,7 +345,7 @@ pub fn opening(
             let _ = writeln!(s, "{line}");
         }
     }
-    if let Some(t) = random_pick(&live, now) {
+    if let Some(t) = random_pick(&live, tuning.tidy_small_min(), now) {
         let title: String = t.title.chars().take(MAX_TITLE_CHARS).collect();
         s.push_str(&mt::chores_random_pick(l, t.id, &title));
     }
@@ -529,7 +531,7 @@ mod tests {
         let bare = task(&conn, uid, "Book the van", Some(parent), fresh, None, None);
         let fine = task(&conn, uid, "Call mum", None, fresh, None, Some(10));
         conn.execute("UPDATE tasks SET state = 'dropped' WHERE id = ?1", [fine]).unwrap();
-        let s = opening(&conn, uid, "aki", &jiff::tz::TimeZone::UTC, Lang::En, now).unwrap();
+        let s = opening(&conn, uid, "aki", &jiff::tz::TimeZone::UTC, Lang::En, &crate::tuning::Tuning::default(), now).unwrap();
         assert!(s.contains(mt::chores_brief(Lang::En)));
         assert!(s.contains(&format!("- t{a} \"Write the lab report\": looks like t{b}")), "{s}");
         assert!(s.contains(&format!("- t{late} \"Pay the bill\": overdue 9 days")), "{s}");
@@ -548,7 +550,7 @@ mod tests {
         for n in 0..40 {
             task(&conn, uid, &format!("errand number {n}"), None, "2026-10-28T12:00:00Z", None, None);
         }
-        let s = opening(&conn, uid, "aki", &jiff::tz::TimeZone::UTC, Lang::En, at("2026-10-29T12:00:00Z")).unwrap();
+        let s = opening(&conn, uid, "aki", &jiff::tz::TimeZone::UTC, Lang::En, &crate::tuning::Tuning::default(), at("2026-10-29T12:00:00Z")).unwrap();
         assert_eq!(s.lines().filter(|l| l.starts_with("- t")).count(), MAX_CANDIDATES);
     }
 
@@ -560,7 +562,7 @@ mod tests {
         }
         conn.execute("UPDATE memory_index SET archived = 1 WHERE id = 'm001'", []).unwrap();
         let now = at("2026-10-29T12:00:00Z");
-        let run = || opening(&conn, uid, "aki", &jiff::tz::TimeZone::UTC, Lang::En, now).unwrap();
+        let run = || opening(&conn, uid, "aki", &jiff::tz::TimeZone::UTC, Lang::En, &crate::tuning::Tuning::default(), now).unwrap();
         let first = run();
         assert!(first.contains("30 of 44 facts"), "{first}");
         assert!(first.contains("- m000 [semantic] fact 0\n"));
@@ -589,7 +591,7 @@ mod tests {
         conn.execute("UPDATE events SET status = 'done' WHERE id IN (?1, ?2)", [spoke, quiet]).unwrap();
         crate::log::record(&conn, Some(uid), "trigger_said", &format!("event {spoke}: merged two lab reports")).unwrap();
         crate::log::record(&conn, Some(uid), "trigger_quiet", &format!("event {quiet}: nothing to tidy")).unwrap();
-        let s = opening(&conn, uid, "aki", &jiff::tz::TimeZone::UTC, Lang::En, now).unwrap();
+        let s = opening(&conn, uid, "aki", &jiff::tz::TimeZone::UTC, Lang::En, &crate::tuning::Tuning::default(), now).unwrap();
         assert!(s.contains("Earlier tidy-ups today:\n- 00:00 said: merged two lab reports\n- 00:01 stayed quiet\n"), "{s}");
         assert!(!s.contains("23:59"), "{s}");
     }

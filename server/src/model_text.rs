@@ -58,6 +58,24 @@ pub fn call_speaks_only(l: Lang) -> &'static str {
     )
 }
 
+/// The user's chosen reply length and tone as a line for the system prompt;
+/// `None` when both are as shipped.
+pub fn reply_style(l: Lang, length: &str, tone: &str) -> Option<String> {
+    let length = match length {
+        "short" => l.of("Keep replies short: a line or two unless more is asked for.", "返事は短く。求められない限り一、二行で。"),
+        "detailed" => l.of("Reply in full: give the reasoning and the details, not just the answer.", "返事は詳しく。答えだけでなく理由と細部も添える。"),
+        _ => "",
+    };
+    let tone = match tone {
+        "warm" => l.of("Tone: warm and encouraging.", "口調: あたたかく、励ますように。"),
+        "direct" => l.of("Tone: direct and plain, no softening.", "口調: 率直に、遠回しにしない。"),
+        "playful" => l.of("Tone: light and playful.", "口調: 軽く、遊び心をもって。"),
+        _ => "",
+    };
+    let lines: Vec<&str> = [length, tone].into_iter().filter(|s| !s.is_empty()).collect();
+    (!lines.is_empty()).then(|| format!("{}\n{}", l.of("# How the user wants replies", "# 返事の好み"), lines.join("\n")))
+}
+
 pub fn about_user(l: Lang) -> &'static str {
     match l {
         Lang::En => "# About the user, in their own words",
@@ -850,6 +868,13 @@ pub fn chores_brief(l: Lang) -> &'static str {
          その id を task_ids に入れる。`stay_quiet` は何も変えず、提案する価値のあるものもない\
          ときだけ。\n\
          この実行では目覚めを置かず、電話もかけない。\n",
+    )
+}
+
+pub fn chores_no_breakdown(l: Lang) -> &'static str {
+    l.of(
+        "The user breaks work down themselves: add no steps to their tasks.\n",
+        "作業の分け方はユーザー自身が決める。タスクに手順を足さない。\n",
     )
 }
 

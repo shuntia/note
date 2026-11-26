@@ -668,10 +668,11 @@ pub enum When {
 }
 
 /// A due: a day is a whole day, a time a moment on the user's clock (today,
-/// or tomorrow once today's has gone by).
-pub fn when(raw: &str, tz: &TimeZone, now: Timestamp) -> Option<When> {
+/// or tomorrow once today's has gone by). Day words count from the work day
+/// that runs until `day_end`, and a bare time short of it lies past midnight.
+pub fn when(raw: &str, tz: &TimeZone, day_end: &str, now: Timestamp) -> Option<When> {
     let s = raw.trim();
-    let today = now.to_zoned(tz.clone()).date();
+    let today = crate::zone::work_date(tz, now, day_end);
     if let Ok(at) = s.parse::<Timestamp>() {
         return Some(When::At(at));
     }
@@ -686,7 +687,7 @@ pub fn when(raw: &str, tz: &TimeZone, now: Timestamp) -> Option<When> {
     }
     let at = |date: Date, wall: &str| crate::zone::instant(tz, date, wall).map(When::At);
     if let Some(wall) = wall_time(s) {
-        let today_at = crate::zone::instant(tz, today, &wall)?;
+        let today_at = crate::zone::instant(tz, crate::zone::civil_date(today, &wall, day_end), &wall)?;
         if today_at > now {
             return Some(When::At(today_at));
         }
@@ -857,7 +858,7 @@ mod tests {
     fn moments_read_on_the_users_clock() {
         let tz = TimeZone::get("Asia/Tokyo").unwrap();
         let now: Timestamp = "2026-10-20T03:00:00Z".parse().unwrap();
-        let at = |s: &str| match when(s, &tz, now) {
+        let at = |s: &str| match when(s, &tz, "00:00", now) {
             Some(When::At(t)) => t.to_string(),
             other => format!("{other:?}"),
         };
@@ -869,9 +870,24 @@ mod tests {
         assert_eq!(at("21時"), "2026-10-20T12:00:00Z");
         assert_eq!(at("+20min"), "2026-10-20T03:20:00Z");
         assert_eq!(at("11/6 17:00"), "2026-11-06T08:00:00Z");
-        assert_eq!(when("11/6", &tz, now), Some(When::Day(d("2026-11-06"))));
-        assert_eq!(when("whenever", &tz, now), None);
-        assert_eq!(when("+17", &tz, now), None, "a bare count names no unit");
+        assert_eq!(when("11/6", &tz, "00:00", now), Some(When::Day(d("2026-11-06"))));
+        assert_eq!(when("whenever", &tz, "00:00", now), None);
+        assert_eq!(when("+17", &tz, "00:00", now), None, "a bare count names no unit");
+    }
+
+    #[test]
+    fn a_day_past_midnight_reads_its_words_from_the_day_before() {
+        let tz = TimeZone::UTC;
+        let now: Timestamp = "2026-10-21T01:00:00Z".parse().unwrap();
+        let d = |s: &str| s.parse::<Date>().unwrap();
+        assert_eq!(when("tomorrow", &tz, "03:00", now), Some(When::Day(d("2026-10-21"))), "still the 20th's day");
+        assert_eq!(when("tomorrow", &tz, "00:00", now), Some(When::Day(d("2026-10-22"))));
+        let at = |raw: &str| match when(raw, &tz, "03:00", now) {
+            Some(When::At(t)) => t.to_string(),
+            other => format!("{other:?}"),
+        };
+        assert_eq!(at("02:00"), "2026-10-21T02:00:00Z", "the small hours ahead tonight");
+        assert_eq!(at("23:00"), "2026-10-21T23:00:00Z", "the 20th's 23:00 is gone, so the 21st's");
     }
 
     #[test]

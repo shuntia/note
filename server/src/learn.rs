@@ -2,9 +2,8 @@ use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
 pub const PLAN_FACTOR: &str = "plan_factor";
-/// The stretch of finished work one run reads, and the shortest run it counts:
-/// a couple of minutes says nothing about how long the work takes.
-const WINDOW_HOURS: i64 = 14 * 24;
+/// The shortest run counted: a couple of minutes says nothing about how long
+/// the work takes.
 const MIN_RUN_MIN: i64 = 5;
 const MIN_SAMPLE: usize = 3;
 const FLOOR: f64 = 0.5;
@@ -47,11 +46,11 @@ fn median(values: &mut [f64]) -> f64 {
     }
 }
 
-/// Elapsed over planned for every session in the window that finished what it
-/// set out to do and ran long enough to be told from a false start.
-fn ratios(conn: &Connection, user_id: i64, now: jiff::Timestamp) -> rusqlite::Result<Vec<f64>> {
+/// Elapsed over planned for every session in the last `window_days` that
+/// finished what it set out to do and ran long enough to be told from a false start.
+fn ratios(conn: &Connection, user_id: i64, window_days: i64, now: jiff::Timestamp) -> rusqlite::Result<Vec<f64>> {
     let since = now
-        .checked_sub(jiff::Span::new().hours(WINDOW_HOURS))
+        .checked_sub(jiff::Span::new().hours(window_days * 24))
         .unwrap_or(jiff::Timestamp::MIN);
     let mut stmt = conn.prepare(
         "SELECT planned_min, started_at, ended_at, paused_ms FROM work_sessions
@@ -82,10 +81,14 @@ fn ratios(conn: &Connection, user_id: i64, now: jiff::Timestamp) -> rusqlite::Re
     Ok(out)
 }
 
-/// Turns the sessions that ended into what the planner should assume; the
-/// nightly runs it before it plans.
-pub fn run_for_user(conn: &Connection, user_id: i64, now: jiff::Timestamp) -> Result<()> {
-    let mut ratios = ratios(conn, user_id, now)?;
+/// Turns the sessions that ended in the last `window_days` into what the
+/// planner should assume; the nightly runs it before it plans. With learning
+/// off (`None`) the planner assumes nothing.
+pub fn run_for_user(conn: &Connection, user_id: i64, window_days: Option<i64>, now: jiff::Timestamp) -> Result<()> {
+    let mut ratios = match window_days {
+        Some(days) => ratios(conn, user_id, days, now)?,
+        None => Vec::new(),
+    };
     if ratios.len() < MIN_SAMPLE {
         conn.execute(
             "DELETE FROM learning WHERE user_id = ?1 AND key = ?2",
@@ -147,7 +150,7 @@ mod tests {
         session(&conn, uid, 30, 30, 1);
         session(&conn, uid, 30, 45, 2);
         session(&conn, uid, 30, 150, 3);
-        run_for_user(&conn, uid, now()).unwrap();
+        run_for_user(&conn, uid, Some(14), now()).unwrap();
         let learned = plan_factor(&conn, uid).unwrap().unwrap();
         assert_eq!(learned, Learned { value: 1.5, sample: 3 }, "the outlier moves the order, not the value");
     }
@@ -159,7 +162,7 @@ mod tests {
         session(&conn, uid, 30, 30, 2);
         session(&conn, uid, 30, 60, 3);
         session(&conn, uid, 30, 60, 4);
-        run_for_user(&conn, uid, now()).unwrap();
+        run_for_user(&conn, uid, Some(14), now()).unwrap();
         assert!((plan_factor(&conn, uid).unwrap().unwrap().value - 1.5).abs() < 1e-9);
     }
 
@@ -169,14 +172,14 @@ mod tests {
         for d in 1..=3 {
             session(&conn, uid, 10, 120, d);
         }
-        run_for_user(&conn, uid, now()).unwrap();
+        run_for_user(&conn, uid, Some(14), now()).unwrap();
         assert!((plan_factor(&conn, uid).unwrap().unwrap().value - CEILING).abs() < 1e-9);
 
         let (conn, uid) = env();
         for d in 1..=3 {
             session(&conn, uid, 120, 6, d);
         }
-        run_for_user(&conn, uid, now()).unwrap();
+        run_for_user(&conn, uid, Some(14), now()).unwrap();
         assert!((plan_factor(&conn, uid).unwrap().unwrap().value - FLOOR).abs() < 1e-9);
     }
 
@@ -185,7 +188,7 @@ mod tests {
         let (conn, uid) = env();
         session(&conn, uid, 30, 45, 1);
         session(&conn, uid, 30, 45, 2);
-        run_for_user(&conn, uid, now()).unwrap();
+        run_for_user(&conn, uid, Some(14), now()).unwrap();
         assert!(plan_factor(&conn, uid).unwrap().is_none());
     }
 
@@ -195,9 +198,9 @@ mod tests {
         for d in 1..=3 {
             session(&conn, uid, 30, 45, d);
         }
-        run_for_user(&conn, uid, now()).unwrap();
+        run_for_user(&conn, uid, Some(14), now()).unwrap();
         assert!(plan_factor(&conn, uid).unwrap().is_some());
-        run_for_user(&conn, uid, now() + jiff::Span::new().hours(20 * 24)).unwrap();
+        run_for_user(&conn, uid, Some(14), now() + jiff::Span::new().hours(20 * 24)).unwrap();
         assert!(plan_factor(&conn, uid).unwrap().is_none());
     }
 
@@ -219,7 +222,7 @@ mod tests {
             [uid],
         )
         .unwrap();
-        run_for_user(&conn, uid, now()).unwrap();
+        run_for_user(&conn, uid, Some(14), now()).unwrap();
         assert!(plan_factor(&conn, uid).unwrap().is_none(), "only two sessions count");
     }
 
@@ -230,7 +233,7 @@ mod tests {
             session(&conn, uid, 30, 60, d);
         }
         conn.execute("UPDATE work_sessions SET paused_ms = 30 * 60000", []).unwrap();
-        run_for_user(&conn, uid, now()).unwrap();
+        run_for_user(&conn, uid, Some(14), now()).unwrap();
         assert!((plan_factor(&conn, uid).unwrap().unwrap().value - 1.0).abs() < 1e-9);
     }
 
@@ -241,7 +244,7 @@ mod tests {
         for d in 1..=3 {
             session(&conn, uid, 30, 60, d);
         }
-        run_for_user(&conn, other, now()).unwrap();
+        run_for_user(&conn, other, Some(14), now()).unwrap();
         assert!(plan_factor(&conn, other).unwrap().is_none());
     }
 

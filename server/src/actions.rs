@@ -105,7 +105,7 @@ pub fn perform(
         }
         ["carry", date] => {
             let date: jiff::civil::Date = date.parse().map_err(|_| Refused::Unknown)?;
-            let today = now.to_zoned(crate::triggers::timezone(config_dir, username)).date();
+            let today = crate::zone::today(config_dir, username, now);
             if date < today {
                 return Err(Refused::Settled);
             }

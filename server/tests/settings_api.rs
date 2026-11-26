@@ -604,3 +604,34 @@ async fn a_zone_change_keeps_pending_checks_at_their_instant() {
     assert_eq!(placed(agent), (day.clone(), "20:00".to_string()));
     assert_eq!(placed(template), (day, "21:30".to_string()));
 }
+
+#[tokio::test]
+async fn tuning_reads_the_shipped_values_and_saves_only_what_is_in_range() {
+    let (app, cookie, cfg) = common::app_with_logged_in_user().await;
+    let v = json(app.clone().oneshot(get(&cookie)).await.unwrap()).await;
+    assert!(v["day_start"].is_string());
+    assert_eq!(v["tuning"]["day_end"], "00:00");
+    assert_eq!(v["tuning"]["overrun_ask_pct"], 150);
+    assert_eq!(v["tuning"]["review_day"], "mon");
+    assert_eq!(v["tuning"]["calendar_quiet"], true);
+
+    let body = r#"{"day_start":"07:30","tuning":{"day_end":"03:00","ring_secs":45,"patience":"patient"}}"#;
+    let res = app.clone().oneshot(put(&cookie, body)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = json(res).await;
+    assert_eq!((v["day_start"].as_str(), v["tuning"]["day_end"].as_str()), (Some("07:30"), Some("03:00")));
+    assert_eq!(v["tuning"]["ring_secs"], 45);
+    let saved = std::fs::read_to_string(cfg.path().join("users/aki/user.toml")).unwrap();
+    assert!(saved.contains("[tuning]") && saved.contains("ring_secs = 45"), "{saved}");
+
+    let res = app.clone().oneshot(put(&cookie, r#"{"tuning":{"ring_secs":500}}"#)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json(res).await["error"], "tuning.ring_secs must be 10 to 120");
+    let res = app.clone().oneshot(put(&cookie, r#"{"tuning":{"day_end":"08:00"}}"#)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let res = app.clone().oneshot(put(&cookie, r#"{"tuning":{"bogus":1}}"#)).await.unwrap();
+    assert!(res.status().is_client_error());
+
+    let v = json(app.oneshot(get(&cookie)).await.unwrap()).await;
+    assert_eq!(v["tuning"]["ring_secs"], 45);
+}

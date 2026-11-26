@@ -15,9 +15,8 @@ const MAX_REASONING_BYTES: usize = 32 * 1024;
 pub const MAX_MESSAGE: usize = 16 * 1024;
 // History windows stay user-first/assistant-last: a turn writes its user row as it
 // starts and its assistant row as it ends, and a failed turn takes its rows back.
-pub const HISTORY_LIMIT: usize = 32;
-/// A talk turn's window starts on a multiple of this, so it holds between
-/// `HISTORY_LIMIT` and `HISTORY_LIMIT + HISTORY_STEP - 1` turns and its first
+/// A talk turn's window starts on a multiple of this, so it holds between the
+/// user's `history_limit` and `history_limit + HISTORY_STEP - 1` turns and its first
 /// rows stay put for `HISTORY_STEP` turns: the provider's prompt cache serves
 /// them instead of billing the replay again. Even, so a window opens on a user row.
 pub const HISTORY_STEP: usize = 16;
@@ -395,15 +394,15 @@ pub fn history_after(
     Ok(msgs)
 }
 
-/// The first of `turns` text turns a talk turn's window replays.
-pub fn window_start(turns: usize) -> usize {
-    turns.saturating_sub(HISTORY_LIMIT) / HISTORY_STEP * HISTORY_STEP
+/// The first of `turns` text turns a talk turn's window of `limit` replays.
+pub fn window_start(turns: usize, limit: usize) -> usize {
+    turns.saturating_sub(limit) / HISTORY_STEP * HISTORY_STEP
 }
 
 /// A talk turn's history: the text turns from `window_start` on, oldest-first.
-pub fn talk_history(conn: &Connection, conversation_id: i64) -> Result<Vec<Message>> {
+pub fn talk_history(conn: &Connection, conversation_id: i64, limit: usize) -> Result<Vec<Message>> {
     let turns = text_turns(conn, conversation_id)?;
-    history(conn, conversation_id, turns - window_start(turns))
+    history(conn, conversation_id, turns - window_start(turns, limit))
 }
 
 /// How many turns `history` has to choose from: past the window the oldest
@@ -904,6 +903,7 @@ async fn turn(
     }
     let mut notes: Vec<String> = Vec::new();
     let lang = Lang::for_user(&state.config_dir, username);
+    let history_limit = crate::tuning::of(&state.config_dir, username).history_limit() as usize;
     if let Some(id) = conversation {
         let conn = state.db();
         match owned(&conn, user_id, id) {
@@ -916,7 +916,7 @@ async fn turn(
             Ok(None) => {}
             Err(_) => return Err(TurnError::Internal),
         }
-        if window_start(text_turns(&conn, id).unwrap_or(0)) > 0 {
+        if window_start(text_turns(&conn, id).unwrap_or(0), history_limit) > 0 {
             if let Ok(Some((summary, _))) = summary(&conn, id) {
                 notes.push(mt::summary_thread_note(lang, &summary));
             }
@@ -960,7 +960,7 @@ async fn turn(
                 anyhow::ensure!(owned(&conn, user_id, id)?, "the conversation was deleted before the turn began");
             }
             let past = match conversation {
-                Some(id) => talk_history(&conn, id)?,
+                Some(id) => talk_history(&conn, id, history_limit)?,
                 None => Vec::new(),
             };
             let conv_id = if let Some(id) = conversation {
@@ -1200,13 +1200,14 @@ mod tests {
 
     #[test]
     fn the_window_start_moves_only_every_step() {
-        assert_eq!(window_start(0), 0);
-        assert_eq!(window_start(HISTORY_LIMIT + HISTORY_STEP - 1), 0);
-        assert_eq!(window_start(HISTORY_LIMIT + HISTORY_STEP), HISTORY_STEP);
-        assert_eq!(window_start(HISTORY_LIMIT + 2 * HISTORY_STEP - 1), HISTORY_STEP);
+        const LIMIT: usize = 32;
+        assert_eq!(window_start(0, LIMIT), 0);
+        assert_eq!(window_start(LIMIT + HISTORY_STEP - 1, LIMIT), 0);
+        assert_eq!(window_start(LIMIT + HISTORY_STEP, LIMIT), HISTORY_STEP);
+        assert_eq!(window_start(LIMIT + 2 * HISTORY_STEP - 1, LIMIT), HISTORY_STEP);
         for turns in 0..200 {
-            let kept = turns - window_start(turns);
-            assert!(kept == turns || (HISTORY_LIMIT..HISTORY_LIMIT + HISTORY_STEP).contains(&kept), "{turns}");
+            let kept = turns - window_start(turns, LIMIT);
+            assert!(kept == turns || (LIMIT..LIMIT + HISTORY_STEP).contains(&kept), "{turns}");
         }
     }
 

@@ -12,7 +12,6 @@ use serde_json::{json, Map, Value};
 
 /// How far ahead a task may be placed.
 const MAX_DAYS_AHEAD: i64 = 14;
-const DEFAULT_BLOCK_MIN: i64 = 25;
 const MAX_FIND_DAYS: i64 = 7;
 const LISTED_WAKES: usize = 20;
 const MAX_WAKES_FOUND: usize = 100;
@@ -41,6 +40,10 @@ const ITEM_FIELDS: &[&str] = &["task", "task_id", "wake", "prompt", "routine", "
 
 fn internal(e: impl std::fmt::Display) -> ToolError {
     ToolError::internal(e.to_string())
+}
+
+fn clock(ctx: &ToolCtx) -> crate::zone::Clock {
+    crate::zone::Clock::load(ctx.config_dir, ctx.username)
 }
 
 fn tz(ctx: &ToolCtx) -> jiff::tz::TimeZone {
@@ -141,6 +144,19 @@ fn event(conn: &Connection, user_id: i64, id: i64) -> Result<Option<EventRow>, T
     .map_err(internal)
 }
 
+fn near_min(ctx: &ToolCtx) -> i64 {
+    i64::from(crate::config::UserConfig::load(ctx.config_dir, ctx.username).map(|c| c.tuning).unwrap_or_default().near_min())
+}
+
+/// The length a block takes when its task names none.
+fn default_block_min(ctx: &ToolCtx) -> i64 {
+    match crate::config::UserConfig::load(ctx.config_dir, ctx.username) {
+        Ok(cfg) if cfg.tuning.block_follows_pomodoro() => i64::from(cfg.pomodoro_work_min()),
+        Ok(cfg) => i64::from(cfg.tuning.block_min()),
+        Err(_) => i64::from(crate::tuning::Tuning::default().block_min()),
+    }
+}
+
 /// A day the model named, or why it could not be read.
 fn day_arg(v: &Value, today: Date) -> Result<Date, String> {
     let raw = loose::text(v).unwrap_or_default();
@@ -162,7 +178,7 @@ pub fn find(conn: &Connection, ctx: &ToolCtx, kind: SessionKind, raw: &str) -> R
     let mut o = Obj::new(loose::args(raw)?);
     let now = jiff::Timestamp::now();
     let tz = tz(ctx);
-    let today = now.to_zoned(tz.clone()).date();
+    let today = clock(ctx).today(now);
     let mut warnings = Vec::new();
     let mut date = super::trigger_ops::target_date(ctx, kind, now);
     if let Some(v) = o.take(&["date", "day", "on", "from"]) {
@@ -425,6 +441,7 @@ struct Day<'a> {
     tz: jiff::tz::TimeZone,
     now: jiff::Timestamp,
     today: Date,
+    day_end: String,
     env: Envelope,
     /// The running work session's leaf and everything above it, for a wake-up.
     held: Vec<i64>,
@@ -441,7 +458,8 @@ impl<'a> Day<'a> {
         } else {
             Vec::new()
         };
-        Ok(Self { conn, ctx, kind, today: now.to_zoned(tz.clone()).date(), tz, now, env: Envelope::default(), held, touched: Vec::new() })
+        let clock = clock(ctx);
+        Ok(Self { conn, ctx, kind, today: clock.today(now), day_end: clock.day_end, tz, now, env: Envelope::default(), held, touched: Vec::new() })
     }
 
     fn ignore(&mut self, r: &Ref, field: &str, why: impl Into<String>) {
@@ -456,11 +474,14 @@ impl<'a> Day<'a> {
 
     fn now_min(&self) -> i64 {
         let z = self.now.to_zoned(self.tz.clone());
-        i64::from(z.hour()) * 60 + i64::from(z.minute())
+        let civil = i64::from(z.hour()) * 60 + i64::from(z.minute());
+        if z.date() > self.today { civil + 24 * 60 } else { civil }
     }
 
     fn gone_by(&self, date: Date, at: &str) -> bool {
-        date < self.today || (date == self.today && minutes_of(at) < self.now_min())
+        let z = self.now.to_zoned(self.tz.clone());
+        let now_min = i64::from(z.hour()) * 60 + i64::from(z.minute());
+        date < z.date() || (date == z.date() && minutes_of(at) < now_min)
     }
 
     /// An `at` read on `date`, in `zone` when one was named; `None` with the
@@ -484,14 +505,14 @@ impl<'a> Day<'a> {
             match zone {
                 Some(there) => crate::zone::translate(day, &clock, there, &self.tz)
                     .map_or_else(|| At::Wall(day, clock.clone()), |(d, w)| At::Wall(d, w)),
-                None => At::Wall(day, clock),
+                None => At::Wall(crate::zone::civil_date(day, &clock, &self.day_end), clock),
             }
         };
         if let Some(clock) = loose::wall_time(text) {
             return Ok(place(date, clock));
         }
         let read_tz = zone.cloned().unwrap_or_else(|| self.tz.clone());
-        match loose::when(text, &read_tz, self.now) {
+        match loose::when(text, &read_tz, &self.day_end, self.now) {
             Some(When::At(moment)) => {
                 let (day, clock) = crate::zone::civil(moment, &self.tz);
                 Ok(At::Wall(day, clock))
@@ -646,7 +667,7 @@ impl<'a> Day<'a> {
 
     fn block_len(&self, size: Option<u32>) -> Result<i64, ToolError> {
         let factor = crate::learn::plan_factor(self.conn, self.ctx.user_id).map_err(internal)?;
-        Ok(crate::learn::stretch(size.map_or(DEFAULT_BLOCK_MIN, i64::from), factor))
+        Ok(crate::learn::stretch(size.map_or_else(|| default_block_min(self.ctx), i64::from), factor))
     }
 
     /// Lays or reshapes the block of `task_id` on `date`, returning its event.
@@ -953,7 +974,7 @@ impl<'a> Day<'a> {
             now: self.now,
         };
         let near = match triggers::aimed_at(&lay) {
-            Ok(target) => triggers::near(self.conn, self.ctx.user_id, &self.tz, target, thread, None).map_err(internal)?,
+            Ok(target) => triggers::near(self.conn, self.ctx.user_id, &self.tz, near_min(self.ctx), target, thread, None).map_err(internal)?,
             Err(_) => None,
         };
         if let Some(twin) = near.as_ref().filter(|n| n.apart == 0 && n.conversation_id == thread) {
@@ -1044,7 +1065,7 @@ impl<'a> Day<'a> {
                         .conn
                         .query_row("SELECT conversation_id FROM events WHERE id = ?1", [e.id], |x| x.get(0))
                         .map_err(internal)?;
-                    triggers::near(self.conn, self.ctx.user_id, &self.tz, target, thread, Some(e.id))
+                    triggers::near(self.conn, self.ctx.user_id, &self.tz, near_min(self.ctx), target, thread, Some(e.id))
                         .map_err(internal)?
                         .filter(|n| n.apart == 0 && n.conversation_id == thread)
                 }
@@ -1643,7 +1664,7 @@ pub fn wake_find(conn: &Connection, ctx: &ToolCtx, raw: &str) -> Result<Value, T
     super::task_query::unscoped(ctx)?;
     let o = Obj::new(loose::args(raw)?);
     let mut warnings: Vec<String> = o.rest().into_iter().map(|f| format!("{f} is not a wake_find field")).collect();
-    let today = jiff::Timestamp::now().to_zoned(tz(ctx)).date();
+    let today = clock(ctx).today(jiff::Timestamp::now());
     let mut stmt = conn
         .prepare_cached(
             "SELECT e.id, p.date, e.wall_time, e.prompt, e.status, e.channel, e.cancel_if, e.conversation_id, e.work_session_id,
@@ -2277,7 +2298,7 @@ mod tests {
         let (late, soon) = (task(&conn, &tmp, json!({ "title": "late" })), task(&conn, &tmp, json!({ "title": "soon" })));
         talk(&conn, &tmp, "day_save", json!({ "items": [{ "task": late, "at": "20:00" }, soon] }));
         let tz = crate::triggers::midday_zone();
-        let offered = crate::order::candidates(&conn, 1, &tz, jiff::Timestamp::now(), 5).unwrap();
+        let offered = crate::order::candidates(&conn, 1, &crate::zone::Clock { tz: tz.clone(), day_end: "00:00".into() }, 10, jiff::Timestamp::now(), 5).unwrap();
         assert_eq!(offered[0].task.task.id, soon);
         assert!(offered.iter().all(|e| e.reason != "order" || e.task.task.id != late));
     }
