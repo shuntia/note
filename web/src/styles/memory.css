@@ -12,7 +12,7 @@
   align-items: flex-start;
   gap: 0.625rem;
   width: 100%;
-  padding: 0.75rem 0.875rem;
+  padding: calc(0.75rem * var(--dense)) 0.875rem;
   border: 0;
   border-radius: 0.875rem;
   background: none;
@@ -213,7 +213,7 @@
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-@media (prefers-reduced-motion: no-preference) {
+:where(:root:not([data-motion='reduced'])) {
   .inbox-refresh[aria-busy='true'] svg { transform-origin: 50% 50%; animation: spin 1s linear infinite; }
 }
 .inbox-when { font-size: 0.75rem; color: var(--faint); font-variant-numeric: tabular-nums; }
@@ -274,6 +274,6 @@
   .memory-title { font-size: 1.5rem; }
 }
 
-@media (prefers-reduced-motion: reduce) {
+:where([data-motion='reduced']) {
   .memory-row, .memory-back svg, .inbox-refresh { transition: none; }
 }

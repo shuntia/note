@@ -6,8 +6,8 @@
     <meta name="theme-color" content="#f0e8de" />
     <!--
       Pre-paint theme, ahead of the stylesheet Vite injects below: without this the page
-      paints light before the bundle lands. The keys and choices mirror src/theme.ts,
-      which cannot be imported here; under Sky, note.sky holds the last painted palette.
+      paints light before the bundle lands. The keys and choices mirror src/theme.ts and
+      src/appearance.ts, which cannot be imported here; under Sky, note.sky holds the last painted palette.
       theme.ts keeps the theme-color meta above in step.
     -->
     <script>
@@ -29,6 +29,17 @@
         }
       } catch (e) {
         /* storage blocked; follow the system scheme */
+      }
+      var look = {}
+      try {
+        look = JSON.parse(localStorage.getItem('note.appearance') || '{}') || {}
+      } catch (e) {}
+      var root = document.documentElement
+      if (look.font && look.font !== 'atkinson') root.setAttribute('data-font', look.font)
+      if (look.text && look.text !== 'normal') root.setAttribute('data-text', look.text)
+      if (look.density === 'compact') root.setAttribute('data-density', 'compact')
+      if (look.motion === 'reduced' || (look.motion !== 'full' && matchMedia('(prefers-reduced-motion: reduce)').matches)) {
+        root.setAttribute('data-motion', 'reduced')
       }
     </script>
     <!-- A bundle that fails to load (a shell left over from an earlier deploy) reloads once, not to a blank page. -->

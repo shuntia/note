@@ -1,10 +1,10 @@
 import gsap from 'gsap'
+import { reducedMotion as still } from './motion'
 import { beadAt, C, SPAN } from './circle'
 
 // Every effect takes the face (the 320 box holding `.arc svg`); fill and track are its two circles.
 
 const NS = 'http://www.w3.org/2000/svg'
-const still = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches
 const svgOf = (face: Element) => face.querySelector<SVGSVGElement>('.arc svg')
 const homeOf = (face: Element) => face.closest<HTMLElement>('.home')
 

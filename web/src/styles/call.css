@@ -99,7 +99,7 @@
   80% { transform: translateX(3px); }
 }
 
-@media (prefers-reduced-motion: reduce) {
+:where([data-motion='reduced']) {
   .call-view { animation: none; }
   .call-view.gone { animation-duration: 150ms; }
   .call-view.shake .call-circle { animation: none; }

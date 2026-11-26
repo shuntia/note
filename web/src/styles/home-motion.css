@@ -65,7 +65,7 @@
   .topbar > * { transition: opacity 0.25s ease; }
   html.idle .topbar:not(:hover):not(:focus-within) > * { opacity: 0.35; transition-duration: 0.6s; }
 }
-@media (prefers-reduced-motion: reduce) {
+:where([data-motion='reduced']) {
   .topbar > * { transition: none; }
 }
 
@@ -109,8 +109,8 @@ html.in-session.idle :is(.circle-face .bead, .strip .slot:not(.now), .slot.now :
 html.in-session.waking :is(.circle-face .bead, .strip .slot:not(.now), .slot.now :is(.mark, .parent), .strip-dots, .face-hint, .face-stop, .face-pop, .face-big .chev, .topbar, .shell > .tabs, .handle) {
   transition: opacity 200ms ease, visibility 0s !important;
 }
-@media (prefers-reduced-motion: reduce) {
-  html.in-session:is(.idle, .waking) :is(.circle-face .bead, .strip .slot:not(.now), .slot.now :is(.mark, .parent), .strip-dots, .face-hint, .face-stop, .face-pop, .face-big .chev, .topbar, .shell > .tabs, .handle) {
+:where([data-motion='reduced']) {
+  &.in-session:is(.idle, .waking) :is(.circle-face .bead, .strip .slot:not(.now), .slot.now :is(.mark, .parent), .strip-dots, .face-hint, .face-stop, .face-pop, .face-big .chev, .topbar, .shell > .tabs, .handle) {
     transition: none !important;
   }
 }

@@ -1,7 +1,7 @@
 import gsap from 'gsap'
+import { reducedMotion as still } from './motion'
 import { waveDelays } from './wave'
 
-const still = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
 type Target = Element | null | undefined
 
