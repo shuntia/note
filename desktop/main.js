@@ -610,8 +610,10 @@ ipcMain.on('launcher:hide', (event) => {
 
 ipcMain.on('launcher:resize', (event, height) => {
   if (!fromLauncher(event)) return
-  const bounds = launcherWin.getBounds()
-  launcherWin.setBounds({ ...bounds, height: launcherHeight(height) })
+  const { x, y, width, height: now } = launcherWin.getBounds()
+  const next = launcherHeight(height)
+  if (width === LAUNCHER_WIDTH && now === next) return
+  launcherWin.setBounds({ x, y, width: LAUNCHER_WIDTH, height: next })
 })
 
 // The thread a launcher answer belongs to opens in the main window.

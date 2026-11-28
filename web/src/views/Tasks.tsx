@@ -339,9 +339,12 @@ const RELOAD_MS = 150
 
 // Rows that were already there slide from where they were; rows that are new settle
 // in. While a row folds away it drives the layout itself, so the FLIP stands down and
-// `mark` takes the snapshot the next pass compares against.
-function useRowMotion(root: RefObject<HTMLDivElement | null>, busy: boolean) {
+// `mark` takes the snapshot the next pass compares against. A render that draws the
+// same rows from the same data measures nothing, and a row off screen both before and
+// after its move is left to jump.
+function useRowMotion(root: RefObject<HTMLDivElement | null>, busy: boolean, data: unknown) {
   const tops = useRef<Map<string, DOMRect> | null>(null)
+  const seen = useRef<{ keys: string; data: unknown } | null>(null)
 
   const read = useCallback(() => {
     const at = new Map<string, DOMRect>()
@@ -353,28 +356,37 @@ function useRowMotion(root: RefObject<HTMLDivElement | null>, busy: boolean) {
       at.set(key, new DOMRect(r.left - (base?.left ?? 0), r.top - (base?.top ?? 0), r.width, r.height))
       els.set(key, el)
     })
-    return { at, els }
+    return { at, els, base }
   }, [root])
 
   // Called with a folded row at zero height, so rows that already slid up are not
   // moved again by the pass that follows its removal.
   const mark = useCallback(() => {
     tops.current = read().at
+    seen.current = null
   }, [read])
 
   useLayoutEffect(() => {
     if (busy || root.current?.querySelector('[data-dragging]')) return
-    const { at, els } = read()
+    const keys = [...(root.current?.querySelectorAll<HTMLElement>('[data-row]') ?? [])]
+      .map((el) => el.dataset.row)
+      .join(' ')
+    if (seen.current?.keys === keys && seen.current.data === data) return
+    seen.current = { keys, data }
+    const { at, els, base } = read()
     const was = tops.current
     tops.current = at
     if (was === null) return settle([...els.values()])
+    const offset = base?.top ?? 0
+    const offScreen = (top: number, height: number) => top + height < 0 || top > window.innerHeight
     const moves: { el: Element; dx: number; dy: number }[] = []
     const fresh: Element[] = []
     for (const [key, el] of els) {
       const before = was.get(key)
       const now = at.get(key) as DOMRect
       if (before === undefined) fresh.push(el)
-      else moves.push({ el, dx: before.left - now.left, dy: before.top - now.top })
+      else if (!offScreen(offset + now.top, now.height) || !offScreen(offset + before.top, before.height))
+        moves.push({ el, dx: before.left - now.left, dy: before.top - now.top })
     }
     flip(moves)
     settle(fresh)
@@ -382,6 +394,11 @@ function useRowMotion(root: RefObject<HTMLDivElement | null>, busy: boolean) {
 
   return { mark }
 }
+
+// A task added here keeps the motion key it was drawn with before the server named
+// it, so the answer does not redraw its row as a new one.
+const born = new Map<number, number>()
+const rowKey = (id: number) => born.get(id) ?? id
 
 // Dragging the bar fires all the way along; the write waits for the hand to settle.
 const PROGRESS_SETTLE_MS = 400
@@ -427,7 +444,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
   const seeded = useRef(false)
   const unfinished = useRef(new Map<number, number>())
   const root = useRef<HTMLDivElement>(null)
-  const { mark } = useRowMotion(root, !columns && leaving.length > 0)
+  const { mark } = useRowMotion(root, !columns && leaving.length > 0, nodes)
   // The list follows the box a beat behind, so typing never waits on the rows.
   const query = useDeferredValue(title)
   const shown = useMemo(
@@ -808,6 +825,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
       .addTask(text, { ...(is_now && { is_now: true }), ...(category !== '' && { category }) })
       .then((t) => {
         created = t
+        born.set(t.id, temp)
         if (undone) {
           void patch(t.id, { state: 'dropped' })
           return
@@ -959,7 +977,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
 
   const row = (p: Placed, group: Exclude<Group, 'done'>, drag = false, headed = false) => (
     <Row
-      key={p.node.id}
+      key={rowKey(p.node.id)}
       node={p.node}
       group={group}
       actions={actions}
@@ -1143,7 +1161,7 @@ export function Tasks({ notify, refresh, openNow }: ViewProps) {
             <div className="task-list">
               {doneToday.map((n) => (
                 <Row
-                  key={n.id}
+                  key={rowKey(n.id)}
                   node={n}
                   group="done"
                   actions={actions}
@@ -1605,7 +1623,7 @@ const Row = memo(function Row({
     <div
       className="task-item"
       ref={item}
-      data-row={`${done ? 'd' : 't'}${scope}${node.id}`}
+      data-row={`${done ? 'd' : 't'}${scope}${rowKey(node.id)}`}
       data-leaving={leaving ?? undefined}
       data-finished={finished || undefined}
       data-drag={drag || undefined}
